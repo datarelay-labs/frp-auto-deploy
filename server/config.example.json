@@ -1,0 +1,13 @@
+{
+  "public_ip": "221.139.249.110",
+  "control_port": 443,
+  "port_start": 6000,
+  "port_end": 6098,
+  "listen_host": "0.0.0.0",
+  "listen_port": 6099,
+  "allocator_public_url": "http://221.139.249.110/enroll",
+  "registry_file": "/var/lib/frp-auto-deploy/registry.json",
+  "enrollments_dir": "/var/lib/frp-auto-deploy/enrollments",
+  "token_file": "/etc/frp/server_token",
+  "client_installer_url": ""
+}

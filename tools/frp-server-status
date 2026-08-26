@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+echo '=== frps ==='
+systemctl --no-pager --full status frps 2>/dev/null | sed -n '1,12p' || true
+echo
+echo '=== allocator ==='
+systemctl --no-pager --full status frp-port-allocator 2>/dev/null | sed -n '1,12p' || true
+echo
+echo '=== listeners ==='
+if [[ -r /etc/frp-auto-deploy/config.json ]]; then
+  python3 - <<'PY'
+import json,subprocess
+c=json.load(open('/etc/frp-auto-deploy/config.json'))
+print(f"Control: {c['control_port']}")
+print(f"Services: {c['port_start']}-{c['port_end']}")
+print(f"Allocator internal: {c['listen_port']}")
+PY
+fi

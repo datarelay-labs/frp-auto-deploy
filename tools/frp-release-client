@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+import argparse, json, socket, tempfile, os
+from pathlib import Path
+
+p=argparse.ArgumentParser(description='Release a client record and its reserved ports')
+p.add_argument('query', help='hostname or machine-id prefix')
+p.add_argument('--force', action='store_true', help='release even if SSH port is currently active')
+a=p.parse_args()
+
+cfg=json.loads(Path('/etc/frp-auto-deploy/config.json').read_text())
+path=Path(cfg['registry_file'])
+state=json.loads(path.read_text())
+matches=[]
+for mid,c in state.get('clients',{}).items():
+    if mid.startswith(a.query) or c.get('hostname')==a.query:
+        matches.append((mid,c))
+if len(matches)!=1:
+    raise SystemExit('Expected exactly one matching client')
+mid,c=matches[0]
+
+def active(port):
+    if not port: return False
+    s=socket.socket(); s.settimeout(.3)
+    try: return s.connect_ex(('127.0.0.1',int(port)))==0
+    finally: s.close()
+
+if active(c.get('ssh_port')) and not a.force:
+    raise SystemExit('Client appears online. Uninstall/stop frpc first, or use --force.')
+
+print(f'Releasing {c.get("hostname")} ({mid})')
+print(f'SSH port: {c.get("ssh_port")}')
+print(f'HTTPS port: {c.get("https_port") or "-"}')
+answer=input('Type RELEASE to continue: ')
+if answer!='RELEASE':
+    raise SystemExit('Cancelled')
+state['clients'].pop(mid)
+fd,tmp=tempfile.mkstemp(prefix='registry.',suffix='.tmp',dir=str(path.parent))
+with os.fdopen(fd,'w') as f:
+    json.dump(state,f,indent=2,sort_keys=True); f.write('\n'); f.flush(); os.fsync(f.fileno())
+os.chmod(tmp,0o600); os.replace(tmp,path)
+print('Released.')

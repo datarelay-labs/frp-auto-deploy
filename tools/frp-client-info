@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+import json, sys
+from pathlib import Path
+
+if len(sys.argv)!=2:
+    print(f'Usage: {sys.argv[0]} <hostname|machine-id-prefix>', file=sys.stderr); sys.exit(2)
+q=sys.argv[1]
+cfg=json.loads(Path('/etc/frp-auto-deploy/config.json').read_text())
+state=json.loads(Path(cfg['registry_file']).read_text())
+matches=[]
+for mid,c in state.get('clients',{}).items():
+    if mid.startswith(q) or c.get('hostname')==q:
+        matches.append((mid,c))
+if not matches:
+    print('Client not found', file=sys.stderr); sys.exit(1)
+if len(matches)>1:
+    print('Multiple clients matched; use a longer machine-id prefix', file=sys.stderr); sys.exit(1)
+mid,c=matches[0]
+print(f'Hostname: {c.get("hostname","")}')
+print(f'Machine ID: {mid}')
+print()
+print('SSH:')
+print(f'ssh -p {c["ssh_port"]} {c.get("ssh_user","root")}@{cfg["public_ip"]}')
+if c.get('https_enabled') and c.get('https_port'):
+    print()
+    print('HTTPS:')
+    print(f'https://{cfg["public_ip"]}:{c["https_port"]}')

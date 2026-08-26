@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+import json, socket
+from pathlib import Path
+
+CFG=Path('/etc/frp-auto-deploy/config.json')
+cfg=json.loads(CFG.read_text())
+reg=Path(cfg['registry_file'])
+state=json.loads(reg.read_text()) if reg.exists() else {'clients':{}}
+
+def active(port):
+    if not port: return False
+    s=socket.socket(); s.settimeout(0.25)
+    try:
+        return s.connect_ex(('127.0.0.1', int(port))) == 0
+    finally:
+        s.close()
+
+print(f'PUBLIC IP: {cfg["public_ip"]}')
+print()
+print(f'{"HOSTNAME":24} {"USER":12} {"SSH":6} {"HTTPS":6} {"STATE":8} HTTPS_TARGET')
+print('-'*92)
+for mid,c in sorted(state.get('clients',{}).items(), key=lambda kv:(kv[1].get('ssh_port') or 99999)):
+    ssh=c.get('ssh_port')
+    https=c.get('https_port') if c.get('https_enabled') else None
+    is_up=active(ssh)
+    state_txt='online' if is_up else 'offline'
+    print(f'{c.get("hostname","")[:24]:24} {c.get("ssh_user","root")[:12]:12} {str(ssh or "-"):6} {str(https or "-"):6} {state_txt:8} {c.get("https_ip","")}')

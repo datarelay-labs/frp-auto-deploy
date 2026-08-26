@@ -1,0 +1,19 @@
+name: lint
+on:
+  push:
+  pull_request:
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell syntax
+        run: |
+          git ls-files '*.sh' | xargs -r bash -n
+          bash -n tools/frp-server-status
+      - name: Python compile
+        run: |
+          python3 -m py_compile server/frp-port-allocator.py scripts/build-bundles.py
+          python3 -m py_compile tools/frp-create-client tools/frp-clients tools/frp-client-info tools/frp-release-client tools/frp-set-client-installer-url
+      - name: Build standalone bundles
+        run: ./scripts/build-bundles.sh

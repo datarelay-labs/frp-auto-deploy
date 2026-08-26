@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+import argparse, json, secrets, time
+from datetime import datetime, timezone
+from pathlib import Path
+
+CONFIG='/etc/frp-auto-deploy/config.json'
+
+def iso(ts):
+    return datetime.fromtimestamp(ts, timezone.utc).replace(microsecond=0).isoformat().replace('+00:00','Z')
+
+p=argparse.ArgumentParser(description='Create a short-lived FRP client enrollment code')
+p.add_argument('--ttl', type=int, default=600, help='TTL in seconds (default 600)')
+p.add_argument('--note', default='')
+a=p.parse_args()
+
+cfg=json.loads(Path(CONFIG).read_text())
+enroll_dir=Path(cfg['enrollments_dir'])
+enroll_dir.mkdir(parents=True, exist_ok=True)
+
+enrollment_id=secrets.token_hex(8)
+secret=secrets.token_hex(32)
+now=int(time.time())
+record={
+    'id': enrollment_id,
+    'secret': secret,
+    'created_at': iso(now),
+    'expires_at': now + a.ttl,
+    'expires_at_iso': iso(now+a.ttl),
+    'bound_machine_id': None,
+    'used_at': None,
+    'note': a.note,
+}
+path=enroll_dir/f'{enrollment_id}.json'
+path.write_text(json.dumps(record, indent=2, sort_keys=True)+'\n')
+path.chmod(0o600)
+
+print()
+print('Enrollment Code:')
+print(f'{enrollment_id}.{secret}')
+print()
+print(f'Expires: {record["expires_at_iso"]} ({a.ttl} seconds)')
+url=cfg.get('client_installer_url','').strip()
+if url:
+    print()
+    print('Client install:')
+    print(f'curl -fsSL {url} | sudo bash')
+print()
