@@ -24,9 +24,18 @@ MAX_NAME_LEN = 64
 MAX_HOST_LEN = 253
 ALLOWED_PRESETS = ('ssh', 'http', 'https', 'custom')
 ALLOWED_PROTOCOLS = ('tcp',)
-UNSUPPORTED_SCHEMA_MSG = (
-    'unsupported registry schema; redeploy/reset registry for the generic-service version'
-)
+
+
+def unsupported_registry_message(state=None):
+    version = None
+    if isinstance(state, dict) and 'schema_version' in state:
+        version = state.get('schema_version')
+    shown = 1 if version is None else version
+    return (
+        f'unsupported registry schema version {shown}. '
+        'This release requires registry schema version 2. '
+        'Back up the existing registry and redeploy/reset it explicitly before continuing.'
+    )
 
 
 class RegistrySchemaError(ValueError):
@@ -133,30 +142,34 @@ def coerce_port(value):
 
 def require_registry_v2(state):
     if not isinstance(state, dict):
-        raise RegistrySchemaError(UNSUPPORTED_SCHEMA_MSG)
+        raise RegistrySchemaError(unsupported_registry_message(state))
     version = state.get('schema_version')
     if version != REGISTRY_SCHEMA_VERSION:
-        raise RegistrySchemaError(UNSUPPORTED_SCHEMA_MSG)
+        raise RegistrySchemaError(unsupported_registry_message(state))
     clients = state.get('clients', {})
     if clients is None:
         clients = {}
     if not isinstance(clients, dict):
-        raise RegistrySchemaError(UNSUPPORTED_SCHEMA_MSG)
+        raise RegistrySchemaError(unsupported_registry_message(state))
     for client in clients.values():
         if not isinstance(client, dict):
-            raise RegistrySchemaError(UNSUPPORTED_SCHEMA_MSG)
+            raise RegistrySchemaError(unsupported_registry_message(state))
         if 'ssh_port' in client or 'https_port' in client:
-            raise RegistrySchemaError(UNSUPPORTED_SCHEMA_MSG)
+            raise RegistrySchemaError(
+                'unsupported registry schema version 2. '
+                'Legacy SSH/HTTPS fields are present. '
+                'Back up the existing registry and redeploy/reset it explicitly before continuing.'
+            )
         services = client.get('services', {})
         if services is None:
             services = {}
         if not isinstance(services, dict):
-            raise RegistrySchemaError(UNSUPPORTED_SCHEMA_MSG)
+            raise RegistrySchemaError(unsupported_registry_message(state))
     reserved = state.get('reserved', [])
     if reserved is None:
         reserved = []
     if not isinstance(reserved, list):
-        raise RegistrySchemaError(UNSUPPORTED_SCHEMA_MSG)
+        raise RegistrySchemaError(unsupported_registry_message(state))
     return state
 
 
@@ -289,7 +302,10 @@ class Allocator:
     def load_registry(self):
         if not Path(self.registry_file).exists():
             return empty_registry()
-        state = load_json(self.registry_file)
+        try:
+            state = load_json(self.registry_file)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RegistrySchemaError('unable to read an existing FRP registry') from exc
         return require_registry_v2(state)
 
     def save_registry(self, state):

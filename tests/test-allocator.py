@@ -416,9 +416,43 @@ def case_v1_registry_rejected():
         try:
             env.allocator.load_registry()
             fail('v1 registry should raise')
+        except MOD.RegistrySchemaError as exc:
+            if 'version 1' not in str(exc):
+                fail('v1 message', exc)
+        pass_('v1 registry rejected')
+    finally:
+        env.cleanup()
+
+
+def case_future_schema_rejected():
+    env = Env()
+    try:
+        env.registry.write_text(json.dumps({
+            'schema_version': 3,
+            'reserved': [],
+            'clients': {},
+        }) + '\n')
+        try:
+            env.allocator.load_registry()
+            fail('schema 3 should raise')
+        except MOD.RegistrySchemaError as exc:
+            if 'version 3' not in str(exc):
+                fail('schema 3 message', exc)
+        pass_('future schema rejected')
+    finally:
+        env.cleanup()
+
+
+def case_malformed_registry_rejected():
+    env = Env()
+    try:
+        env.registry.write_text('{not json')
+        try:
+            env.allocator.load_registry()
+            fail('malformed registry should raise')
         except MOD.RegistrySchemaError:
             pass
-        pass_('v1 registry rejected')
+        pass_('malformed registry rejected')
     finally:
         env.cleanup()
 
@@ -437,6 +471,8 @@ def main():
     case_k_concurrent()
     case_omitted_service_not_released()
     case_v1_registry_rejected()
+    case_future_schema_rejected()
+    case_malformed_registry_rejected()
     print()
     print('ALLOCATOR_GENERIC_TESTS=PASS')
 

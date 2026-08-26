@@ -1,0 +1,226 @@
+# Schema v2 deployment runbook
+
+This release uses registry schema version 2 (generic multi-service clients). Schema v1 SSH/HTTPS registries are **not** migrated automatically.
+
+The addresses `203.0.113.10` and `192.0.2.50` in this document are RFC documentation examples. Replace them with values from your environment.
+
+Do not rotate `/etc/frp/server_token` or rewrite `/etc/frp/frps.toml` as part of a registry schema change. Token preservation and FRP control settings are independent of the allocator registry.
+
+This procedure is for an existing server that still has a v1 registry, or for a fresh install. It does not change a remote production host by itself.
+
+---
+
+## 1. Check current status
+
+On the FRP server:
+
+```bash
+sudo frp-server-status
+sudo frp-server-status --check
+```
+
+Read:
+
+```text
+Registry schema
+Registry state
+Allocator URL
+Public host
+frps
+allocator
+```
+
+`--check` exits `0` only when schema v2 is present and public host plus allocator URL are configured.
+
+If the output shows schema `1` / `incompatible`, continue with the backup and reset steps below. If it already shows schema `2` / `ready`, skip the reset and go to verification.
+
+---
+
+## 2. Back up token, config, and registry
+
+Create a timestamped backup **before** any registry change. Do not print registry contents to the terminal.
+
+```bash
+sudo install -d -m 700 /var/lib/frp-auto-deploy/backups
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+sudo install -m 600 /etc/frp/server_token \
+  "/var/lib/frp-auto-deploy/backups/server_token.${STAMP}"
+sudo install -m 600 /etc/frp-auto-deploy/config.json \
+  "/var/lib/frp-auto-deploy/backups/config.json.${STAMP}"
+if [[ -f /var/lib/frp-auto-deploy/registry.json ]]; then
+  sudo install -m 600 /var/lib/frp-auto-deploy/registry.json \
+    "/var/lib/frp-auto-deploy/backups/registry.json.pre-schema-v2-${STAMP}"
+fi
+sudo ls -l /var/lib/frp-auto-deploy/backups
+```
+
+Keep those backups. Never delete them as part of this procedure.
+
+Confirm the token backup exists, then leave `/etc/frp/server_token` in place.
+
+---
+
+## 3. Confirm the registry is schema v1 (or missing)
+
+```bash
+sudo python3 - <<'PY'
+from pathlib import Path
+p = Path('/var/lib/frp-auto-deploy/registry.json')
+print('exists', p.exists())
+if p.exists():
+    import json
+    data = json.loads(p.read_text(encoding='utf-8'))
+    print('schema_version', data.get('schema_version', '(missing, treat as v1)'))
+PY
+```
+
+Do not dump the full registry.
+
+A missing `schema_version` or value `1` is unsupported by this release. A future version such as `3` is also unsupported; do not rewrite it to v2 in place.
+
+---
+
+## 4. Stop or uninstall old clients if required
+
+Existing v1 client allocations are not imported. Plan to re-enroll each Linux client after the registry is replaced.
+
+On each old client, stop or uninstall `frpc` so previously published ports are no longer in use:
+
+```bash
+sudo systemctl stop frpc
+```
+
+or use the client uninstall helper. Server-side port reservations in the v1 registry will be discarded in the next step; live listeners are still scanned and reserved during server install.
+
+---
+
+## 5. Replace the registry with schema v2
+
+Stop the allocator first so it cannot rewrite the old file:
+
+```bash
+sudo systemctl stop frp-port-allocator
+sudo mv /var/lib/frp-auto-deploy/registry.json \
+  /var/lib/frp-auto-deploy/backups/registry.json.moved-$(date -u +%Y%m%dT%H%M%SZ)
+```
+
+Do not `rm` the only copy. The `mv` destination should be under `backups/` with mode `600`:
+
+```bash
+sudo chmod 600 /var/lib/frp-auto-deploy/backups/registry.json.moved-*
+sudo chown root:root /var/lib/frp-auto-deploy/backups/registry.json.moved-*
+```
+
+A later server bootstrap/install with no registry present creates:
+
+```json
+{
+  "schema_version": 2,
+  "reserved": [],
+  "clients": {}
+}
+```
+
+Active listeners in the configured service range are preserved as `reserved` so they are not handed to a new enrollment.
+
+The installer **fails closed** if a v1 or unknown registry is still in place. It will not delete or convert that file automatically.
+
+---
+
+## 6. Apply the current server bootstrap
+
+From the project documentation, install or re-run the current server bootstrap. Deployment-specific values (public host, allocator URL) are entered at install time or supplied as environment variables. They are stored only in `/etc/frp-auto-deploy/config.json`.
+
+Non-interactive example (replace the documentation addresses):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-server.sh \
+| sudo env \
+    FRP_PUBLIC_HOST=203.0.113.10 \
+    FRP_ALLOCATOR_URL=http://203.0.113.10/enroll \
+    bash
+```
+
+Interactive install asks for public IP/hostname and allocator URL. It does not use a hard-coded production address.
+
+Re-running the installer reuses existing runtime config when present. It preserves `/etc/frp/server_token`.
+
+---
+
+## 7. Verify frps and the allocator
+
+```bash
+sudo frp-server-status --check
+sudo systemctl status frps --no-pager
+sudo systemctl status frp-port-allocator --no-pager
+curl -fsS http://127.0.0.1:6099/healthz
+```
+
+Expected:
+
+```text
+Registry schema : 2
+Registry state  : ready
+Allocator URL   : configured
+Public host     : configured
+frps            : active
+allocator       : active
+```
+
+---
+
+## 8. Create an enrollment
+
+```bash
+sudo frp-create-client
+```
+
+The command prints an enrollment code and a client install one-liner that sets `FRP_ALLOCATOR_URL` via `sudo env`. The enrollment secret is not placed on the command line; the client installer asks for it interactively.
+
+---
+
+## 9. Re-enroll each client
+
+On the remote Linux host, run the command printed by `frp-create-client`. Example shape:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh \
+| sudo env FRP_ALLOCATOR_URL='http://203.0.113.10/enroll' bash
+```
+
+Then enter the enrollment code and add TCP services (SSH is optional).
+
+---
+
+## 10. Verify generic services
+
+On the server:
+
+```bash
+sudo frp-clients
+sudo frp-client-info <hostname>
+```
+
+On the client:
+
+```text
+cat /etc/frp/access-info.txt
+```
+
+Confirm SSH/HTTP/HTTPS/custom TCP services received persistent public ports.
+
+---
+
+## If something is still schema v1
+
+Do not force the installer past the error. The expected failure looks like:
+
+```text
+ERROR: unsupported registry schema version 1.
+
+This release requires registry schema version 2.
+
+Back up the existing registry and redeploy/reset it explicitly before continuing.
+```
+
+Return to step 2 and move the old registry aside before installing again.

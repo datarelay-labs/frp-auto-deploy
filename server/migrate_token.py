@@ -248,9 +248,18 @@ def is_service_port(port, port_start, port_end, allocator_port):
 
 
 REGISTRY_SCHEMA_VERSION = 2
-UNSUPPORTED_SCHEMA_MSG = (
-    'unsupported registry schema; redeploy/reset registry for the generic-service version'
-)
+
+
+def unsupported_registry_message(state=None):
+    version = None
+    if isinstance(state, dict) and 'schema_version' in state:
+        version = state.get('schema_version')
+    shown = 1 if version is None else version
+    return (
+        f'unsupported registry schema version {shown}.\n\n'
+        'This release requires registry schema version 2.\n\n'
+        'Back up the existing registry and redeploy/reset it explicitly before continuing.'
+    )
 
 
 def load_registry_json(path: Path):
@@ -265,29 +274,33 @@ def load_registry_json(path: Path):
 
 def require_registry_v2(state):
     if not isinstance(state, dict):
-        raise MigrationError(UNSUPPORTED_SCHEMA_MSG)
+        raise MigrationError(unsupported_registry_message(state))
     if state.get('schema_version') != REGISTRY_SCHEMA_VERSION:
-        raise MigrationError(UNSUPPORTED_SCHEMA_MSG)
+        raise MigrationError(unsupported_registry_message(state))
     clients = state.get('clients', {})
     if clients is None:
         clients = {}
     if not isinstance(clients, dict):
-        raise MigrationError(UNSUPPORTED_SCHEMA_MSG)
+        raise MigrationError(unsupported_registry_message(state))
     for client in clients.values():
         if not isinstance(client, dict):
-            raise MigrationError(UNSUPPORTED_SCHEMA_MSG)
+            raise MigrationError(unsupported_registry_message(state))
         if 'ssh_port' in client or 'https_port' in client:
-            raise MigrationError(UNSUPPORTED_SCHEMA_MSG)
+            raise MigrationError(
+                'unsupported registry schema version 2.\n\n'
+                'Legacy SSH/HTTPS fields are present. This release requires the generic multi-service registry.\n\n'
+                'Back up the existing registry and redeploy/reset it explicitly before continuing.'
+            )
         services = client.get('services', {})
         if services is None:
             services = {}
         if not isinstance(services, dict):
-            raise MigrationError(UNSUPPORTED_SCHEMA_MSG)
+            raise MigrationError(unsupported_registry_message(state))
     reserved = state.get('reserved', [])
     if reserved is None:
         reserved = []
     if not isinstance(reserved, list):
-        raise MigrationError(UNSUPPORTED_SCHEMA_MSG)
+        raise MigrationError(unsupported_registry_message(state))
     return state
 
 

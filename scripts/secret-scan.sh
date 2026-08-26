@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Fail if tracked files look like runtime secrets or private keys.
+# Fail if tracked files look like runtime secrets, private keys, or
+# deployment-specific literals that must not ship in this public repository.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -20,6 +21,17 @@ done < <(git ls-files)
 
 if git grep -nE 'INSTALL_KEY=' -- ':!tests/' ':!README.md' ':!scripts/secret-scan.sh' >/dev/null; then
   fail "INSTALL_KEY assignment found"
+fi
+
+# Known historical production addresses must not re-enter tracked source.
+if git grep -nF '221.139.249.110' -- ':!scripts/secret-scan.sh' >/dev/null; then
+  fail "forbidden production public IP 221.139.249.110 is tracked"
+fi
+if git grep -nF '10.10.10.50' -- ':!scripts/secret-scan.sh' >/dev/null; then
+  fail "forbidden production internal IP 10.10.10.50 is tracked"
+fi
+if git grep -nF 'RickLee-kr/frp-auto-deploy' -- ':!scripts/secret-scan.sh' >/dev/null; then
+  fail "stale repository URL RickLee-kr/frp-auto-deploy is tracked"
 fi
 
 echo "SECRET_SCAN=PASS"

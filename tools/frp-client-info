@@ -5,24 +5,34 @@ import sys
 from pathlib import Path
 
 ROOT = os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
-UNSUPPORTED = (
-    'ERROR: unsupported registry schema; redeploy/reset registry for the generic-service version'
-)
+def require_v2(state):
+    if not isinstance(state, dict) or state.get('schema_version') != 2:
+        version = 1
+        if isinstance(state, dict) and 'schema_version' in state:
+            version = state.get('schema_version')
+        raise SystemExit(
+            f'ERROR: unsupported registry schema version {version}.\n\n'
+            'This release requires registry schema version 2.\n\n'
+            'Back up the existing registry and redeploy/reset it explicitly before continuing.'
+        )
+    for client in (state.get('clients') or {}).values():
+        if not isinstance(client, dict):
+            raise SystemExit(
+                'ERROR: unsupported registry schema version 2.\n\n'
+                'This release requires registry schema version 2.\n\n'
+                'Back up the existing registry and redeploy/reset it explicitly before continuing.'
+            )
+        if 'ssh_port' in client or 'https_port' in client:
+            raise SystemExit(
+                'ERROR: unsupported registry schema version 2.\n\n'
+                'Legacy SSH/HTTPS fields are present. This release requires the generic multi-service registry.\n\n'
+                'Back up the existing registry and redeploy/reset it explicitly before continuing.'
+            )
+
 
 if len(sys.argv) != 2:
     print(f'Usage: {sys.argv[0]} <hostname|machine-id-prefix>', file=sys.stderr)
     sys.exit(2)
-
-
-def require_v2(state):
-    if not isinstance(state, dict) or state.get('schema_version') != 2:
-        raise SystemExit(UNSUPPORTED)
-    for client in (state.get('clients') or {}).values():
-        if not isinstance(client, dict):
-            raise SystemExit(UNSUPPORTED)
-        if 'ssh_port' in client or 'https_port' in client:
-            raise SystemExit(UNSUPPORTED)
-
 
 q = sys.argv[1]
 cfg = json.loads(Path(ROOT + '/etc/frp-auto-deploy/config.json').read_text())

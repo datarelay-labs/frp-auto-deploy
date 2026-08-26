@@ -1,37 +1,52 @@
 #!/usr/bin/env python3
-import argparse, json, secrets, time
+import argparse
+import json
+import os
+import secrets
+import shlex
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-CONFIG='/etc/frp-auto-deploy/config.json'
+ROOT = os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
+CONFIG = ROOT + '/etc/frp-auto-deploy/config.json'
+
 
 def iso(ts):
-    return datetime.fromtimestamp(ts, timezone.utc).replace(microsecond=0).isoformat().replace('+00:00','Z')
+    return datetime.fromtimestamp(ts, timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
 
-p=argparse.ArgumentParser(description='Create a short-lived FRP client enrollment code')
+
+def remap(path):
+    path = Path(path)
+    if ROOT and not str(path).startswith(ROOT):
+        return Path(ROOT + str(path))
+    return path
+
+
+p = argparse.ArgumentParser(description='Create a short-lived FRP client enrollment code')
 p.add_argument('--ttl', type=int, default=600, help='TTL in seconds (default 600)')
 p.add_argument('--note', default='')
-a=p.parse_args()
+a = p.parse_args()
 
-cfg=json.loads(Path(CONFIG).read_text())
-enroll_dir=Path(cfg['enrollments_dir'])
+cfg = json.loads(Path(CONFIG).read_text())
+enroll_dir = remap(cfg['enrollments_dir'])
 enroll_dir.mkdir(parents=True, exist_ok=True)
 
-enrollment_id=secrets.token_hex(8)
-secret=secrets.token_hex(32)
-now=int(time.time())
-record={
+enrollment_id = secrets.token_hex(8)
+secret = secrets.token_hex(32)
+now = int(time.time())
+record = {
     'id': enrollment_id,
     'secret': secret,
     'created_at': iso(now),
     'expires_at': now + a.ttl,
-    'expires_at_iso': iso(now+a.ttl),
+    'expires_at_iso': iso(now + a.ttl),
     'bound_machine_id': None,
     'used_at': None,
     'note': a.note,
 }
-path=enroll_dir/f'{enrollment_id}.json'
-path.write_text(json.dumps(record, indent=2, sort_keys=True)+'\n')
+path = enroll_dir / f'{enrollment_id}.json'
+path.write_text(json.dumps(record, indent=2, sort_keys=True) + '\n')
 path.chmod(0o600)
 
 print()
@@ -39,9 +54,31 @@ print('Enrollment Code:')
 print(f'{enrollment_id}.{secret}')
 print()
 print(f'Expires: {record["expires_at_iso"]} ({a.ttl} seconds)')
-url=cfg.get('client_installer_url','').strip()
-if url:
-    print()
+
+installer = str(cfg.get('client_installer_url', '') or '').strip()
+allocator = str(cfg.get('allocator_public_url', '') or '').strip()
+print()
+if installer and allocator:
     print('Client install:')
-    print(f'curl -fsSL {url} | sudo bash')
+    print(
+        f'curl -fsSL {shlex.quote(installer)} | '
+        f'sudo env FRP_ALLOCATOR_URL={shlex.quote(allocator)} bash'
+    )
+    print()
+    print('The enrollment code is entered interactively. It is not placed on the command line.')
+elif installer:
+    print('Client install:')
+    print(f'curl -fsSL {shlex.quote(installer)} | sudo bash')
+    print()
+    print('WARNING: allocator public URL is not configured.')
+    print('Set FRP_ALLOCATOR_URL on the client, or re-run the server installer.')
+else:
+    print('Set the client installer URL, then re-run this command:')
+    print(
+        '  sudo frp-set-client-installer-url '
+        'https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh'
+    )
+    if not allocator:
+        print()
+        print('WARNING: allocator public URL is not configured.')
 print()

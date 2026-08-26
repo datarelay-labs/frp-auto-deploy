@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
-# Operator status for an frp-auto-deploy server. Never exits non-zero for
-# missing binaries, config, or upstream lookup failures.
+# Operator status for an frp-auto-deploy server.
+# Default mode never exits non-zero for missing binaries, config, or upstream lookup failures.
+# --check exits non-zero when the server is not ready for registry schema v2.
 set -uo pipefail
+
+CHECK_ONLY=0
+if [[ "${1:-}" == "--check" ]]; then
+  CHECK_ONLY=1
+fi
 
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${_SCRIPT_DIR}/../lib/frp-common.sh" ]]; then
@@ -78,16 +84,54 @@ control_port=""
 port_start=""
 port_end=""
 allocator_port=""
+public_host=""
+allocator_url=""
 if [[ -r "$config_file" ]]; then
-  control_port="$(python3 -c 'import json,sys; from pathlib import Path
-c=json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")); v=c.get("control_port"); print("" if v is None else v)' "$config_file" 2>/dev/null || true)"
-  port_start="$(python3 -c 'import json,sys; from pathlib import Path
-c=json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")); v=c.get("port_start"); print("" if v is None else v)' "$config_file" 2>/dev/null || true)"
-  port_end="$(python3 -c 'import json,sys; from pathlib import Path
-c=json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")); v=c.get("port_end"); print("" if v is None else v)' "$config_file" 2>/dev/null || true)"
-  allocator_port="$(python3 -c 'import json,sys; from pathlib import Path
-c=json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")); v=c.get("listen_port"); print("" if v is None else v)' "$config_file" 2>/dev/null || true)"
+  eval "$(python3 - "$config_file" <<'PY'
+import json, shlex, sys
+from pathlib import Path
+try:
+    cfg = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(0)
+if not isinstance(cfg, dict):
+    raise SystemExit(0)
+for key, envname in (
+    ("control_port", "control_port"),
+    ("port_start", "port_start"),
+    ("port_end", "port_end"),
+    ("listen_port", "allocator_port"),
+    ("public_ip", "public_host"),
+    ("allocator_public_url", "allocator_url"),
+):
+    value = cfg.get(key)
+    if value is None or value == "":
+        continue
+    print(f"{envname}={shlex.quote(str(value))}")
+PY
+)" 2>/dev/null || true
 fi
+
+public_host_state="missing"
+if [[ -n "${public_host:-}" ]]; then
+  public_host_state="configured"
+fi
+allocator_url_state="missing"
+if [[ -n "${allocator_url:-}" ]]; then
+  allocator_url_state="configured"
+fi
+
+registry_schema="none"
+registry_state="missing"
+if type frp_registry_readiness >/dev/null 2>&1; then
+  readiness="$(frp_registry_readiness "$registry_file" 2>/dev/null || true)"
+  if [[ -n "$readiness" ]]; then
+    registry_schema="$(printf '%s\n' "$readiness" | sed -n '1p')"
+    registry_state="$(printf '%s\n' "$readiness" | sed -n '2p')"
+  fi
+fi
+[[ -n "$registry_schema" ]] || registry_schema="none"
+[[ -n "$registry_state" ]] || registry_state="missing"
 
 clients="0"
 reserved="0"
@@ -107,9 +151,19 @@ Tested FRP      : ${tested_frp}
 Upstream latest : ${upstream_latest}
 Update status   : ${update_status}
 
+Registry schema : ${registry_schema}
+Registry state  : ${registry_state}
+Allocator URL   : ${allocator_url_state}
+Public host     : ${public_host_state}
+
 frps            : ${frps_state}
 allocator       : ${allocator_state}
 EOF
+
+if [[ "$registry_state" == "incompatible" || "$registry_state" == "invalid" ]]; then
+  echo "Action required : backup/reset/redeploy before using generic multi-service enrollment"
+  echo "See docs/SCHEMA_V2_DEPLOYMENT.md"
+fi
 
 if [[ -n "${control_port:-}" ]]; then
   echo
@@ -121,4 +175,11 @@ fi
 echo
 echo "Clients         : ${clients}"
 echo "Reserved ports  : ${reserved}"
+
+if [[ "$CHECK_ONLY" == "1" ]]; then
+  if [[ "$registry_state" == "ready" && "$public_host_state" == "configured" && "$allocator_url_state" == "configured" ]]; then
+    exit 0
+  fi
+  exit 1
+fi
 exit 0

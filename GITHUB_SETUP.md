@@ -28,8 +28,9 @@ Server one-liner after the repository is pushed:
 curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-server.sh | sudo bash
 ```
 
-Client one-liner:
+Client one-liner after the server prints an enrollment (replace the allocator URL with the value from your runtime config):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh \
+| sudo env FRP_ALLOCATOR_URL='http://203.0.113.10/enroll' bash
 ```

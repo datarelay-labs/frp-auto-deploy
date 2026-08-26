@@ -6,19 +6,29 @@ from pathlib import Path
 
 ROOT = os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
 CFG = Path(ROOT + '/etc/frp-auto-deploy/config.json')
-UNSUPPORTED = (
-    'ERROR: unsupported registry schema; redeploy/reset registry for the generic-service version'
-)
-
-
 def require_v2(state):
     if not isinstance(state, dict) or state.get('schema_version') != 2:
-        raise SystemExit(UNSUPPORTED)
+        version = 1
+        if isinstance(state, dict) and 'schema_version' in state:
+            version = state.get('schema_version')
+        raise SystemExit(
+            f'ERROR: unsupported registry schema version {version}.\n\n'
+            'This release requires registry schema version 2.\n\n'
+            'Back up the existing registry and redeploy/reset it explicitly before continuing.'
+        )
     for client in (state.get('clients') or {}).values():
         if not isinstance(client, dict):
-            raise SystemExit(UNSUPPORTED)
+            raise SystemExit(
+                'ERROR: unsupported registry schema version 2.\n\n'
+                'This release requires registry schema version 2.\n\n'
+                'Back up the existing registry and redeploy/reset it explicitly before continuing.'
+            )
         if 'ssh_port' in client or 'https_port' in client:
-            raise SystemExit(UNSUPPORTED)
+            raise SystemExit(
+                'ERROR: unsupported registry schema version 2.\n\n'
+                'Legacy SSH/HTTPS fields are present. This release requires the generic multi-service registry.\n\n'
+                'Back up the existing registry and redeploy/reset it explicitly before continuing.'
+            )
 
 
 def active(port):

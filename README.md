@@ -5,7 +5,7 @@
 It automates FRP server/client installation, persistent public port assignment for SSH, web, and custom TCP services, short-lived client enrollment, systemd startup, migration from an existing FRP deployment, and connection-info output.
 
 > **Note**
-> The IP address `203.0.113.10` used in this README is a documentation-only example address. Replace it with your own public IP when deploying.
+> The IP addresses `203.0.113.10` and `192.0.2.50` used in this README are documentation-only example addresses (RFC 5737). Replace them with your own public and internal addresses when deploying.
 
 Current pinned FRP version: **v0.70.1**
 
@@ -31,9 +31,9 @@ Internet / Remote Linux clients
         v
 203.0.113.10  (public firewall/NAT)
         |
-        +-- TCP/443       -> 10.10.10.50:443
-        +-- TCP/6000-6098 -> 10.10.10.50:6000-6098
-        +-- TCP/80        -> 10.10.10.50:6099
+        +-- TCP/443       -> 192.0.2.50:443
+        +-- TCP/6000-6098 -> 192.0.2.50:6000-6098
+        +-- TCP/80        -> 192.0.2.50:6099
                                 |
                                 +-- frps
                                 +-- port allocator
@@ -42,16 +42,16 @@ Internet / Remote Linux clients
 Required DNAT example:
 
 ```text
-203.0.113.10:443       -> 10.10.10.50:443
-203.0.113.10:6000-6098 -> 10.10.10.50:6000-6098
-203.0.113.10:80        -> 10.10.10.50:6099
+203.0.113.10:443       -> 192.0.2.50:443
+203.0.113.10:6000-6098 -> 192.0.2.50:6000-6098
+203.0.113.10:80        -> 192.0.2.50:6099
 ```
 
 Server installer values:
 
 ```text
 Public firewall/NAT IP:      203.0.113.10
-Internal FRP server IP:      10.10.10.50
+Internal FRP server IP:      192.0.2.50
 FRP control port:            443
 Service range start:         6000
 Service range end:           6098
@@ -120,14 +120,19 @@ Run on the FRP server:
 curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-server.sh | sudo bash
 ```
 
-The installer asks for the deployment values shown in the examples above.
+The installer asks for the deployment values shown in the examples above. There is no hard-coded public or internal address; values are stored in `/etc/frp-auto-deploy/config.json`.
+
+Non-interactive install uses environment variables, for example `FRP_PUBLIC_HOST` and `FRP_ALLOCATOR_URL` (aliases: `FRP_PUBLIC_IP`, `FRP_ALLOCATOR_PUBLIC_URL`). Optional project defaults remain `FRP_CONTROL_PORT=443`, `FRP_PORT_START=6000`, `FRP_PORT_END=6098`, and `FRP_ALLOCATOR_PORT=6099`. Re-running the installer reuses the existing runtime config unless those variables are set.
 
 Verify the server:
 
 ```bash
 sudo frp-server-status
+sudo frp-server-status --check
 sudo frp-update
 ```
+
+`frp-server-status --check` confirms registry schema v2 and that the public host and allocator URL are configured. It does not change the server.
 
 `frp-update` upgrades the FRP server only to the version tested by `frp-auto-deploy` and automatically rolls back if the new server fails its health checks. On a fresh install it is a no-op.
 
@@ -156,18 +161,23 @@ Enrollment Code:
 Expires: 2026-08-26T11:10:00Z (600 seconds)
 
 Client install:
-curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh | sudo env FRP_ALLOCATOR_URL='http://203.0.113.10/enroll' bash
 ```
 
-Enrollment codes expire after 10 minutes by default and are bound to the first machine that uses them.
+Enrollment codes expire after 10 minutes by default and are bound to the first machine that uses them. The enrollment secret is entered interactively; it is not placed on the command line.
+
+`sudo env` is required so `FRP_ALLOCATOR_URL` reaches the installer after `sudo` resets the environment.
 
 ## 4. Install a remote Linux client
 
-Run on the remote Linux server:
+Run the command printed by `frp-create-client` on the remote Linux server. Example:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh \
+| sudo env FRP_ALLOCATOR_URL='http://203.0.113.10/enroll' bash
 ```
+
+`FRP_ALLOCATOR_URL` is required. There is no hard-coded allocator address in the installer. If it is missing, the client bootstrap exits with a clear error and does not install FRP.
 
 The installer asks for an enrollment code, then lets you add one or more TCP services:
 
@@ -320,9 +330,9 @@ Remote Linux clients
         v
 203.0.113.10  (example public firewall/NAT IP)
         |
-        +-- TCP/443       -> 10.10.10.50:443   (frps control)
-        +-- TCP/6000-6098 -> 10.10.10.50:same  (published TCP service ports)
-        +-- TCP/80        -> 10.10.10.50:6099  (enrollment allocator)
+        +-- TCP/443       -> 192.0.2.50:443   (frps control)
+        +-- TCP/6000-6098 -> 192.0.2.50:same  (published TCP service ports)
+        +-- TCP/80        -> 192.0.2.50:6099  (enrollment allocator)
                                 |
                                 +-- frps
                                 +-- port allocator
@@ -415,7 +425,9 @@ A fresh install writes:
 }
 ```
 
-Existing `schema_version` 1 / SSH-HTTPS registries are not migrated automatically. Reset or redeploy the registry before using this version.
+Existing `schema_version` 1 / SSH-HTTPS registries are not migrated automatically. The installer and allocator fail closed if they find an unsupported schema. They do not delete or overwrite that registry.
+
+See `docs/SCHEMA_V2_DEPLOYMENT.md` for the backup, replace, and re-enroll procedure.
 
 ---
 
@@ -466,9 +478,12 @@ sudo frp-set-client-installer-url \
 
 ```bash
 sudo frp-server-status
+sudo frp-server-status --check
 ```
 
-The status command reports the installed FRP binary version, the FRP version tested by this `frp-auto-deploy` release, an informational upstream latest version, service state, and client/port counts.
+The status command reports the installed FRP binary version, the FRP version tested by this `frp-auto-deploy` release, registry schema readiness, public host / allocator URL configuration, service state, and client/port counts.
+
+`--check` exits non-zero when the registry is not schema v2 or required runtime values are missing. It does not change any files.
 
 ## Update FRP
 
@@ -545,6 +560,9 @@ The repository should never contain real FRP tokens, enrollment secrets, private
 python3 tests/test-allocator.py
 python3 tests/test-enrollment-security.py
 ./tests/test-client-config.sh
+./tests/test-client-allocator-url.sh
+./tests/test-server-install-config.sh
+./tests/test-create-client.sh
 ./tests/test-management-commands.sh
 ./tests/test-frp-update.sh
 ./tests/test-frp-server-status.sh

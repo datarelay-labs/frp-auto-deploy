@@ -122,9 +122,67 @@ if "${MIGRATE[@]}" init-registry \
   --allocator-port 6099 >"$WORKDIR/case-c.out" 2>"$WORKDIR/case-c.err"; then
   fail "CASE C should reject v1 registry"
 fi
-grep -qi 'unsupported registry schema' "$WORKDIR/case-c.err" || fail "CASE C error message"
+grep -qi 'unsupported registry schema version 1' "$WORKDIR/case-c.err" || fail "CASE C error message"
 bytes_equal "$C/registry.before" "$C/registry.json" || fail "CASE C v1 registry rewritten"
 pass "REGISTRY INIT v1 rejected"
+
+# Explicit schema_version 1 is refused.
+D="$WORKDIR/case-d"
+mkdir -p "$D"
+python3 - "$D/registry.json" <<'PY'
+import json,sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps({
+  'schema_version': 1,
+  'reserved': [],
+  'clients': {},
+}, indent=2)+'\n')
+PY
+cp "$D/registry.json" "$D/registry.before"
+if "${MIGRATE[@]}" init-registry --registry "$D/registry.json" --ports '' \
+  --port-start 6000 --port-end 6098 --allocator-port 6099 \
+  >"$WORKDIR/case-d.out" 2>"$WORKDIR/case-d.err"; then
+  fail "CASE D should reject schema_version 1"
+fi
+grep -qi 'unsupported registry schema version 1' "$WORKDIR/case-d.err" || fail "CASE D error message"
+bytes_equal "$D/registry.before" "$D/registry.json" || fail "CASE D registry rewritten"
+pass "REGISTRY INIT schema_version 1 rejected"
+
+# Future schema is refused, not treated as v2.
+E="$WORKDIR/case-e"
+mkdir -p "$E"
+python3 - "$E/registry.json" <<'PY'
+import json,sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps({
+  'schema_version': 3,
+  'reserved': [],
+  'clients': {},
+}, indent=2)+'\n')
+PY
+cp "$E/registry.json" "$E/registry.before"
+if "${MIGRATE[@]}" init-registry --registry "$E/registry.json" --ports '' \
+  --port-start 6000 --port-end 6098 --allocator-port 6099 \
+  >"$WORKDIR/case-e.out" 2>"$WORKDIR/case-e.err"; then
+  fail "CASE E should reject schema_version 3"
+fi
+grep -qi 'unsupported registry schema version 3' "$WORKDIR/case-e.err" || fail "CASE E error message"
+bytes_equal "$E/registry.before" "$E/registry.json" || fail "CASE E registry rewritten"
+pass "REGISTRY INIT future schema rejected"
+
+# Malformed JSON is refused and not replaced.
+F="$WORKDIR/case-f"
+mkdir -p "$F"
+printf '{not json' >"$F/registry.json"
+cp "$F/registry.json" "$F/registry.before"
+if "${MIGRATE[@]}" init-registry --registry "$F/registry.json" --ports '' \
+  --port-start 6000 --port-end 6098 --allocator-port 6099 \
+  >"$WORKDIR/case-f.out" 2>"$WORKDIR/case-f.err"; then
+  fail "CASE F should reject malformed JSON"
+fi
+grep -qi 'unable to read an existing FRP registry' "$WORKDIR/case-f.err" || fail "CASE F error message"
+bytes_equal "$F/registry.before" "$F/registry.json" || fail "CASE F registry rewritten"
+pass "REGISTRY INIT malformed JSON rejected"
 
 echo
 echo "REGISTRY_INIT_TEST=PASS"

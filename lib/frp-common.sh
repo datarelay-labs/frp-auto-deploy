@@ -215,6 +215,47 @@ print(json.dumps({
 PY
 }
 
+frp_registry_readiness() {
+  local registry="$1"
+  python3 - "$registry" <<'PY'
+import json, sys
+from pathlib import Path
+p = Path(sys.argv[1])
+if not p.is_file():
+    print("none")
+    print("missing")
+    raise SystemExit(0)
+try:
+    state = json.loads(p.read_text(encoding="utf-8"))
+except Exception:
+    print("unknown")
+    print("invalid")
+    raise SystemExit(0)
+if not isinstance(state, dict):
+    print("unknown")
+    print("invalid")
+    raise SystemExit(0)
+version = state.get("schema_version")
+if version is None:
+    print("1")
+    print("incompatible")
+    raise SystemExit(0)
+print(str(version))
+if version != 2:
+    print("incompatible")
+    raise SystemExit(0)
+clients = state.get("clients", {}) or {}
+if not isinstance(clients, dict):
+    print("incompatible")
+    raise SystemExit(0)
+for client in clients.values():
+    if not isinstance(client, dict) or "ssh_port" in client or "https_port" in client:
+        print("incompatible")
+        raise SystemExit(0)
+print("ready")
+PY
+}
+
 frp_registry_counts() {
   local registry="$1"
   python3 - "$registry" <<'PY'
