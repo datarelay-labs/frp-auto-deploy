@@ -99,6 +99,26 @@ Installing over an existing FRP server preserves the existing FRP authentication
 
 Legacy inline `auth.token` values are migrated into `/etc/frp/server_token` without changing the secret. The previous `frps.toml` is copied to a timestamped backup with mode `600` before the file is rewritten. Re-running the installer is idempotent: it will not rotate the token, reset the registry, or drop existing client allocations.
 
+### Migrating from the manual port allocator
+
+If a previous manual allocator left a registry at `/var/lib/frp-port-allocator/registry.json` and `/var/lib/frp-auto-deploy/registry.json` does not yet exist, the installer migrates that legacy registry into the new path.
+
+Migration preserves:
+
+- `reserved` ports (including allocator-only ports such as `6099`, which stay reserved and are never assigned as service client ports in the `6000-6098` range)
+- every `clients` entry, including offline machines
+- each client's `ssh_port`, `https_port`, and `hostname` unchanged
+
+Missing fields required by the new schema (`ssh_user`, `https_enabled`, timestamps, and similar) receive backward-compatible defaults. Active listeners discovered via `ss` are merged into `reserved` as well, so the final used set always includes legacy reserved ports, legacy client SSH/HTTPS ports, and current `ACTIVE_PORTS`.
+
+Before writing the new registry, the legacy file is copied to a timestamped backup with mode `600`:
+
+```text
+/var/lib/frp-port-allocator/registry.json.pre-frp-auto-deploy-<timestamp>
+```
+
+If `/var/lib/frp-auto-deploy/registry.json` already exists, it is never overwritten and legacy data is not re-imported. Re-running the installer is therefore idempotent for both token and registry migration.
+
 ## Firewall/NAT
 
 See `examples/pfsense-firewall.md`. In the tested topology:

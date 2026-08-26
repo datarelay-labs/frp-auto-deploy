@@ -142,9 +142,22 @@ open('/etc/frp-auto-deploy/config.json','w').write(json.dumps(cfg,indent=2,sort_
 PY
 chmod 600 /etc/frp-auto-deploy/config.json
 
-python3 "$BASE_DIR/server/migrate_token.py" init-registry \
+REGISTRY_ACTION=""
+LEGACY_REGISTRY_MIGRATION="N/A"
+MIGRATED_CLIENTS=""
+PRESERVED_PORTS=""
+LEGACY_REGISTRY_BACKUP=""
+reg_out="$(python3 "$BASE_DIR/server/migrate_token.py" init-registry \
   --registry /var/lib/frp-auto-deploy/registry.json \
-  --ports "$ACTIVE_PORTS" >/dev/null
+  --legacy-registry /var/lib/frp-port-allocator/registry.json \
+  --ports "$ACTIVE_PORTS")"
+while IFS= read -r line; do
+  case "$line" in
+    REGISTRY_ACTION=*|LEGACY_REGISTRY_MIGRATION=*|MIGRATED_CLIENTS=*|PRESERVED_PORTS=*|LEGACY_REGISTRY_BACKUP=*)
+      printf -v "${line%%=*}" '%s' "${line#*=}"
+      ;;
+  esac
+done <<< "$reg_out"
 [[ -f /var/lib/frp-auto-deploy/registry.json ]] || { echo "ERROR: registry.json is missing" >&2; exit 1; }
 chmod 600 /var/lib/frp-auto-deploy/registry.json
 
@@ -181,6 +194,16 @@ Allocator URL     : ${FRP_ALLOCATOR_PUBLIC_URL}
 EOF2
 if [[ -n "$ACTIVE_PORTS" ]]; then
   echo "Preserved existing ports as reserved: $ACTIVE_PORTS"
+fi
+if [[ "$LEGACY_REGISTRY_MIGRATION" == "PASS" ]]; then
+  echo "Legacy port allocator registry migrated: LEGACY_REGISTRY_MIGRATION=PASS"
+  echo "Migrated clients: ${MIGRATED_CLIENTS:-0}"
+  echo "Preserved ports: ${PRESERVED_PORTS:-0}"
+elif [[ "$REGISTRY_ACTION" == "unchanged" ]]; then
+  echo "Existing frp-auto-deploy registry preserved (not overwritten)."
+fi
+if [[ -n "$LEGACY_REGISTRY_BACKUP" ]]; then
+  echo "Legacy registry backed up with mode 600"
 fi
 if [[ "$TOKEN_PRESERVED" == "PASS" ]]; then
   echo "Existing FRP authentication token preserved: TOKEN_PRESERVED=PASS"

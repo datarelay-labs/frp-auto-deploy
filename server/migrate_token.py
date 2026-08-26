@@ -218,17 +218,155 @@ def ensure_server_token(etc_dir: Path, backup=True):
     }
 
 
-def init_registry(registry_path: Path, ports_csv: str):
-    if registry_path.exists():
-        return 'unchanged'
+def parse_ports_csv(ports_csv: str):
     ports = []
     for item in (ports_csv or '').split(','):
         item = item.strip()
         if item.isdigit():
             ports.append(int(item))
-    state = {'reserved': sorted(set(ports)), 'clients': {}}
+    return ports
+
+
+def utc_now_iso():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+
+
+def coerce_port(value):
+    """Return int port or None. Never invent a replacement for an existing value."""
+    if value is None or value == '':
+        return None
+    return int(value)
+
+
+def used_ports(state):
+    used = {int(x) for x in state.get('reserved', [])}
+    for client in state.get('clients', {}).values():
+        for key in ('ssh_port', 'https_port'):
+            value = client.get(key)
+            if value is not None and value != '':
+                used.add(int(value))
+    return used
+
+
+def normalize_legacy_client(client):
+    """Preserve legacy port/hostname values; fill schema defaults for missing fields."""
+    if not isinstance(client, dict):
+        client = {}
+    ssh_port = coerce_port(client.get('ssh_port'))
+    https_port = coerce_port(client.get('https_port'))
+    now = utc_now_iso()
+    https_enabled = client.get('https_enabled')
+    if https_enabled is None:
+        https_enabled = https_port is not None
+    else:
+        https_enabled = bool(https_enabled)
+    created_at = client.get('created_at') or now
+    return {
+        'hostname': str(client.get('hostname') or ''),
+        'ssh_user': str(client.get('ssh_user') or 'root'),
+        'ssh_port': ssh_port,
+        'https_port': https_port,
+        'https_enabled': https_enabled,
+        'https_ip': str(client.get('https_ip') or ''),
+        'created_at': str(created_at),
+        'last_enrolled_at': str(client.get('last_enrolled_at') or created_at),
+    }
+
+
+def backup_legacy_registry(legacy_path: Path):
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    backup = legacy_path.parent / f'registry.json.pre-frp-auto-deploy-{stamp}'
+    if backup.exists():
+        backup = legacy_path.parent / f'registry.json.pre-frp-auto-deploy-{stamp}-{os.getpid()}'
+    atomic_write_bytes(backup, legacy_path.read_bytes(), 0o600)
+    return backup
+
+
+def build_registry_from_legacy(legacy, active_ports):
+    reserved = set()
+    for item in legacy.get('reserved', []) or []:
+        try:
+            reserved.add(int(item))
+        except (TypeError, ValueError):
+            continue
+    for port in active_ports:
+        reserved.add(int(port))
+
+    clients = {}
+    for machine_id, raw in (legacy.get('clients') or {}).items():
+        mid = str(machine_id)
+        if not mid:
+            continue
+        clients[mid] = normalize_legacy_client(raw)
+
+    # Keep allocator-only ports such as 6099 in reserved. next_port() only
+    # walks the configured service range, so they are never assigned to clients.
+    state = {
+        'reserved': sorted(reserved),
+        'clients': clients,
+    }
+    return state
+
+
+def emit_registry_result(result):
+    print(f"REGISTRY_ACTION={result['action']}")
+    print(f"LEGACY_REGISTRY_MIGRATION={result['legacy_migration']}")
+    if result.get('migrated_clients') is not None:
+        print(f"MIGRATED_CLIENTS={result['migrated_clients']}")
+    if result.get('preserved_ports') is not None:
+        print(f"PRESERVED_PORTS={result['preserved_ports']}")
+    if result.get('backup'):
+        print(f"LEGACY_REGISTRY_BACKUP={result['backup']}")
+
+
+def init_registry(registry_path: Path, ports_csv: str, legacy_registry: Path | None = None):
+    """Create or migrate the allocator registry. Never overwrite an existing new registry."""
+    active_ports = parse_ports_csv(ports_csv)
+
+    if registry_path.exists():
+        try:
+            state = json.loads(registry_path.read_text(encoding='utf-8'))
+            preserved = len(used_ports(state))
+            clients = len(state.get('clients') or {})
+        except Exception:
+            preserved = None
+            clients = None
+        return {
+            'action': 'unchanged',
+            'legacy_migration': 'SKIP',
+            'migrated_clients': clients,
+            'preserved_ports': preserved,
+            'backup': '',
+        }
+
+    legacy_path = legacy_registry
+    if legacy_path is not None and legacy_path.is_file():
+        backup = backup_legacy_registry(legacy_path)
+        try:
+            legacy = json.loads(legacy_path.read_text(encoding='utf-8'))
+        except Exception as exc:
+            raise MigrationError('unable to read legacy port allocator registry') from exc
+        if not isinstance(legacy, dict):
+            raise MigrationError('legacy port allocator registry has an invalid schema')
+        state = build_registry_from_legacy(legacy, active_ports)
+        atomic_write_json(registry_path, state, 0o600)
+        return {
+            'action': 'migrated',
+            'legacy_migration': 'PASS',
+            'migrated_clients': len(state.get('clients') or {}),
+            'preserved_ports': len(used_ports(state)),
+            'backup': str(backup),
+        }
+
+    state = {'reserved': sorted(set(active_ports)), 'clients': {}}
     atomic_write_json(registry_path, state, 0o600)
-    return 'created'
+    return {
+        'action': 'created',
+        'legacy_migration': 'N/A',
+        'migrated_clients': 0,
+        'preserved_ports': len(used_ports(state)),
+        'backup': '',
+    }
 
 
 def emit(result):
@@ -250,14 +388,15 @@ def main(argv=None):
     p_reg = sub.add_parser('init-registry')
     p_reg.add_argument('--registry', required=True)
     p_reg.add_argument('--ports', default='')
+    p_reg.add_argument('--legacy-registry', default='')
 
     args = parser.parse_args(argv)
     try:
         if args.cmd == 'ensure':
             emit(ensure_server_token(Path(args.etc_dir), backup=args.backup))
         elif args.cmd == 'init-registry':
-            action = init_registry(Path(args.registry), args.ports)
-            print(f'REGISTRY_ACTION={action}')
+            legacy = Path(args.legacy_registry) if args.legacy_registry else None
+            emit_registry_result(init_registry(Path(args.registry), args.ports, legacy))
     except MigrationError as exc:
         print(f'ERROR: {exc}', file=sys.stderr)
         return 1
