@@ -78,47 +78,91 @@ write_registry() {
 import json,sys
 from pathlib import Path
 Path(sys.argv[1]).write_text(json.dumps({
+  "schema_version": 2,
   "reserved": [6000, 6001],
   "clients": {
     "machine-online": {
       "hostname": "online-host",
-      "ssh_user": "aella",
-      "ssh_port": 6002,
-      "https_port": 6003,
-      "https_enabled": True,
-      "https_ip": "192.0.2.10",
       "created_at": "2026-01-01T00:00:00Z",
       "last_enrolled_at": "2026-01-02T00:00:00Z",
+      "services": {
+        "ssh": {
+          "name": "SSH",
+          "protocol": "tcp",
+          "local_ip": "127.0.0.1",
+          "local_port": 22,
+          "remote_port": 6002,
+          "preset": "ssh",
+          "ssh_user": "aella",
+          "enabled": True,
+        },
+        "https": {
+          "name": "HTTPS",
+          "protocol": "tcp",
+          "local_ip": "192.0.2.10",
+          "local_port": 443,
+          "remote_port": 6003,
+          "preset": "https",
+          "enabled": True,
+        },
+      },
     },
     "machine-offline": {
       "hostname": "offline-host",
-      "ssh_user": "root",
-      "ssh_port": 6004,
-      "https_port": None,
-      "https_enabled": False,
-      "https_ip": "",
       "created_at": "2026-01-01T00:00:00Z",
       "last_enrolled_at": "2026-01-01T00:00:00Z",
+      "services": {
+        "ssh": {
+          "name": "SSH",
+          "protocol": "tcp",
+          "local_ip": "127.0.0.1",
+          "local_port": 22,
+          "remote_port": 6004,
+          "preset": "ssh",
+          "enabled": True,
+        },
+      },
     },
     "machine-ssh-only": {
       "hostname": "ssh-only-host",
-      "ssh_user": "aella",
-      "ssh_port": 6005,
-      "https_port": None,
-      "https_enabled": False,
-      "https_ip": "",
       "created_at": "2026-01-01T00:00:00Z",
       "last_enrolled_at": "2026-01-03T00:00:00Z",
+      "services": {
+        "ssh": {
+          "name": "SSH",
+          "protocol": "tcp",
+          "local_ip": "127.0.0.1",
+          "local_port": 22,
+          "remote_port": 6005,
+          "preset": "ssh",
+          "enabled": True,
+        },
+      },
     },
     "machine-ssh-https": {
       "hostname": "ssh-https-host",
-      "ssh_user": "aella",
-      "ssh_port": 6006,
-      "https_port": 6007,
-      "https_enabled": True,
-      "https_ip": "192.0.2.20",
       "created_at": "2026-01-01T00:00:00Z",
       "last_enrolled_at": "2026-01-04T00:00:00Z",
+      "services": {
+        "ssh": {
+          "name": "SSH",
+          "protocol": "tcp",
+          "local_ip": "127.0.0.1",
+          "local_port": 22,
+          "remote_port": 6006,
+          "preset": "ssh",
+          "enabled": True,
+        },
+        "https": {
+          "name": "HTTPS",
+          "protocol": "tcp",
+          "local_ip": "192.0.2.20",
+          "local_port": 443,
+          "remote_port": 6007,
+          "preset": "https",
+          "enabled": True,
+        },
+      },
     },
   },
 }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -239,13 +283,16 @@ import json,sys
 from pathlib import Path
 state=json.loads(Path(sys.argv[1]).read_text())
 clients=state["clients"]
-assert clients["machine-online"]["ssh_port"]==6002
-assert clients["machine-online"]["https_port"]==6003
-assert clients["machine-offline"]["ssh_port"]==6004
-assert clients["machine-ssh-only"]["ssh_port"]==6005
-assert clients["machine-ssh-https"]["ssh_port"]==6006
-assert clients["machine-ssh-https"]["https_port"]==6007
+assert state["schema_version"]==2
+assert clients["machine-online"]["services"]["ssh"]["remote_port"]==6002
+assert clients["machine-online"]["services"]["https"]["remote_port"]==6003
+assert clients["machine-offline"]["services"]["ssh"]["remote_port"]==6004
+assert clients["machine-ssh-only"]["services"]["ssh"]["remote_port"]==6005
+assert clients["machine-ssh-https"]["services"]["ssh"]["remote_port"]==6006
+assert clients["machine-ssh-https"]["services"]["https"]["remote_port"]==6007
 assert state["reserved"]==[6000,6001]
+assert "ssh_port" not in json.dumps(clients)
+assert "https_port" not in json.dumps(clients)
 PY
 python3 - "$B/var/lib/frp-auto-deploy/backups" <<'PY' || fail "CASE B backup missing"
 from pathlib import Path

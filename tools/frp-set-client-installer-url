@@ -4,7 +4,7 @@ from pathlib import Path
 
 if len(sys.argv)!=2:
     print(f'Usage: {sys.argv[0]} <raw-install-client-url>', file=sys.stderr); sys.exit(2)
-path=Path('/etc/frp-auto-deploy/config.json')
+path=Path(os.environ.get('FRP_DEPLOY_TEST_ROOT', '') + '/etc/frp-auto-deploy/config.json')
 cfg=json.loads(path.read_text())
 cfg['client_installer_url']=sys.argv[1]
 fd,tmp=tempfile.mkstemp(prefix='config.',suffix='.tmp',dir=str(path.parent))

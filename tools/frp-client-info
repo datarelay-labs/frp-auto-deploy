@@ -1,27 +1,84 @@
 #!/usr/bin/env python3
-import json, sys
+import json
+import os
+import sys
 from pathlib import Path
 
-if len(sys.argv)!=2:
-    print(f'Usage: {sys.argv[0]} <hostname|machine-id-prefix>', file=sys.stderr); sys.exit(2)
-q=sys.argv[1]
-cfg=json.loads(Path('/etc/frp-auto-deploy/config.json').read_text())
-state=json.loads(Path(cfg['registry_file']).read_text())
-matches=[]
-for mid,c in state.get('clients',{}).items():
-    if mid.startswith(q) or c.get('hostname')==q:
-        matches.append((mid,c))
+ROOT = os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
+UNSUPPORTED = (
+    'ERROR: unsupported registry schema; redeploy/reset registry for the generic-service version'
+)
+
+if len(sys.argv) != 2:
+    print(f'Usage: {sys.argv[0]} <hostname|machine-id-prefix>', file=sys.stderr)
+    sys.exit(2)
+
+
+def require_v2(state):
+    if not isinstance(state, dict) or state.get('schema_version') != 2:
+        raise SystemExit(UNSUPPORTED)
+    for client in (state.get('clients') or {}).values():
+        if not isinstance(client, dict):
+            raise SystemExit(UNSUPPORTED)
+        if 'ssh_port' in client or 'https_port' in client:
+            raise SystemExit(UNSUPPORTED)
+
+
+q = sys.argv[1]
+cfg = json.loads(Path(ROOT + '/etc/frp-auto-deploy/config.json').read_text())
+reg = Path(cfg['registry_file'])
+if ROOT and not str(reg).startswith(ROOT):
+    reg = Path(ROOT + str(reg))
+state = json.loads(reg.read_text())
+require_v2(state)
+
+matches = []
+for mid, client in (state.get('clients') or {}).items():
+    if mid.startswith(q) or client.get('hostname') == q:
+        matches.append((mid, client))
 if not matches:
-    print('Client not found', file=sys.stderr); sys.exit(1)
-if len(matches)>1:
-    print('Multiple clients matched; use a longer machine-id prefix', file=sys.stderr); sys.exit(1)
-mid,c=matches[0]
-print(f'Hostname: {c.get("hostname","")}')
-print(f'Machine ID: {mid}')
+    print('Client not found', file=sys.stderr)
+    sys.exit(1)
+if len(matches) > 1:
+    print('Multiple clients matched; use a longer machine-id prefix', file=sys.stderr)
+    sys.exit(1)
+
+mid, client = matches[0]
+public_ip = cfg['public_ip']
+services = client.get('services') or {}
+if not isinstance(services, dict):
+    services = {}
+enabled = [
+    (sid, svc) for sid, svc in sorted(services.items())
+    if isinstance(svc, dict) and svc.get('enabled', True) is not False
+]
+
+print('Client')
+print('======')
 print()
-print('SSH:')
-print(f'ssh -p {c["ssh_port"]} {c.get("ssh_user","root")}@{cfg["public_ip"]}')
-if c.get('https_enabled') and c.get('https_port'):
+print(f'Hostname    : {client.get("hostname", "")}')
+print(f'Machine ID  : {mid}')
+print(f'Services    : {len(enabled)}')
+
+for sid, svc in enabled:
+    protocol = str(svc.get('protocol') or 'tcp').upper()
+    local_ip = svc.get('local_ip') or ''
+    local_port = svc.get('local_port')
+    remote_port = svc.get('remote_port')
+    preset = svc.get('preset') or 'custom'
+    name = svc.get('name') or sid
     print()
-    print('HTTPS:')
-    print(f'https://{cfg["public_ip"]}:{c["https_port"]}')
+    print(name if name != sid else sid)
+    print(f'  Type      : {protocol}')
+    print(f'  Target    : {local_ip}:{local_port}')
+    print(f'  Public    : {public_ip}:{remote_port}')
+    if preset == 'ssh':
+        ssh_user = svc.get('ssh_user') or 'root'
+        print('  Connect   :')
+        print(f'    ssh -p {remote_port} {ssh_user}@{public_ip}')
+    elif preset == 'http':
+        print('  URL       :')
+        print(f'    http://{public_ip}:{remote_port}')
+    elif preset == 'https':
+        print('  URL       :')
+        print(f'    https://{public_ip}:{remote_port}')

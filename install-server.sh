@@ -124,7 +124,7 @@ EOF2
 chmod 600 /etc/frp/frps.toml
 /usr/local/bin/frps verify -c /etc/frp/frps.toml
 
-CLIENT_INSTALLER_URL="${FRP_CLIENT_INSTALLER_URL:-https://raw.githubusercontent.com/RickLee-kr/frp-auto-deploy/main/dist/bootstrap-client.sh}"
+CLIENT_INSTALLER_URL="${FRP_CLIENT_INSTALLER_URL:-https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh}"
 python3 - "$FRP_PUBLIC_IP" "$FRP_CONTROL_PORT" "$FRP_PORT_START" "$FRP_PORT_END" \
   "$FRP_ALLOCATOR_PORT" "$FRP_ALLOCATOR_PUBLIC_URL" "$CLIENT_INSTALLER_URL" <<'PY'
 import json,sys
@@ -146,19 +146,17 @@ PY
 chmod 600 /etc/frp-auto-deploy/config.json
 
 REGISTRY_ACTION=""
-LEGACY_REGISTRY_MIGRATION="N/A"
 MIGRATED_CLIENTS="0"
 PRESERVED_PORTS="0"
 registry_out="$(python3 "$BASE_DIR/server/migrate_token.py" init-registry \
   --registry /var/lib/frp-auto-deploy/registry.json \
-  --legacy-registry /var/lib/frp-port-allocator/registry.json \
   --ports "$ACTIVE_PORTS" \
   --port-start "$FRP_PORT_START" \
   --port-end "$FRP_PORT_END" \
   --allocator-port "$FRP_ALLOCATOR_PORT")"
 while IFS= read -r line; do
   case "$line" in
-    REGISTRY_ACTION=*|LEGACY_REGISTRY_MIGRATION=*|MIGRATED_CLIENTS=*|PRESERVED_PORTS=*)
+    REGISTRY_ACTION=*|MIGRATED_CLIENTS=*|PRESERVED_PORTS=*)
       printf -v "${line%%=*}" '%s' "${line#*=}"
       ;;
   esac
@@ -210,11 +208,6 @@ fi
 if [[ -n "$TOKEN_BACKUP" ]]; then
   echo "Existing frps.toml backed up with mode 600"
 fi
-if [[ "$LEGACY_REGISTRY_MIGRATION" == "PASS" ]]; then
-  echo "LEGACY_REGISTRY_MIGRATION=PASS"
-  echo "MIGRATED_CLIENTS=${MIGRATED_CLIENTS}"
-  echo "PRESERVED_PORTS=${PRESERVED_PORTS}"
-fi
 cat <<EOF2
 
 Firewall / DNAT example:
@@ -235,7 +228,7 @@ List clients:
   sudo frp-clients
 
 Set GitHub raw client installer URL after pushing the repository:
-  sudo frp-set-client-installer-url https://raw.githubusercontent.com/RickLee-kr/frp-auto-deploy/main/dist/bootstrap-client.sh
+  sudo frp-set-client-installer-url https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh
 
 ============================================================
 EOF2

@@ -190,13 +190,28 @@ if not p.is_file():
 state = json.loads(p.read_text(encoding="utf-8"))
 clients = {}
 for mid, client in sorted((state.get("clients") or {}).items()):
+    services = {}
+    raw = client.get("services") or {}
+    if isinstance(raw, dict):
+        for sid, svc in sorted(raw.items()):
+            if not isinstance(svc, dict):
+                continue
+            services[sid] = {
+                "enabled": svc.get("enabled", True),
+                "local_ip": svc.get("local_ip"),
+                "local_port": svc.get("local_port"),
+                "preset": svc.get("preset"),
+                "remote_port": svc.get("remote_port"),
+            }
     clients[mid] = {
         "hostname": client.get("hostname"),
-        "ssh_port": client.get("ssh_port"),
-        "https_port": client.get("https_port"),
-        "https_enabled": client.get("https_enabled"),
+        "services": services,
     }
-print(json.dumps({"reserved": sorted(state.get("reserved") or []), "clients": clients}, sort_keys=True))
+print(json.dumps({
+    "clients": clients,
+    "reserved": sorted(state.get("reserved") or []),
+    "schema_version": state.get("schema_version"),
+}, sort_keys=True))
 PY
 }
 
@@ -218,8 +233,15 @@ for item in state.get("reserved") or []:
     except Exception:
         pass
 for client in clients.values():
-    for key in ("ssh_port", "https_port"):
-        value = client.get(key)
+    if not isinstance(client, dict):
+        continue
+    services = client.get("services") or {}
+    if not isinstance(services, dict):
+        continue
+    for svc in services.values():
+        if not isinstance(svc, dict):
+            continue
+        value = svc.get("remote_port")
         if value:
             try:
                 used.add(int(value))

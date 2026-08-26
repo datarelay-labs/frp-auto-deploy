@@ -46,11 +46,20 @@ python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY'
 import json,sys
 from pathlib import Path
 Path(sys.argv[1]).write_text(json.dumps({
+  "schema_version": 2,
   "reserved": [6000, 6001],
   "clients": {
-    "a": {"ssh_port": 6002, "https_port": 6003},
-    "b": {"ssh_port": 6004, "https_port": None},
-    "c": {"ssh_port": 6005, "https_port": 6006},
+    "a": {"hostname": "a", "services": {
+      "ssh": {"remote_port": 6002, "enabled": True},
+      "https": {"remote_port": 6003, "enabled": True},
+    }},
+    "b": {"hostname": "b", "services": {
+      "ssh": {"remote_port": 6004, "enabled": True},
+    }},
+    "c": {"hostname": "c", "services": {
+      "ssh": {"remote_port": 6005, "enabled": True},
+      "https": {"remote_port": 6006, "enabled": True},
+    }},
   },
 })+"\n")
 PY

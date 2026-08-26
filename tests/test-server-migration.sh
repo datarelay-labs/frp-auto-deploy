@@ -141,7 +141,22 @@ python3 - "$D_REG" <<'PY'
 import json,sys
 from pathlib import Path
 state=json.loads(Path(sys.argv[1]).read_text())
-state['clients']={'machine-d': {'ssh_port': 6000, 'hostname': 'already-there'}}
+state['clients']={'machine-d': {
+  'hostname': 'already-there',
+  'created_at': '2026-08-26T00:00:00Z',
+  'last_enrolled_at': '2026-08-26T00:00:00Z',
+  'services': {
+    'ssh': {
+      'name': 'SSH',
+      'protocol': 'tcp',
+      'local_ip': '127.0.0.1',
+      'local_port': 22,
+      'remote_port': 6000,
+      'preset': 'ssh',
+      'enabled': True,
+    }
+  },
+}}
 Path(sys.argv[1]).write_text(json.dumps(state, indent=2, sort_keys=True)+'\n')
 PY
 cp "$D_REG" "$WORKDIR/case-d.registry-with-client"
@@ -167,9 +182,13 @@ python3 - "$E_REG" <<'PY'
 import json,sys
 from pathlib import Path
 state=json.loads(Path(sys.argv[1]).read_text())
+if state.get('schema_version') != 2:
+    raise SystemExit(1)
 if state.get('reserved') != [6000, 6001]:
     raise SystemExit(1)
 if state.get('clients') != {}:
+    raise SystemExit(1)
+if 'ssh_port' in json.dumps(state) or 'https_port' in json.dumps(state):
     raise SystemExit(1)
 PY
 assert_mode "$E_REG" "0o600"

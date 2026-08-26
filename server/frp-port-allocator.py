@@ -2,8 +2,10 @@
 import argparse
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
+import re
 import socket
 import subprocess
 import tempfile
@@ -15,10 +17,36 @@ from pathlib import Path
 
 LOCK = threading.Lock()
 MAX_CLOCK_SKEW = 300
+REGISTRY_SCHEMA_VERSION = 2
+SERVICE_ID_RE = re.compile(r'^[a-z0-9][a-z0-9._-]{0,31}$')
+MAX_SERVICES = 32
+MAX_NAME_LEN = 64
+MAX_HOST_LEN = 253
+ALLOWED_PRESETS = ('ssh', 'http', 'https', 'custom')
+ALLOWED_PROTOCOLS = ('tcp',)
+UNSUPPORTED_SCHEMA_MSG = (
+    'unsupported registry schema; redeploy/reset registry for the generic-service version'
+)
+
+
+class RegistrySchemaError(ValueError):
+    pass
+
+
+class ServiceValidationError(ValueError):
+    pass
 
 
 def utc_now_iso():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+
+
+def empty_registry():
+    return {
+        'schema_version': REGISTRY_SCHEMA_VERSION,
+        'reserved': [],
+        'clients': {},
+    }
 
 
 def load_json(path, default=None):
@@ -89,6 +117,166 @@ def encrypt_token(token, secret):
     return proc.stdout.decode().strip()
 
 
+def coerce_port(value):
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if 1 <= value <= 65535 else None
+    text = str(value).strip()
+    if not text or not re.fullmatch(r'[0-9]+', text):
+        return None
+    port = int(text)
+    if 1 <= port <= 65535:
+        return port
+    return None
+
+
+def require_registry_v2(state):
+    if not isinstance(state, dict):
+        raise RegistrySchemaError(UNSUPPORTED_SCHEMA_MSG)
+    version = state.get('schema_version')
+    if version != REGISTRY_SCHEMA_VERSION:
+        raise RegistrySchemaError(UNSUPPORTED_SCHEMA_MSG)
+    clients = state.get('clients', {})
+    if clients is None:
+        clients = {}
+    if not isinstance(clients, dict):
+        raise RegistrySchemaError(UNSUPPORTED_SCHEMA_MSG)
+    for client in clients.values():
+        if not isinstance(client, dict):
+            raise RegistrySchemaError(UNSUPPORTED_SCHEMA_MSG)
+        if 'ssh_port' in client or 'https_port' in client:
+            raise RegistrySchemaError(UNSUPPORTED_SCHEMA_MSG)
+        services = client.get('services', {})
+        if services is None:
+            services = {}
+        if not isinstance(services, dict):
+            raise RegistrySchemaError(UNSUPPORTED_SCHEMA_MSG)
+    reserved = state.get('reserved', [])
+    if reserved is None:
+        reserved = []
+    if not isinstance(reserved, list):
+        raise RegistrySchemaError(UNSUPPORTED_SCHEMA_MSG)
+    return state
+
+
+def used_ports_from_state(state):
+    used = set()
+    for item in state.get('reserved') or []:
+        port = coerce_port(item)
+        if port is not None:
+            used.add(port)
+    for client in (state.get('clients') or {}).values():
+        if not isinstance(client, dict):
+            continue
+        services = client.get('services') or {}
+        if not isinstance(services, dict):
+            continue
+        for svc in services.values():
+            if not isinstance(svc, dict):
+                continue
+            port = coerce_port(svc.get('remote_port'))
+            if port is not None:
+                used.add(port)
+    return used
+
+
+def valid_local_ip(value):
+    text = str(value).strip()
+    if not text or len(text) > MAX_HOST_LEN:
+        return False
+    if any(c in text for c in ' \t\r\n/\\;|&$`\'"<>'):
+        return False
+    try:
+        ipaddress.ip_address(text)
+        return True
+    except ValueError:
+        pass
+    if text.lower() == 'localhost':
+        return True
+    if re.fullmatch(r'[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?', text):
+        return True
+    return False
+
+
+def normalize_service(raw):
+    if not isinstance(raw, dict):
+        raise ServiceValidationError('each service must be an object')
+
+    sid = str(raw.get('id', '')).strip().lower()
+    if not sid:
+        raise ServiceValidationError('service id is required')
+    if not SERVICE_ID_RE.fullmatch(sid):
+        raise ServiceValidationError(
+            'invalid service id; use [a-z0-9][a-z0-9._-]{0,31}'
+        )
+
+    protocol = str(raw.get('protocol', 'tcp') or 'tcp').strip().lower()
+    if protocol not in ALLOWED_PROTOCOLS:
+        raise ServiceValidationError('only tcp services are supported')
+
+    preset = str(raw.get('preset', 'custom') or 'custom').strip().lower()
+    if preset not in ALLOWED_PRESETS:
+        raise ServiceValidationError('invalid service preset')
+
+    default_name = {
+        'ssh': 'SSH',
+        'http': 'HTTP',
+        'https': 'HTTPS',
+    }.get(preset, sid)
+    name = str(raw.get('name', '') or default_name).strip() or default_name
+    if len(name) > MAX_NAME_LEN:
+        raise ServiceValidationError('service name is too long')
+    if any(c in name for c in '\r\n'):
+        raise ServiceValidationError('service name contains invalid characters')
+
+    local_ip = str(raw.get('local_ip', '') or '').strip()
+    if not local_ip:
+        raise ServiceValidationError('local_ip is required')
+    if not valid_local_ip(local_ip):
+        raise ServiceValidationError('invalid local_ip')
+
+    local_port = coerce_port(raw.get('local_port'))
+    if local_port is None:
+        raise ServiceValidationError('invalid local_port; must be an integer 1-65535')
+
+    service = {
+        'id': sid,
+        'name': name,
+        'protocol': 'tcp',
+        'local_ip': local_ip,
+        'local_port': local_port,
+        'preset': preset,
+    }
+    if preset == 'ssh':
+        ssh_user = str(raw.get('ssh_user', '') or '').strip() or 'root'
+        if not re.fullmatch(r'[A-Za-z0-9._@-]{1,32}', ssh_user):
+            raise ServiceValidationError('invalid ssh_user')
+        service['ssh_user'] = ssh_user
+    return service
+
+
+def normalize_services(raw_services):
+    if raw_services is None:
+        raise ServiceValidationError('services is required')
+    if not isinstance(raw_services, list):
+        raise ServiceValidationError('services must be a list')
+    if not raw_services:
+        raise ServiceValidationError('at least one service must be configured')
+    if len(raw_services) > MAX_SERVICES:
+        raise ServiceValidationError('too many services in one enrollment request')
+
+    normalized = []
+    seen = set()
+    for item in raw_services:
+        service = normalize_service(item)
+        if service['id'] in seen:
+            raise ServiceValidationError(f'duplicate service id: {service["id"]}')
+        seen.add(service['id'])
+        normalized.append(service)
+    return normalized
+
+
 class Allocator:
     def __init__(self, config_path):
         self.config_path = config_path
@@ -99,24 +287,34 @@ class Allocator:
         self.token_file = self.cfg['token_file']
 
     def load_registry(self):
-        return load_json(self.registry_file, {'reserved': [], 'clients': {}})
+        if not Path(self.registry_file).exists():
+            return empty_registry()
+        state = load_json(self.registry_file)
+        return require_registry_v2(state)
 
     def save_registry(self, state):
+        state = dict(state)
+        state['schema_version'] = REGISTRY_SCHEMA_VERSION
+        require_registry_v2(state)
         atomic_write_json(self.registry_file, state)
 
     def used_ports(self, state):
-        used = {int(x) for x in state.get('reserved', [])}
-        for client in state.get('clients', {}).values():
-            for key in ('ssh_port', 'https_port'):
-                value = client.get(key)
-                if value:
-                    used.add(int(value))
-        return used
+        return used_ports_from_state(state)
 
-    def next_port(self, state):
-        used = self.used_ports(state)
-        for port in range(int(self.cfg['port_start']), int(self.cfg['port_end']) + 1):
-            if port in used:
+    def protected_ports(self):
+        protected = set()
+        for key in ('listen_port', 'control_port'):
+            port = coerce_port(self.cfg.get(key))
+            if port is not None:
+                protected.add(port)
+        return protected
+
+    def allocate_port(self, used):
+        protected = self.protected_ports()
+        start = int(self.cfg['port_start'])
+        end = int(self.cfg['port_end'])
+        for port in range(start, end + 1):
+            if port in used or port in protected:
                 continue
             if not port_is_available(port):
                 continue
@@ -174,65 +372,105 @@ class Allocator:
         if error:
             return 403, {'error': error}
 
-        payload = json.loads(body.decode())
+        try:
+            payload = json.loads(body.decode())
+        except json.JSONDecodeError:
+            return 400, {'error': 'invalid JSON'}
+        if not isinstance(payload, dict):
+            return 400, {'error': 'invalid JSON'}
+
         machine_id = str(payload.get('machine_id', '')).strip()
         hostname = str(payload.get('hostname', '')).strip()
-        ssh_user = str(payload.get('ssh_user', '')).strip() or 'root'
-        want_https = bool(payload.get('want_https'))
-        https_ip = str(payload.get('https_ip', '')).strip() if want_https else ''
         if not machine_id:
             return 400, {'error': 'machine_id is required'}
+        if any(c in machine_id for c in '\r\n/\\'):
+            return 400, {'error': 'invalid machine_id'}
+
+        try:
+            requested = normalize_services(payload.get('services'))
+        except ServiceValidationError as exc:
+            return 400, {'error': str(exc)}
 
         bound_machine_id = record.get('bound_machine_id')
         if bound_machine_id and bound_machine_id != machine_id:
             return 403, {'error': 'enrollment code is already bound to another machine'}
 
-        with LOCK:
-            state = self.load_registry()
-            clients = state.setdefault('clients', {})
-            client = clients.get(machine_id)
-            now_iso = utc_now_iso()
+        try:
+            with LOCK:
+                state = self.load_registry()
+                clients = state.setdefault('clients', {})
+                client = clients.get(machine_id)
+                now_iso = utc_now_iso()
 
-            if client is None:
-                client = {
-                    'hostname': hostname,
-                    'ssh_user': ssh_user,
-                    'ssh_port': self.next_port(state),
-                    'https_port': None,
-                    'https_enabled': False,
-                    'https_ip': '',
-                    'created_at': now_iso,
-                    'last_enrolled_at': now_iso,
-                }
-                clients[machine_id] = client
-            else:
-                client['hostname'] = hostname or client.get('hostname', '')
-                client['ssh_user'] = ssh_user or client.get('ssh_user', 'root')
-                client['last_enrolled_at'] = now_iso
+                if client is None:
+                    client = {
+                        'hostname': hostname,
+                        'created_at': now_iso,
+                        'last_enrolled_at': now_iso,
+                        'services': {},
+                    }
+                    clients[machine_id] = client
+                else:
+                    client['hostname'] = hostname or client.get('hostname', '')
+                    client['last_enrolled_at'] = now_iso
+                    if not isinstance(client.get('services'), dict):
+                        client['services'] = {}
 
-            if want_https:
-                if not client.get('https_port'):
-                    client['https_port'] = self.next_port(state)
-                client['https_enabled'] = True
-                client['https_ip'] = https_ip
-            else:
-                client['https_enabled'] = False
-                client['https_ip'] = ''
+                existing_services = dict(client.get('services') or {})
+                used = self.used_ports(state)
+                updated = {}
+                requested_ids = {svc['id'] for svc in requested}
 
-            self.save_registry(state)
+                for sid, rec in existing_services.items():
+                    if sid in requested_ids:
+                        continue
+                    kept = dict(rec)
+                    kept['enabled'] = False
+                    updated[sid] = kept
 
-            record['bound_machine_id'] = machine_id
-            record['used_at'] = record.get('used_at') or now_iso
-            record['last_used_at'] = now_iso
-            self.save_enrollment(enroll_path, record)
+                allocated = []
+                for spec in requested:
+                    sid = spec['id']
+                    previous = existing_services.get(sid) or {}
+                    remote_port = coerce_port(previous.get('remote_port'))
+                    if remote_port is None:
+                        remote_port = self.allocate_port(used)
+                        used.add(remote_port)
+                    stored = {
+                        'name': spec['name'],
+                        'protocol': 'tcp',
+                        'local_ip': spec['local_ip'],
+                        'local_port': spec['local_port'],
+                        'remote_port': remote_port,
+                        'preset': spec['preset'],
+                        'enabled': True,
+                    }
+                    if spec['preset'] == 'ssh':
+                        stored['ssh_user'] = spec.get('ssh_user', 'root')
+                    updated[sid] = stored
+                    allocated.append({
+                        'id': sid,
+                        'remote_port': remote_port,
+                    })
+
+                client['services'] = updated
+                self.save_registry(state)
+
+                record['bound_machine_id'] = machine_id
+                record['used_at'] = record.get('used_at') or now_iso
+                record['last_used_at'] = now_iso
+                self.save_enrollment(enroll_path, record)
+        except RegistrySchemaError as exc:
+            return 500, {'error': str(exc)}
+        except RuntimeError as exc:
+            return 500, {'error': str(exc)}
 
         secret = record['secret']
         token_ciphertext = encrypt_token(read_text(self.token_file), secret)
         response_payload = {
             'frp_server': self.cfg['public_ip'],
             'frp_server_port': int(self.cfg['control_port']),
-            'ssh_port': int(client['ssh_port']),
-            'https_port': int(client['https_port']) if want_https and client.get('https_port') else None,
+            'services': allocated,
             'token_ciphertext': token_ciphertext,
         }
         response_payload['response_hmac'] = hmac_hex(secret, canonical_json(response_payload))
@@ -279,6 +517,8 @@ def make_handler(allocator):
                 self.send_json(code, result)
             except json.JSONDecodeError:
                 self.send_json(400, {'error': 'invalid JSON'})
+            except RegistrySchemaError as exc:
+                self.send_json(500, {'error': str(exc)})
             except Exception as exc:
                 self.send_json(500, {'error': str(exc)})
 
@@ -291,6 +531,10 @@ def main():
     args = parser.parse_args()
 
     allocator = Allocator(args.config)
+    try:
+        allocator.load_registry()
+    except RegistrySchemaError as exc:
+        raise SystemExit(f'ERROR: {exc}') from exc
     allocator.cleanup_expired_enrollments()
     host = allocator.cfg.get('listen_host', '0.0.0.0')
     port = int(allocator.cfg['listen_port'])

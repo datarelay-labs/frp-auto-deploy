@@ -218,10 +218,6 @@ def ensure_server_token(etc_dir: Path, backup=True):
     }
 
 
-def utc_now_iso():
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
-
-
 def coerce_port(value):
     if value is None or isinstance(value, bool):
         return None
@@ -251,17 +247,10 @@ def is_service_port(port, port_start, port_end, allocator_port):
     return int(port_start) <= port <= int(port_end)
 
 
-def backup_legacy_registry(legacy_path: Path):
-    if not legacy_path.is_file():
-        return None
-    stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
-    backup = legacy_path.with_name(f'{legacy_path.name}.pre-frp-auto-deploy-{stamp}')
-    if backup.exists():
-        backup = legacy_path.with_name(
-            f'{legacy_path.name}.pre-frp-auto-deploy-{stamp}-{os.getpid()}'
-        )
-    atomic_write_bytes(backup, legacy_path.read_bytes(), 0o600)
-    return backup
+REGISTRY_SCHEMA_VERSION = 2
+UNSUPPORTED_SCHEMA_MSG = (
+    'unsupported registry schema; redeploy/reset registry for the generic-service version'
+)
 
 
 def load_registry_json(path: Path):
@@ -274,44 +263,50 @@ def load_registry_json(path: Path):
     return data
 
 
-def migrate_legacy_client(raw, now_iso: str):
-    if not isinstance(raw, dict):
-        raw = {}
-    migrated = {
-        'hostname': '',
-        'ssh_user': 'root',
-        'ssh_port': None,
-        'https_port': None,
-        'https_enabled': False,
-        'https_ip': '',
-        'created_at': now_iso,
-        'last_enrolled_at': now_iso,
-    }
-    migrated.update(raw)
-    if 'ssh_port' in raw:
-        port = coerce_port(raw.get('ssh_port'))
-        migrated['ssh_port'] = port if port is not None else raw.get('ssh_port')
-    if 'https_port' in raw:
-        port = coerce_port(raw.get('https_port'))
-        migrated['https_port'] = port if port is not None else raw.get('https_port')
-    if 'hostname' in raw:
-        migrated['hostname'] = raw.get('hostname') or ''
-    if 'https_enabled' not in raw:
-        migrated['https_enabled'] = coerce_port(migrated.get('https_port')) is not None
-    return migrated
+def require_registry_v2(state):
+    if not isinstance(state, dict):
+        raise MigrationError(UNSUPPORTED_SCHEMA_MSG)
+    if state.get('schema_version') != REGISTRY_SCHEMA_VERSION:
+        raise MigrationError(UNSUPPORTED_SCHEMA_MSG)
+    clients = state.get('clients', {})
+    if clients is None:
+        clients = {}
+    if not isinstance(clients, dict):
+        raise MigrationError(UNSUPPORTED_SCHEMA_MSG)
+    for client in clients.values():
+        if not isinstance(client, dict):
+            raise MigrationError(UNSUPPORTED_SCHEMA_MSG)
+        if 'ssh_port' in client or 'https_port' in client:
+            raise MigrationError(UNSUPPORTED_SCHEMA_MSG)
+        services = client.get('services', {})
+        if services is None:
+            services = {}
+        if not isinstance(services, dict):
+            raise MigrationError(UNSUPPORTED_SCHEMA_MSG)
+    reserved = state.get('reserved', [])
+    if reserved is None:
+        reserved = []
+    if not isinstance(reserved, list):
+        raise MigrationError(UNSUPPORTED_SCHEMA_MSG)
+    return state
 
 
 def collect_used_ports(state, port_start, port_end, allocator_port):
     used = set()
-    for item in state.get('reserved', []):
+    for item in state.get('reserved', []) or []:
         port = coerce_port(item)
         if is_service_port(port, port_start, port_end, allocator_port):
             used.add(port)
-    for client in state.get('clients', {}).values():
+    for client in (state.get('clients') or {}).values():
         if not isinstance(client, dict):
             continue
-        for key in ('ssh_port', 'https_port'):
-            port = coerce_port(client.get(key))
+        services = client.get('services') or {}
+        if not isinstance(services, dict):
+            continue
+        for svc in services.values():
+            if not isinstance(svc, dict):
+                continue
+            port = coerce_port(svc.get('remote_port'))
             if port is None:
                 continue
             if allocator_port is not None and port == int(allocator_port):
@@ -333,7 +328,6 @@ def registry_result(action, legacy_migration, migrated_clients, preserved_ports,
 def init_registry(
     registry_path: Path,
     ports_csv: str,
-    legacy_registry=None,
     port_start=1,
     port_end=65535,
     allocator_port=None,
@@ -349,50 +343,18 @@ def init_registry(
     }
 
     if registry_path.exists():
-        state = load_registry_json(registry_path)
+        state = require_registry_v2(load_registry_json(registry_path))
         used = collect_used_ports(state, port_start, port_end, allocator_port)
-        return registry_result('unchanged', 'SKIP', 0, len(used))
+        return registry_result('unchanged', 'N/A', 0, len(used))
 
-    legacy_path = Path(legacy_registry) if legacy_registry else None
-    legacy_state = None
-    backup_path = None
-    if legacy_path is not None and legacy_path.is_file() and legacy_path.stat().st_size > 0:
-        backup_path = backup_legacy_registry(legacy_path)
-        legacy_state = load_registry_json(legacy_path)
-
-    reserved = set()
-    clients = {}
-    now_iso = utc_now_iso()
-    migrated_clients = 0
-
-    if legacy_state is not None:
-        for item in legacy_state.get('reserved', []):
-            port = coerce_port(item)
-            if is_service_port(port, port_start, port_end, allocator_port):
-                reserved.add(port)
-        raw_clients = legacy_state.get('clients', {})
-        if not isinstance(raw_clients, dict):
-            raise MigrationError('legacy FRP registry clients have an unexpected format')
-        for machine_id, raw_client in raw_clients.items():
-            if not machine_id:
-                continue
-            clients[str(machine_id)] = migrate_legacy_client(raw_client, now_iso)
-            migrated_clients += 1
-
-    reserved.update(active_ports)
-    state = {'reserved': sorted(reserved), 'clients': clients}
+    state = {
+        'schema_version': REGISTRY_SCHEMA_VERSION,
+        'reserved': sorted(active_ports),
+        'clients': {},
+    }
     used = collect_used_ports(state, port_start, port_end, allocator_port)
     used.update(active_ports)
     atomic_write_json(registry_path, state, 0o600)
-
-    if legacy_state is not None:
-        return registry_result(
-            'migrated_legacy',
-            'PASS',
-            migrated_clients,
-            len(used),
-            backup_path,
-        )
     return registry_result('created', 'N/A', 0, len(used))
 
 
@@ -423,7 +385,6 @@ def main(argv=None):
     p_reg = sub.add_parser('init-registry')
     p_reg.add_argument('--registry', required=True)
     p_reg.add_argument('--ports', default='')
-    p_reg.add_argument('--legacy-registry', default='')
     p_reg.add_argument('--port-start', type=int, default=1)
     p_reg.add_argument('--port-end', type=int, default=65535)
     p_reg.add_argument('--allocator-port', type=int, default=None)
@@ -437,7 +398,6 @@ def main(argv=None):
                 init_registry(
                     Path(args.registry),
                     args.ports,
-                    legacy_registry=args.legacy_registry or None,
                     port_start=args.port_start,
                     port_end=args.port_end,
                     allocator_port=args.allocator_port,

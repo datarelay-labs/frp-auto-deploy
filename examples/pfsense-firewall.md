@@ -2,7 +2,7 @@
 
 Example topology:
 
-- Public firewall IP: `221.139.249.110`
+- Public firewall IP: `203.0.113.10`
 - Internal FRP server: `10.10.10.50`
 - FRP control: TCP/443
 - FRP service ports: TCP/6000-6098
@@ -10,9 +10,9 @@ Example topology:
 
 Create three DNAT / Port Forward rules:
 
-1. `221.139.249.110:443` -> `10.10.10.50:443`
-2. `221.139.249.110:6000-6098` -> `10.10.10.50:6000-6098`
-3. `221.139.249.110:80` -> `10.10.10.50:6099`
+1. `203.0.113.10:443` -> `10.10.10.50:443`
+2. `203.0.113.10:6000-6098` -> `10.10.10.50:6000-6098`
+3. `203.0.113.10:80` -> `10.10.10.50:6099`
 
 For the range rule in pfSense, set the redirect target port to the beginning of the range (`6000`). pfSense calculates the ending port automatically.
 

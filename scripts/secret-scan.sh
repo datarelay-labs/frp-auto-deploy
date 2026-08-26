@@ -18,7 +18,7 @@ while IFS= read -r path; do
   esac
 done < <(git ls-files)
 
-if git grep -nE 'INSTALL_KEY=' -- ':!tests/' ':!README.md' >/dev/null; then
+if git grep -nE 'INSTALL_KEY=' -- ':!tests/' ':!README.md' ':!scripts/secret-scan.sh' >/dev/null; then
   fail "INSTALL_KEY assignment found"
 fi
 

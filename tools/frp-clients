@@ -1,27 +1,94 @@
 #!/usr/bin/env python3
-import json, socket
+import json
+import os
+import socket
 from pathlib import Path
 
-CFG=Path('/etc/frp-auto-deploy/config.json')
-cfg=json.loads(CFG.read_text())
-reg=Path(cfg['registry_file'])
-state=json.loads(reg.read_text()) if reg.exists() else {'clients':{}}
+ROOT = os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
+CFG = Path(ROOT + '/etc/frp-auto-deploy/config.json')
+UNSUPPORTED = (
+    'ERROR: unsupported registry schema; redeploy/reset registry for the generic-service version'
+)
+
+
+def require_v2(state):
+    if not isinstance(state, dict) or state.get('schema_version') != 2:
+        raise SystemExit(UNSUPPORTED)
+    for client in (state.get('clients') or {}).values():
+        if not isinstance(client, dict):
+            raise SystemExit(UNSUPPORTED)
+        if 'ssh_port' in client or 'https_port' in client:
+            raise SystemExit(UNSUPPORTED)
+
 
 def active(port):
-    if not port: return False
-    s=socket.socket(); s.settimeout(0.25)
+    if not port:
+        return False
+    s = socket.socket()
+    s.settimeout(0.25)
     try:
         return s.connect_ex(('127.0.0.1', int(port))) == 0
     finally:
         s.close()
 
+
+def enabled_services(client):
+    services = client.get('services') or {}
+    if not isinstance(services, dict):
+        return []
+    items = []
+    for sid, svc in services.items():
+        if not isinstance(svc, dict):
+            continue
+        if svc.get('enabled', True) is False:
+            continue
+        items.append((sid, svc))
+    return sorted(items, key=lambda kv: (kv[1].get('remote_port') is None, kv[1].get('remote_port') or 0, kv[0]))
+
+
+def client_online(services):
+    for _sid, svc in services:
+        if active(svc.get('remote_port')):
+            return True
+    return False
+
+
+cfg = json.loads(CFG.read_text())
+reg = Path(cfg['registry_file'])
+if ROOT and not str(reg).startswith(ROOT):
+    reg = Path(ROOT + str(reg))
+state = json.loads(reg.read_text()) if reg.exists() else {'schema_version': 2, 'clients': {}}
+require_v2(state)
+
 print(f'PUBLIC IP: {cfg["public_ip"]}')
 print()
-print(f'{"HOSTNAME":24} {"USER":12} {"SSH":6} {"HTTPS":6} {"STATE":8} HTTPS_TARGET')
-print('-'*92)
-for mid,c in sorted(state.get('clients',{}).items(), key=lambda kv:(kv[1].get('ssh_port') or 99999)):
-    ssh=c.get('ssh_port')
-    https=c.get('https_port') if c.get('https_enabled') else None
-    is_up=active(ssh)
-    state_txt='online' if is_up else 'offline'
-    print(f'{c.get("hostname","")[:24]:24} {c.get("ssh_user","root")[:12]:12} {str(ssh or "-"):6} {str(https or "-"):6} {state_txt:8} {c.get("https_ip","")}')
+print(f'{"HOSTNAME":24} {"SERVICES":8} {"STATE":8} LAST ENROLLED')
+print('-' * 72)
+
+clients = sorted(
+    (state.get('clients') or {}).items(),
+    key=lambda kv: (kv[1].get('hostname') or '', kv[0]),
+)
+for mid, client in clients:
+    services = enabled_services(client)
+    hostname = (client.get('hostname') or '')[:24]
+    state_txt = 'online' if client_online(services) else 'offline'
+    last = client.get('last_enrolled_at') or '-'
+    print(f'{hostname:24} {str(len(services)):8} {state_txt:8} {last}')
+
+if clients:
+    print()
+    for _mid, client in clients:
+        hostname = client.get('hostname') or '(unknown)'
+        print(hostname)
+        services = client.get('services') or {}
+        if not isinstance(services, dict) or not services:
+            print('  (no services)')
+            continue
+        for sid, svc in sorted(services.items(), key=lambda kv: (kv[1].get('remote_port') or 0, kv[0]) if isinstance(kv[1], dict) else (0, kv[0])):
+            if not isinstance(svc, dict):
+                continue
+            port = svc.get('remote_port') or '-'
+            suffix = '' if svc.get('enabled', True) else ' (reserved)'
+            print(f'  {sid}:{port}{suffix}')
+        print()
