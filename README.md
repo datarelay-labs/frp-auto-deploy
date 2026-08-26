@@ -29,7 +29,7 @@ Current pinned FRP: **v0.70.1**.
 
 No FRP token or permanent install secret is stored in this Git repository.
 
-- `install-server.sh` generates `/etc/frp/server_token` locally.
+- On a new server, `install-server.sh` generates `/etc/frp/server_token` locally. Installing over an existing FRP server reuses the current token (including a legacy inline `auth.token`) and does not rotate it.
 - A client first receives a short-lived enrollment code from `frp-create-client`.
 - The enrollment secret itself is never sent over the enrollment HTTP request.
 - Requests and responses are HMAC authenticated.
@@ -94,6 +94,10 @@ Allocator public URL:        http://221.139.249.110/enroll
 ```
 
 If this is being installed over an existing FRP server, the installer scans active service ports in the configured range before restarting FRP and preserves those ports as reserved in the initial registry. This is useful when `6000` and `6001` are already in use.
+
+Installing over an existing FRP server preserves the existing FRP authentication token and active published ports. Existing frpc clients therefore do not need to be reconfigured.
+
+Legacy inline `auth.token` values are migrated into `/etc/frp/server_token` without changing the secret. The previous `frps.toml` is copied to a timestamped backup with mode `600` before the file is rewritten. Re-running the installer is idempotent: it will not rotate the token, reset the registry, or drop existing client allocations.
 
 ## Firewall/NAT
 

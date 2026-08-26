@@ -9,6 +9,7 @@ dist.mkdir(exist_ok=True)
 files=[
  'install-server.sh',
  'server/frp-port-allocator.py',
+ 'server/migrate_token.py',
  'server/frps.service',
  'server/frp-port-allocator.service',
  'tools/frp-create-client',

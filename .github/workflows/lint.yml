@@ -13,7 +13,9 @@ jobs:
           bash -n tools/frp-server-status
       - name: Python compile
         run: |
-          python3 -m py_compile server/frp-port-allocator.py scripts/build-bundles.py
+          python3 -m py_compile server/frp-port-allocator.py server/migrate_token.py scripts/build-bundles.py
           python3 -m py_compile tools/frp-create-client tools/frp-clients tools/frp-client-info tools/frp-release-client tools/frp-set-client-installer-url
+      - name: Migration regression tests
+        run: ./tests/test-server-migration.sh
       - name: Build standalone bundles
         run: ./scripts/build-bundles.sh

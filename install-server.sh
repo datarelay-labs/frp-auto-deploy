@@ -14,6 +14,7 @@ fi
 
 for f in \
   "$BASE_DIR/server/frp-port-allocator.py" \
+  "$BASE_DIR/server/migrate_token.py" \
   "$BASE_DIR/server/frps.service" \
   "$BASE_DIR/server/frp-port-allocator.service" \
   "$BASE_DIR/tools/frp-create-client" \
@@ -90,9 +91,18 @@ install -m 0755 "$TMPDIR/frp_${FRP_VERSION}_linux_${FRP_ARCH}/frps" /usr/local/b
 mkdir -p /etc/frp /etc/frp-auto-deploy /var/lib/frp-auto-deploy/enrollments /usr/local/lib/frp-auto-deploy
 chmod 700 /etc/frp /etc/frp-auto-deploy /var/lib/frp-auto-deploy /var/lib/frp-auto-deploy/enrollments
 
-if [[ ! -s /etc/frp/server_token ]]; then
-  openssl rand -hex 32 >/etc/frp/server_token
-fi
+TOKEN_ACTION=""
+TOKEN_PRESERVED="N/A"
+TOKEN_BACKUP=""
+migrate_out="$(python3 "$BASE_DIR/server/migrate_token.py" ensure --etc-dir /etc/frp --backup)"
+while IFS= read -r line; do
+  case "$line" in
+    TOKEN_ACTION=*|TOKEN_PRESERVED=*|TOKEN_BACKUP=*)
+      printf -v "${line%%=*}" '%s' "${line#*=}"
+      ;;
+  esac
+done <<< "$migrate_out"
+[[ -s /etc/frp/server_token ]] || { echo "ERROR: FRP server token is missing after migration" >&2; exit 1; }
 chmod 600 /etc/frp/server_token
 
 cat >/etc/frp/frps.toml <<EOF2
@@ -132,18 +142,11 @@ open('/etc/frp-auto-deploy/config.json','w').write(json.dumps(cfg,indent=2,sort_
 PY
 chmod 600 /etc/frp-auto-deploy/config.json
 
-if [[ ! -f /var/lib/frp-auto-deploy/registry.json ]]; then
-  python3 - "$ACTIVE_PORTS" <<'PY'
-import json,sys
-ports=[]
-for x in sys.argv[1].split(','):
-    x=x.strip()
-    if x.isdigit(): ports.append(int(x))
-state={'reserved':sorted(set(ports)),'clients':{}}
-open('/var/lib/frp-auto-deploy/registry.json','w').write(json.dumps(state,indent=2,sort_keys=True)+'\n')
-PY
-  chmod 600 /var/lib/frp-auto-deploy/registry.json
-fi
+python3 "$BASE_DIR/server/migrate_token.py" init-registry \
+  --registry /var/lib/frp-auto-deploy/registry.json \
+  --ports "$ACTIVE_PORTS" >/dev/null
+[[ -f /var/lib/frp-auto-deploy/registry.json ]] || { echo "ERROR: registry.json is missing" >&2; exit 1; }
+chmod 600 /var/lib/frp-auto-deploy/registry.json
 
 install -m 0700 "$BASE_DIR/server/frp-port-allocator.py" /usr/local/lib/frp-auto-deploy/frp-port-allocator.py
 install -m 0644 "$BASE_DIR/server/frps.service" /etc/systemd/system/frps.service
@@ -178,6 +181,14 @@ Allocator URL     : ${FRP_ALLOCATOR_PUBLIC_URL}
 EOF2
 if [[ -n "$ACTIVE_PORTS" ]]; then
   echo "Preserved existing ports as reserved: $ACTIVE_PORTS"
+fi
+if [[ "$TOKEN_PRESERVED" == "PASS" ]]; then
+  echo "Existing FRP authentication token preserved: TOKEN_PRESERVED=PASS"
+elif [[ "$TOKEN_ACTION" == "generated" ]]; then
+  echo "Generated a new FRP authentication token for this fresh install."
+fi
+if [[ -n "$TOKEN_BACKUP" ]]; then
+  echo "Existing frps.toml backed up with mode 600"
 fi
 cat <<EOF2
 
