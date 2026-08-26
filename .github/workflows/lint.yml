@@ -11,6 +11,8 @@ jobs:
         run: |
           git ls-files '*.sh' | xargs -r bash -n
           bash -n tools/frp-server-status
+          bash -n tools/frp-update
+          bash -n server/frp-common.sh
       - name: Python compile
         run: |
           python3 -m py_compile server/frp-port-allocator.py server/migrate_token.py scripts/build-bundles.py
@@ -19,5 +21,11 @@ jobs:
         run: |
           ./tests/test-server-migration.sh
           ./tests/test-legacy-registry-migration.sh
+      - name: Update regression tests
+        run: ./tests/test-frp-update.sh
       - name: Build standalone bundles
         run: ./scripts/build-bundles.sh
+      - name: Generated bundle consistency
+        run: |
+          ./scripts/build-bundles.sh
+          git diff --exit-code -- dist/

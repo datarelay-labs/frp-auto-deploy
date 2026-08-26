@@ -10,6 +10,8 @@ files=[
  'install-server.sh',
  'server/frp-port-allocator.py',
  'server/migrate_token.py',
+ 'server/frp-release.env',
+ 'server/frp-common.sh',
  'server/frps.service',
  'server/frp-port-allocator.service',
  'tools/frp-create-client',
@@ -18,6 +20,7 @@ files=[
  'tools/frp-release-client',
  'tools/frp-set-client-installer-url',
  'tools/frp-server-status',
+ 'tools/frp-update',
 ]
 
 lines=['#!/usr/bin/env bash','set -euo pipefail','TMP="$(mktemp -d)"','trap \'rm -rf "$TMP"\' EXIT']
