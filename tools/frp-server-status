@@ -1,18 +1,173 @@
 #!/usr/bin/env bash
+# Operator-facing status for an frp-auto-deploy managed FRP server.
 set -euo pipefail
-echo '=== frps ==='
-systemctl --no-pager --full status frps 2>/dev/null | sed -n '1,12p' || true
-echo
-echo '=== allocator ==='
-systemctl --no-pager --full status frp-port-allocator 2>/dev/null | sed -n '1,12p' || true
-echo
-echo '=== listeners ==='
-if [[ -r /etc/frp-auto-deploy/config.json ]]; then
-  python3 - <<'PY'
-import json,subprocess
-c=json.load(open('/etc/frp-auto-deploy/config.json'))
-print(f"Control: {c['control_port']}")
-print(f"Services: {c['port_start']}-{c['port_end']}")
-print(f"Allocator internal: {c['listen_port']}")
-PY
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+resolve_lib_dir() {
+  if [[ -n "${FRP_AUTO_DEPLOY_LIB:-}" && -d "${FRP_AUTO_DEPLOY_LIB}" ]]; then
+    printf '%s\n' "$FRP_AUTO_DEPLOY_LIB"
+    return 0
+  fi
+  if [[ -f "$SCRIPT_DIR/../server/frp-release.env" ]]; then
+    printf '%s\n' "$SCRIPT_DIR/../server"
+    return 0
+  fi
+  if [[ -f /usr/local/lib/frp-auto-deploy/frp-release.env ]]; then
+    printf '%s\n' /usr/local/lib/frp-auto-deploy
+    return 0
+  fi
+  return 1
+}
+
+LIB_DIR=""
+if LIB_DIR="$(resolve_lib_dir)"; then
+  # shellcheck source=/dev/null
+  source "$LIB_DIR/frp-release.env"
+  # shellcheck source=/dev/null
+  source "$LIB_DIR/frp-common.sh"
+else
+  PROJECT_VERSION="${PROJECT_VERSION:-unknown}"
+  FRP_VERSION="${FRP_VERSION:-unknown}"
 fi
+
+TEST_DIR="${FRP_AUTO_DEPLOY_UPDATE_TEST_DIR:-}"
+if [[ -n "$TEST_DIR" ]]; then
+  FRPS_BIN="${FRPS_BIN:-$TEST_DIR/usr/local/bin/frps}"
+  CONFIG_JSON="${CONFIG_JSON:-$TEST_DIR/etc/frp-auto-deploy/config.json}"
+  VERSION_FILE="${VERSION_FILE:-$TEST_DIR/etc/frp-auto-deploy/version}"
+  REGISTRY_FILE="${REGISTRY_FILE:-$TEST_DIR/var/lib/frp-auto-deploy/registry.json}"
+  SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-$TEST_DIR/bin/systemctl}"
+else
+  FRPS_BIN="${FRPS_BIN:-/usr/local/bin/frps}"
+  CONFIG_JSON="${CONFIG_JSON:-/etc/frp-auto-deploy/config.json}"
+  VERSION_FILE="${VERSION_FILE:-/etc/frp-auto-deploy/version}"
+  REGISTRY_FILE="${REGISTRY_FILE:-/var/lib/frp-auto-deploy/registry.json}"
+  SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
+fi
+
+unit_state() {
+  local unit="$1"
+  if command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1 || [[ -x "$SYSTEMCTL_BIN" ]]; then
+    local st
+    st="$("$SYSTEMCTL_BIN" is-active "$unit" 2>/dev/null || true)"
+    if [[ "$st" == "active" ]]; then
+      printf '%s\n' active
+    else
+      printf '%s\n' "${st:-unknown}"
+    fi
+  else
+    printf '%s\n' unknown
+  fi
+}
+
+installed_frp="unknown"
+if declare -F frp_parse_binary_version >/dev/null 2>&1; then
+  installed_frp="$(frp_parse_binary_version "$FRPS_BIN" 2>/dev/null || true)"
+  installed_frp="${installed_frp:-unknown}"
+fi
+
+project_version="$PROJECT_VERSION"
+tested_frp="$FRP_VERSION"
+if [[ -f "$VERSION_FILE" ]]; then
+  # shellcheck disable=SC1090
+  # Prefer installed metadata for project version; tested pin still from package liberally.
+  _pv="$(set -a; source "$VERSION_FILE"; set +a; printf '%s' "${PROJECT_VERSION:-}")"
+  [[ -n "$_pv" ]] && project_version="$_pv"
+fi
+
+upstream_latest="unavailable"
+if declare -F frp_fetch_upstream_latest >/dev/null 2>&1; then
+  upstream_latest="$(frp_fetch_upstream_latest 2>/dev/null || true)"
+  upstream_latest="${upstream_latest:-unavailable}"
+fi
+
+update_status="unknown"
+if [[ "$installed_frp" == "unknown" || "$tested_frp" == "unknown" ]]; then
+  update_status="unknown"
+elif [[ "$installed_frp" == "$tested_frp" ]]; then
+  if [[ "$upstream_latest" != "unavailable" && "$upstream_latest" != "$tested_frp" ]]; then
+    cmp="unknown"
+    if declare -F frp_compare_versions >/dev/null 2>&1; then
+      cmp="$(frp_compare_versions "$tested_frp" "$upstream_latest")"
+    fi
+    if [[ "$cmp" == older ]]; then
+      update_status="up to date (tested version)"
+    else
+      update_status="up to date"
+    fi
+  else
+    update_status="up to date"
+  fi
+else
+  cmp="unknown"
+  if declare -F frp_compare_versions >/dev/null 2>&1; then
+    cmp="$(frp_compare_versions "$installed_frp" "$tested_frp")"
+  fi
+  if [[ "$cmp" == older ]]; then
+    update_status="update available"
+  elif [[ "$cmp" == newer ]]; then
+    update_status="ahead of tested version"
+  else
+    update_status="update available"
+  fi
+fi
+
+frps_state="$(unit_state frps)"
+alloc_state="$(unit_state frp-port-allocator)"
+
+control_port="-"
+service_range="-"
+allocator_port="-"
+if [[ -r "$CONFIG_JSON" ]]; then
+  eval "$(python3 - "$CONFIG_JSON" <<'PY'
+import json,sys
+from pathlib import Path
+c=json.loads(Path(sys.argv[1]).read_text())
+print(f"control_port={c.get('control_port','-')}")
+print(f"service_range={c.get('port_start','-')}-{c.get('port_end','-')}")
+print(f"allocator_port={c.get('listen_port','-')}")
+PY
+)"
+fi
+
+clients=0
+reserved=0
+if [[ -r "$REGISTRY_FILE" ]]; then
+  eval "$(python3 - "$REGISTRY_FILE" <<'PY'
+import json,sys
+from pathlib import Path
+state=json.loads(Path(sys.argv[1]).read_text())
+clients=state.get('clients') or {}
+reserved=set(int(x) for x in (state.get('reserved') or []))
+for c in clients.values():
+    for k in ('ssh_port','https_port'):
+        v=c.get(k)
+        if v is not None and v!='':
+            reserved.add(int(v))
+print(f"clients={len(clients)}")
+print(f"reserved={len(reserved)}")
+PY
+)"
+fi
+
+cat <<EOF
+FRP Auto Deploy
+===============
+
+Project version : ${project_version}
+Installed FRP   : ${installed_frp}
+Tested FRP      : ${tested_frp}
+Upstream latest : ${upstream_latest}
+Update status   : ${update_status}
+
+frps            : ${frps_state}
+allocator       : ${alloc_state}
+
+FRP control     : TCP/${control_port}
+Service range   : TCP/${service_range}
+Allocator       : TCP/${allocator_port}
+
+Clients         : ${clients}
+Reserved ports  : ${reserved}
+EOF

@@ -128,6 +128,12 @@ Verify the server:
 sudo frp-server-status
 ```
 
+Upgrade FRP only to the version tested by this project (with automatic rollback on health-check failure):
+
+```bash
+sudo frp-update
+```
+
 or:
 
 ```bash
@@ -264,9 +270,10 @@ Binaries and systemd units are removed. Token, configuration, and registry are p
 - migration from an existing manually configured FRP server
 - migration from the legacy manual port allocator
 - client list, connection-info, and reservation management commands
+- safe FRP server binary updates to the tested/pinned version, with automatic rollback
 - uninstall helpers and standalone bootstrap bundles
 
-FRP itself remains upstream and is downloaded from the official release during installation.
+FRP itself remains upstream and is downloaded from the official release during installation. Upstream latest FRP releases are not installed automatically; `frp-auto-deploy` updates only to its tested/pinned FRP version.
 
 ## Why not fork FRP?
 
@@ -449,6 +456,19 @@ sudo frp-set-client-installer-url \
 sudo frp-server-status
 ```
 
+Shows project/FRP versions, update status, service health, and registry counts.
+
+## Safe FRP update
+
+```bash
+sudo frp-update
+sudo frp-update --check
+```
+
+`frp-update` upgrades the FRP server only to the version tested by `frp-auto-deploy` and automatically rolls back if the new server fails its health checks.
+
+It does not rotate the FRP token, reinitialize the registry, or change existing client port allocations. Upstream latest FRP releases are informational in `frp-server-status` and are not installed automatically.
+
 ---
 
 # Important Files
@@ -459,9 +479,13 @@ sudo frp-server-status
 /etc/frp/server_token
 /etc/frp/frps.toml
 /etc/frp-auto-deploy/config.json
+/etc/frp-auto-deploy/version
 /var/lib/frp-auto-deploy/registry.json
 /var/lib/frp-auto-deploy/enrollments/
+/var/lib/frp-auto-deploy/backups/
 /usr/local/lib/frp-auto-deploy/frp-port-allocator.py
+/usr/local/lib/frp-auto-deploy/frp-release.env
+/usr/local/lib/frp-auto-deploy/frp-common.sh
 ```
 
 ## Client

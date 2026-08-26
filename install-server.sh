@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_VERSION="1.0.0"
-FRP_VERSION="0.70.1"
-FRP_SHA256_AMD64="333da23d1b9009d7c01638e9ba38cf4600f7d37d393f854e96ee1396adefa9a6"
-FRP_SHA256_ARM64="3990f396a9a490ee7f0e5f355287750ed41520064ed999eab443b5e9a78d773d"
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "$BASE_DIR/server/frp-release.env"
+# shellcheck source=/dev/null
+source "$BASE_DIR/server/frp-common.sh"
 
 if [[ ${EUID} -ne 0 ]]; then
   echo "ERROR: run with sudo" >&2
@@ -15,6 +15,8 @@ fi
 for f in \
   "$BASE_DIR/server/frp-port-allocator.py" \
   "$BASE_DIR/server/migrate_token.py" \
+  "$BASE_DIR/server/frp-release.env" \
+  "$BASE_DIR/server/frp-common.sh" \
   "$BASE_DIR/server/frps.service" \
   "$BASE_DIR/server/frp-port-allocator.service" \
   "$BASE_DIR/tools/frp-create-client" \
@@ -22,7 +24,8 @@ for f in \
   "$BASE_DIR/tools/frp-client-info" \
   "$BASE_DIR/tools/frp-release-client" \
   "$BASE_DIR/tools/frp-set-client-installer-url" \
-  "$BASE_DIR/tools/frp-server-status"; do
+  "$BASE_DIR/tools/frp-server-status" \
+  "$BASE_DIR/tools/frp-update"; do
   [[ -f "$f" ]] || { echo "ERROR: missing project file: $f" >&2; exit 1; }
 done
 
@@ -68,11 +71,8 @@ if (( FRP_ALLOCATOR_PORT >= FRP_PORT_START && FRP_ALLOCATOR_PORT <= FRP_PORT_END
   echo "ERROR: allocator port must be outside the FRP service port range" >&2; exit 1
 fi
 
-case "$(uname -m)" in
-  x86_64) FRP_ARCH=amd64; EXPECTED_SHA="$FRP_SHA256_AMD64" ;;
-  aarch64|arm64) FRP_ARCH=arm64; EXPECTED_SHA="$FRP_SHA256_ARM64" ;;
-  *) echo "ERROR: unsupported architecture: $(uname -m)" >&2; exit 1 ;;
-esac
+FRP_ARCH="$(frp_detect_arch)" || { echo "ERROR: unsupported architecture: $(uname -m)" >&2; exit 1; }
+EXPECTED_SHA="$(frp_expected_sha "$FRP_ARCH")"
 
 # Capture existing listeners before restarting an existing frps. On first migration,
 # this preserves ports such as 6000/6001 already used by unmanaged clients.
@@ -81,15 +81,15 @@ ACTIVE_PORTS="$(ss -H -lnt 2>/dev/null | awk -v s="$FRP_PORT_START" -v e="$FRP_P
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 ARCHIVE="$TMPDIR/frp.tar.gz"
-URL="https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/frp_${FRP_VERSION}_linux_${FRP_ARCH}.tar.gz"
+URL="$(frp_release_url "$FRP_VERSION" "$FRP_ARCH")"
 echo "Downloading official FRP ${FRP_VERSION} (${FRP_ARCH}) ..."
-curl -fL --retry 3 -o "$ARCHIVE" "$URL"
-printf '%s  %s\n' "$EXPECTED_SHA" "$ARCHIVE" | sha256sum -c -
+frp_download_archive "$URL" "$ARCHIVE"
+frp_verify_archive_sha "$ARCHIVE" "$EXPECTED_SHA"
 tar xzf "$ARCHIVE" -C "$TMPDIR"
-install -m 0755 "$TMPDIR/frp_${FRP_VERSION}_linux_${FRP_ARCH}/frps" /usr/local/bin/frps
+frp_atomic_install_bin "$TMPDIR/frp_${FRP_VERSION}_linux_${FRP_ARCH}/frps" /usr/local/bin/frps 0755
 
-mkdir -p /etc/frp /etc/frp-auto-deploy /var/lib/frp-auto-deploy/enrollments /usr/local/lib/frp-auto-deploy
-chmod 700 /etc/frp /etc/frp-auto-deploy /var/lib/frp-auto-deploy /var/lib/frp-auto-deploy/enrollments
+mkdir -p /etc/frp /etc/frp-auto-deploy /var/lib/frp-auto-deploy/enrollments /var/lib/frp-auto-deploy/backups /usr/local/lib/frp-auto-deploy
+chmod 700 /etc/frp /etc/frp-auto-deploy /var/lib/frp-auto-deploy /var/lib/frp-auto-deploy/enrollments /var/lib/frp-auto-deploy/backups
 
 TOKEN_ACTION=""
 TOKEN_PRESERVED="N/A"
@@ -163,10 +163,14 @@ done <<< "$registry_out"
 [[ -f /var/lib/frp-auto-deploy/registry.json ]] || { echo "ERROR: registry.json is missing" >&2; exit 1; }
 chmod 600 /var/lib/frp-auto-deploy/registry.json
 
+frp_write_installed_version /etc/frp-auto-deploy/version "$PROJECT_VERSION" "$FRP_VERSION"
+
 install -m 0700 "$BASE_DIR/server/frp-port-allocator.py" /usr/local/lib/frp-auto-deploy/frp-port-allocator.py
+install -m 0644 "$BASE_DIR/server/frp-release.env" /usr/local/lib/frp-auto-deploy/frp-release.env
+install -m 0644 "$BASE_DIR/server/frp-common.sh" /usr/local/lib/frp-auto-deploy/frp-common.sh
 install -m 0644 "$BASE_DIR/server/frps.service" /etc/systemd/system/frps.service
 install -m 0644 "$BASE_DIR/server/frp-port-allocator.service" /etc/systemd/system/frp-port-allocator.service
-for tool in frp-create-client frp-clients frp-client-info frp-release-client frp-set-client-installer-url frp-server-status; do
+for tool in frp-create-client frp-clients frp-client-info frp-release-client frp-set-client-installer-url frp-server-status frp-update; do
   install -m 0755 "$BASE_DIR/tools/$tool" "/usr/local/sbin/$tool"
 done
 
@@ -222,6 +226,9 @@ Create a client enrollment:
 
 Server status:
   sudo frp-server-status
+
+Safe FRP binary update (tested version only):
+  sudo frp-update
 
 List clients:
   sudo frp-clients
