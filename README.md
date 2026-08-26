@@ -1,119 +1,72 @@
 # frp-auto-deploy
 
-`frp-auto-deploy` is a small management layer around the official [fatedier/frp](https://github.com/fatedier/frp) binaries. It does **not** fork or modify FRP. It automates server/client installation, persistent port allocation, short-lived enrollment, systemd startup, and connection-info output.
+`frp-auto-deploy` is a lightweight deployment and management layer for the official [fatedier/frp](https://github.com/fatedier/frp) binaries. It does **not** fork or modify FRP.
 
-The package is designed around this tested topology:
+It automates FRP server/client installation, persistent SSH/HTTPS port assignment, short-lived client enrollment, systemd startup, migration from an existing FRP deployment, and connection-info output.
+
+> **Note**
+> The IP address `203.0.113.10` used in this README is a documentation-only example address. Replace it with your own public firewall/NAT IP when deploying.
+
+Current pinned FRP version: **v0.70.1**
+
+---
+
+# Quick Start
+
+## 1. Prepare firewall / NAT
+
+Example topology:
 
 ```text
-Remote Linux clients
+Internet / Remote Linux clients
         |
-        | FRP TLS control connection :443
+        | FRP TLS control :443
         v
-221.139.249.110  (public firewall/NAT)
+203.0.113.10  (public firewall/NAT)
         |
-        +-- TCP/443       -> 10.10.10.50:443   (frps control)
-        +-- TCP/6000-6098 -> 10.10.10.50:same  (SSH/HTTPS published ports)
-        +-- TCP/80        -> 10.10.10.50:6099  (enrollment allocator)
+        +-- TCP/443       -> 10.10.10.50:443
+        +-- TCP/6000-6098 -> 10.10.10.50:6000-6098
+        +-- TCP/80        -> 10.10.10.50:6099
                                 |
                                 +-- frps
                                 +-- port allocator
 ```
 
-## Why a separate project instead of forking FRP?
+Required DNAT example:
 
-FRP remains upstream and is downloaded from the official release at install time. This project only manages deployment and lifecycle. Updating FRP therefore does not require maintaining a long-lived fork.
-
-Current pinned FRP: **v0.70.1**.
-
-## Security model
-
-No FRP token or permanent install secret is stored in this Git repository.
-
-- On a new server, `install-server.sh` generates `/etc/frp/server_token` locally. Installing over an existing FRP server reuses the current token (including a legacy inline `auth.token`) and does not rotate it.
-- A client first receives a short-lived enrollment code from `frp-create-client`.
-- The enrollment secret itself is never sent over the enrollment HTTP request.
-- Requests and responses are HMAC authenticated.
-- The FRP token is encrypted with AES-256-CBC/PBKDF2 using the enrollment secret before it crosses the enrollment HTTP path.
-- An enrollment code is bound to the first `machine-id` that uses it and expires by default after 10 minutes.
-- FRP client-to-server control traffic uses FRP TLS on TCP/443.
-
-The enrollment endpoint is intentionally plain HTTP because the tested remote network reset TLS on non-standard ports. If your environment permits HTTPS on the enrollment path, placing it behind a normal HTTPS reverse proxy is preferable.
-
-## Supported OS
-
-- Server: Debian/Ubuntu Linux, x86_64 or arm64
-- Client: Debian/Ubuntu Linux, x86_64 or arm64
-- Windows: FRP supports Windows, but automated PowerShell enrollment is not included in v1.0. See `windows/README.md`.
-
----
-
-# 1. Build/push the repository
-
-This project is published at https://github.com/RickLee-kr/frp-auto-deploy. Before pushing, verify no local secrets were added:
-
-```bash
-git grep -nE 'server_token|FRP_TOKEN=|INSTALL_KEY=' -- ':!README.md'
+```text
+203.0.113.10:443       -> 10.10.10.50:443
+203.0.113.10:6000-6098 -> 10.10.10.50:6000-6098
+203.0.113.10:80        -> 10.10.10.50:6099
 ```
 
-The repository should contain no real token values.
+## 2. Install the FRP server
 
-Generated one-file installers are under `dist/`. Rebuild them after changing source files:
-
-```bash
-./scripts/build-bundles.sh
-```
-
----
-
-# 2. Install the FRP server
-
-## Option A: clone the repository
-
-```bash
-git clone https://github.com/RickLee-kr/frp-auto-deploy.git
-cd frp-auto-deploy
-sudo ./install-server.sh
-```
-
-## Option B: one-line bootstrap after pushing to GitHub
+Run on the internal FRP server:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/RickLee-kr/frp-auto-deploy/main/dist/bootstrap-server.sh | sudo bash
 ```
 
-The installer asks for values with defaults. For the tested deployment use:
+The installer asks for deployment values. Example:
 
 ```text
-Public firewall/NAT IP:      221.139.249.110
+Public firewall/NAT IP:      203.0.113.10
 Internal FRP server IP:      10.10.10.50
 FRP control port:            443
 Service range start:         6000
 Service range end:           6098
 Allocator internal port:     6099
-Allocator public URL:        http://221.139.249.110/enroll
+Allocator public URL:        http://203.0.113.10/enroll
 ```
 
-If this is being installed over an existing FRP server, the installer scans active service ports in the configured range before restarting FRP and preserves those ports as reserved in the initial registry. This is useful when `6000` and `6001` are already in use.
+Verify the server:
 
-Installing over an existing FRP server preserves the existing FRP authentication token and active published ports. Existing frpc clients therefore do not need to be reconfigured.
-
-Legacy inline `auth.token` values are migrated into `/etc/frp/server_token` without changing the secret. The previous `frps.toml` is copied to a timestamped backup with mode `600` before the file is rewritten.
-
-If `/var/lib/frp-auto-deploy/registry.json` is not present, a previous manual allocator registry at `/var/lib/frp-port-allocator/registry.json` is migrated into the new path. Client records, `ssh_port` / `https_port` assignments, and reserved ports are preserved, including ports belonging to currently offline clients. The installer then merges any ports that are currently listening (`ACTIVE_PORTS`). Allocator-only ports such as `6099` are not treated as FRP service-allocation ports. The legacy registry is copied to a mode-`600` timestamped backup before migration. If the new registry already exists, it is left unchanged and the legacy file is not imported again.
-
-Re-running the installer is idempotent: it will not rotate the token, reset the registry, or drop existing client allocations.
-
-## Firewall/NAT
-
-See `examples/pfsense-firewall.md`. In the tested topology:
-
-```text
-221.139.249.110:443       -> 10.10.10.50:443
-221.139.249.110:6000-6098 -> 10.10.10.50:6000-6098
-221.139.249.110:80        -> 10.10.10.50:6099
+```bash
+sudo frp-server-status
 ```
 
-## Verify server
+or:
 
 ```bash
 sudo systemctl status frps --no-pager
@@ -121,20 +74,7 @@ sudo systemctl status frp-port-allocator --no-pager
 curl -fsS http://127.0.0.1:6099/healthz
 ```
 
----
-
-# 3. Configure the client installer URL
-
-After pushing the repository, set the raw GitHub URL once on the FRP server:
-
-```bash
-sudo frp-set-client-installer-url \
-  https://raw.githubusercontent.com/RickLee-kr/frp-auto-deploy/main/dist/bootstrap-client.sh
-```
-
----
-
-# 4. Create a client enrollment
+## 3. Create a client enrollment code
 
 On the FRP server:
 
@@ -142,7 +82,7 @@ On the FRP server:
 sudo frp-create-client
 ```
 
-Example output:
+Example:
 
 ```text
 Enrollment Code:
@@ -154,19 +94,11 @@ Client install:
 curl -fsSL https://raw.githubusercontent.com/RickLee-kr/frp-auto-deploy/main/dist/bootstrap-client.sh | sudo bash
 ```
 
-The code expires after 10 minutes by default and is bound to the first machine that uses it.
+Enrollment codes expire after 10 minutes by default and are bound to the first machine that uses them.
 
-Custom TTL:
+## 4. Install a remote Linux client
 
-```bash
-sudo frp-create-client --ttl 1800 --note customer-dp
-```
-
----
-
-# 5. Install a remote Linux client
-
-On the remote Linux server:
+Run on the remote Linux server:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/RickLee-kr/frp-auto-deploy/main/dist/bootstrap-client.sh | sudo bash
@@ -181,13 +113,11 @@ HTTPS server IP/host [Enter = SSH only]:
 
 Press Enter at the HTTPS prompt for SSH only.
 
-For SSH + HTTPS, enter for example:
+To publish HTTPS as well, enter the internal HTTPS target, for example:
 
 ```text
 192.168.122.2
 ```
-
-The allocator permanently assigns unused ports from the configured range. A reinstall on the same machine uses `/etc/machine-id` and receives the same reserved ports.
 
 Example completion output:
 
@@ -197,22 +127,210 @@ Example completion output:
 =========================================
 
 SSH:
-ssh -p 6003 aella@221.139.249.110
+ssh -p 6003 aella@203.0.113.10
 
 HTTPS:
-https://221.139.249.110:6004
+https://203.0.113.10:6004
 
 Connection information:
 cat /etc/frp/access-info.txt
 ```
 
-`frpc` is installed as a systemd service and starts automatically after reboot.
+The assigned ports are persistent. Reinstalling the client on the same machine reuses the previous allocation based on `/etc/machine-id`.
+
+## 5. Manage clients
+
+List registered clients:
+
+```bash
+sudo frp-clients
+```
+
+Show connection information for one client:
+
+```bash
+sudo frp-client-info customer-dp
+```
+
+Release a client's reserved ports after its remote `frpc` has been stopped or uninstalled:
+
+```bash
+sudo frp-release-client customer-dp
+```
+
+Create a longer-lived enrollment code when needed:
+
+```bash
+sudo frp-create-client --ttl 1800 --note customer-dp
+```
 
 ---
 
-# 6. Server management commands
+# Uninstall
 
-List clients:
+## Client
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/RickLee-kr/frp-auto-deploy/main/dist/uninstall-client.sh | sudo bash
+```
+
+The local FRP client is removed, but the central port reservation is intentionally preserved. Release it on the FRP server only when you want those ports reused.
+
+## Server
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/RickLee-kr/frp-auto-deploy/main/dist/uninstall-server.sh | sudo bash
+```
+
+Binaries and systemd units are removed. Token, configuration, and registry are preserved unless `--purge` is used.
+
+---
+
+# Project Details
+
+## What this project provides
+
+`frp-auto-deploy` adds an operational layer around upstream FRP:
+
+- automatic FRP server installation
+- automatic FRP client installation
+- persistent SSH/HTTPS public port assignment
+- short-lived enrollment codes
+- HMAC-authenticated enrollment requests and responses
+- systemd service creation and restart handling
+- central client/port registry
+- migration from an existing manually configured FRP server
+- migration from the legacy manual port allocator
+- client list, connection-info, and reservation management commands
+- uninstall helpers and standalone bootstrap bundles
+
+FRP itself remains upstream and is downloaded from the official release during installation.
+
+## Why not fork FRP?
+
+This project does not need to change the FRP protocol or core FRP code. Keeping FRP upstream avoids maintaining a long-lived fork and makes FRP upgrades simpler. This repository focuses only on deployment, enrollment, persistence, migration, and management.
+
+## Supported operating systems
+
+- Server: Debian/Ubuntu Linux, x86_64 or arm64
+- Client: Debian/Ubuntu Linux, x86_64 or arm64
+- Windows: FRP supports Windows, but automated PowerShell enrollment is not included in v1.0. See `windows/README.md`.
+
+---
+
+# Architecture
+
+The intended deployment places the FRP server behind a public firewall/NAT device.
+
+```text
+Remote Linux clients
+        |
+        | FRP TLS control connection :443
+        v
+203.0.113.10  (example public firewall/NAT IP)
+        |
+        +-- TCP/443       -> 10.10.10.50:443   (frps control)
+        +-- TCP/6000-6098 -> 10.10.10.50:same  (SSH/HTTPS published ports)
+        +-- TCP/80        -> 10.10.10.50:6099  (enrollment allocator)
+                                |
+                                +-- frps
+                                +-- port allocator
+```
+
+The public service port range must be DNATed to the same port range on the internal FRP server.
+
+See `examples/pfsense-firewall.md` for firewall/NAT notes.
+
+---
+
+# Security Model
+
+No FRP token or permanent install secret is stored in this Git repository.
+
+- A new server generates `/etc/frp/server_token` locally.
+- Installing over an existing FRP server preserves the existing authentication token rather than rotating it.
+- Client enrollment uses a short-lived enrollment code.
+- The enrollment secret itself is never sent over the enrollment HTTP request.
+- Enrollment requests and responses are HMAC authenticated.
+- The FRP token is encrypted with AES-256-CBC/PBKDF2 using the enrollment secret before crossing the enrollment HTTP path.
+- Enrollment codes are bound to the first `machine-id` that uses them and expire by default after 10 minutes.
+- FRP client-to-server control traffic uses FRP TLS on TCP/443.
+
+The enrollment endpoint uses plain HTTP in the tested topology because the original deployment environment reset TLS traffic on non-standard ports. If the environment permits it, placing the enrollment endpoint behind a normal HTTPS reverse proxy is preferable.
+
+Do not publish `/etc/frp/server_token`, enrollment files, generated `frpc.toml`, registry data, or connection-info files.
+
+Where possible, restrict public SSH/service ports by source IP at the firewall.
+
+---
+
+# Existing Server Migration
+
+The server installer can be run over an existing FRP deployment.
+
+## FRP authentication token preservation
+
+If `/etc/frp/server_token` already exists, it is reused unchanged.
+
+If the server uses a legacy inline configuration such as:
+
+```toml
+auth.method = "token"
+auth.token = "..."
+```
+
+the existing token is migrated into `/etc/frp/server_token` without changing its value.
+
+Existing `auth.tokenSource` file-based configurations are also reused when possible.
+
+A new token is generated only for a genuine fresh install where no previous authentication information exists.
+
+Before rewriting `frps.toml`, the old configuration is copied to a timestamped mode-`600` backup.
+
+Re-running the installer is idempotent: it does not rotate the token.
+
+## Existing published port preservation
+
+Before restarting an existing FRP server, the installer scans active listeners in the configured service range and preserves those ports as reserved.
+
+This prevents existing FRP listeners such as `6000`, `6001`, or other active ports from being handed to a newly enrolled client.
+
+## Legacy allocator registry migration
+
+If the new registry does not yet exist and the previous manual allocator registry is found at:
+
+```text
+/var/lib/frp-port-allocator/registry.json
+```
+
+it is migrated into:
+
+```text
+/var/lib/frp-auto-deploy/registry.json
+```
+
+Migration preserves:
+
+- existing `reserved` ports
+- every existing client entry
+- SSH port assignments
+- HTTPS port assignments
+- hostnames
+- ports belonging to clients that are currently offline
+
+Current active listeners are merged into the reserved set as well.
+
+Allocator-only ports such as `6099` may remain in `reserved`, but they are outside the `6000-6098` service allocation range and are never assigned as client service ports.
+
+Before migration, the legacy registry is copied to a timestamped backup with mode `600`.
+
+If `/var/lib/frp-auto-deploy/registry.json` already exists, it is never overwritten and the legacy registry is not imported again.
+
+---
+
+# Server Management Commands
+
+## List clients
 
 ```bash
 sudo frp-clients
@@ -227,59 +345,38 @@ dp-os-upgrade            aella        6002   -      online
 customer-dp              aella        6003   6004   online   192.168.122.2
 ```
 
-Show one client's connection commands:
+## Show one client's connection information
 
 ```bash
 sudo frp-client-info customer-dp
 ```
 
-Release a client reservation after its remote `frpc` has been stopped/uninstalled:
+## Release a reservation
 
 ```bash
 sudo frp-release-client customer-dp
 ```
 
-If the client still appears online the command refuses by default. `--force` exists for recovery situations.
+If the client still appears online, the command refuses by default. `--force` is available for recovery situations.
+
+## Configure the client installer URL
+
+```bash
+sudo frp-set-client-installer-url \
+  https://raw.githubusercontent.com/RickLee-kr/frp-auto-deploy/main/dist/bootstrap-client.sh
+```
+
+## Server status
+
+```bash
+sudo frp-server-status
+```
 
 ---
 
-# 7. Uninstall
+# Important Files
 
-## Linux client
-
-From the repository:
-
-```bash
-sudo ./uninstall-client.sh
-```
-
-Or after pushing:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/RickLee-kr/frp-auto-deploy/main/dist/uninstall-client.sh | sudo bash
-```
-
-The local client is removed, but the central port reservation is deliberately preserved. Release it separately on the server only when you want those ports reused.
-
-## FRP server
-
-From the repository:
-
-```bash
-sudo ./uninstall-server.sh
-```
-
-Or after pushing:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/RickLee-kr/frp-auto-deploy/main/dist/uninstall-server.sh | sudo bash
-```
-
-Binaries and systemd units are removed. Token, configuration, and registry are preserved unless you pass `--purge`.
-
----
-
-# 8. Important files on the server
+## Server
 
 ```text
 /etc/frp/server_token
@@ -290,7 +387,7 @@ Binaries and systemd units are removed. Token, configuration, and registry are p
 /usr/local/lib/frp-auto-deploy/frp-port-allocator.py
 ```
 
-Important files on a client:
+## Client
 
 ```text
 /etc/frp/frpc.toml
@@ -301,9 +398,35 @@ Important files on a client:
 
 ---
 
-# 9. Notes
+# Development
 
-- The public service port range must be DNATed to the same port range on the internal FRP server.
-- Do not publish `/etc/frp/server_token`, enrollment files, or generated client configuration files to GitHub.
-- Where possible, restrict public SSH/service ports by source IP at the firewall.
-- The allocator skips ports already reserved in its registry and ports currently bound by another local service.
+Clone the repository:
+
+```bash
+git clone https://github.com/RickLee-kr/frp-auto-deploy.git
+cd frp-auto-deploy
+```
+
+Before committing, verify no local secrets were added:
+
+```bash
+git grep -nE 'server_token|FRP_TOKEN=|INSTALL_KEY=' -- ':!README.md'
+```
+
+Generated standalone installers live under `dist/`. Rebuild them after changing source files:
+
+```bash
+./scripts/build-bundles.sh
+```
+
+The repository should never contain real FRP tokens, enrollment secrets, private keys, generated runtime configs, or allocator state.
+
+---
+
+# Notes
+
+- FRP service ports must be forwarded to the same ports on the internal FRP server.
+- The allocator skips ports already reserved in the registry and ports currently bound by another local service.
+- Client port reservations survive client uninstall/reinstall unless explicitly released from the server.
+- Existing FRP clients can remain connected after migration because the existing FRP authentication token is preserved.
+- Replace all documentation/example IP addresses with values appropriate for your environment before deployment.
