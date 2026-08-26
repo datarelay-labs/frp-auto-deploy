@@ -142,9 +142,24 @@ open('/etc/frp-auto-deploy/config.json','w').write(json.dumps(cfg,indent=2,sort_
 PY
 chmod 600 /etc/frp-auto-deploy/config.json
 
-python3 "$BASE_DIR/server/migrate_token.py" init-registry \
+REGISTRY_ACTION=""
+LEGACY_REGISTRY_MIGRATION="N/A"
+MIGRATED_CLIENTS="0"
+PRESERVED_PORTS="0"
+registry_out="$(python3 "$BASE_DIR/server/migrate_token.py" init-registry \
   --registry /var/lib/frp-auto-deploy/registry.json \
-  --ports "$ACTIVE_PORTS" >/dev/null
+  --legacy-registry /var/lib/frp-port-allocator/registry.json \
+  --ports "$ACTIVE_PORTS" \
+  --port-start "$FRP_PORT_START" \
+  --port-end "$FRP_PORT_END" \
+  --allocator-port "$FRP_ALLOCATOR_PORT")"
+while IFS= read -r line; do
+  case "$line" in
+    REGISTRY_ACTION=*|LEGACY_REGISTRY_MIGRATION=*|MIGRATED_CLIENTS=*|PRESERVED_PORTS=*)
+      printf -v "${line%%=*}" '%s' "${line#*=}"
+      ;;
+  esac
+done <<< "$registry_out"
 [[ -f /var/lib/frp-auto-deploy/registry.json ]] || { echo "ERROR: registry.json is missing" >&2; exit 1; }
 chmod 600 /var/lib/frp-auto-deploy/registry.json
 
@@ -189,6 +204,11 @@ elif [[ "$TOKEN_ACTION" == "generated" ]]; then
 fi
 if [[ -n "$TOKEN_BACKUP" ]]; then
   echo "Existing frps.toml backed up with mode 600"
+fi
+if [[ "$LEGACY_REGISTRY_MIGRATION" == "PASS" ]]; then
+  echo "LEGACY_REGISTRY_MIGRATION=PASS"
+  echo "MIGRATED_CLIENTS=${MIGRATED_CLIENTS}"
+  echo "PRESERVED_PORTS=${PRESERVED_PORTS}"
 fi
 cat <<EOF2
 

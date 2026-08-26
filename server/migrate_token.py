@@ -218,17 +218,182 @@ def ensure_server_token(etc_dir: Path, backup=True):
     }
 
 
-def init_registry(registry_path: Path, ports_csv: str):
-    if registry_path.exists():
-        return 'unchanged'
+def utc_now_iso():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+
+
+def coerce_port(value):
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return None
+    if 1 <= port <= 65535:
+        return port
+    return None
+
+
+def parse_ports_csv(ports_csv: str):
     ports = []
     for item in (ports_csv or '').split(','):
-        item = item.strip()
-        if item.isdigit():
-            ports.append(int(item))
-    state = {'reserved': sorted(set(ports)), 'clients': {}}
+        port = coerce_port(item.strip())
+        if port is not None:
+            ports.append(port)
+    return ports
+
+
+def is_service_port(port, port_start, port_end, allocator_port):
+    if port is None:
+        return False
+    if allocator_port is not None and port == int(allocator_port):
+        return False
+    return int(port_start) <= port <= int(port_end)
+
+
+def backup_legacy_registry(legacy_path: Path):
+    if not legacy_path.is_file():
+        return None
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    backup = legacy_path.with_name(f'{legacy_path.name}.pre-frp-auto-deploy-{stamp}')
+    if backup.exists():
+        backup = legacy_path.with_name(
+            f'{legacy_path.name}.pre-frp-auto-deploy-{stamp}-{os.getpid()}'
+        )
+    atomic_write_bytes(backup, legacy_path.read_bytes(), 0o600)
+    return backup
+
+
+def load_registry_json(path: Path):
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MigrationError('unable to read an existing FRP registry') from exc
+    if not isinstance(data, dict):
+        raise MigrationError('existing FRP registry has an unexpected format')
+    return data
+
+
+def migrate_legacy_client(raw, now_iso: str):
+    if not isinstance(raw, dict):
+        raw = {}
+    migrated = {
+        'hostname': '',
+        'ssh_user': 'root',
+        'ssh_port': None,
+        'https_port': None,
+        'https_enabled': False,
+        'https_ip': '',
+        'created_at': now_iso,
+        'last_enrolled_at': now_iso,
+    }
+    migrated.update(raw)
+    if 'ssh_port' in raw:
+        port = coerce_port(raw.get('ssh_port'))
+        migrated['ssh_port'] = port if port is not None else raw.get('ssh_port')
+    if 'https_port' in raw:
+        port = coerce_port(raw.get('https_port'))
+        migrated['https_port'] = port if port is not None else raw.get('https_port')
+    if 'hostname' in raw:
+        migrated['hostname'] = raw.get('hostname') or ''
+    if 'https_enabled' not in raw:
+        migrated['https_enabled'] = coerce_port(migrated.get('https_port')) is not None
+    return migrated
+
+
+def collect_used_ports(state, port_start, port_end, allocator_port):
+    used = set()
+    for item in state.get('reserved', []):
+        port = coerce_port(item)
+        if is_service_port(port, port_start, port_end, allocator_port):
+            used.add(port)
+    for client in state.get('clients', {}).values():
+        if not isinstance(client, dict):
+            continue
+        for key in ('ssh_port', 'https_port'):
+            port = coerce_port(client.get(key))
+            if port is None:
+                continue
+            if allocator_port is not None and port == int(allocator_port):
+                continue
+            used.add(port)
+    return used
+
+
+def registry_result(action, legacy_migration, migrated_clients, preserved_ports, backup=None):
+    return {
+        'action': action,
+        'legacy_migration': legacy_migration,
+        'migrated_clients': int(migrated_clients),
+        'preserved_ports': int(preserved_ports),
+        'backup': str(backup) if backup else '',
+    }
+
+
+def init_registry(
+    registry_path: Path,
+    ports_csv: str,
+    legacy_registry=None,
+    port_start=1,
+    port_end=65535,
+    allocator_port=None,
+):
+    port_start = int(port_start)
+    port_end = int(port_end)
+    if allocator_port is not None:
+        allocator_port = int(allocator_port)
+
+    active_ports = {
+        port for port in parse_ports_csv(ports_csv)
+        if is_service_port(port, port_start, port_end, allocator_port)
+    }
+
+    if registry_path.exists():
+        state = load_registry_json(registry_path)
+        used = collect_used_ports(state, port_start, port_end, allocator_port)
+        return registry_result('unchanged', 'SKIP', 0, len(used))
+
+    legacy_path = Path(legacy_registry) if legacy_registry else None
+    legacy_state = None
+    backup_path = None
+    if legacy_path is not None and legacy_path.is_file() and legacy_path.stat().st_size > 0:
+        backup_path = backup_legacy_registry(legacy_path)
+        legacy_state = load_registry_json(legacy_path)
+
+    reserved = set()
+    clients = {}
+    now_iso = utc_now_iso()
+    migrated_clients = 0
+
+    if legacy_state is not None:
+        for item in legacy_state.get('reserved', []):
+            port = coerce_port(item)
+            if is_service_port(port, port_start, port_end, allocator_port):
+                reserved.add(port)
+        raw_clients = legacy_state.get('clients', {})
+        if not isinstance(raw_clients, dict):
+            raise MigrationError('legacy FRP registry clients have an unexpected format')
+        for machine_id, raw_client in raw_clients.items():
+            if not machine_id:
+                continue
+            clients[str(machine_id)] = migrate_legacy_client(raw_client, now_iso)
+            migrated_clients += 1
+
+    reserved.update(active_ports)
+    state = {'reserved': sorted(reserved), 'clients': clients}
+    used = collect_used_ports(state, port_start, port_end, allocator_port)
+    used.update(active_ports)
     atomic_write_json(registry_path, state, 0o600)
-    return 'created'
+
+    if legacy_state is not None:
+        return registry_result(
+            'migrated_legacy',
+            'PASS',
+            migrated_clients,
+            len(used),
+            backup_path,
+        )
+    return registry_result('created', 'N/A', 0, len(used))
 
 
 def emit(result):
@@ -237,6 +402,14 @@ def emit(result):
     print(f"TOKEN_PRESERVED={result['preserved']}")
     if result.get('backup'):
         print(f"TOKEN_BACKUP={result['backup']}")
+
+
+def emit_registry(result):
+    # Counts only. Never print machine IDs, hostnames, or port-to-client maps.
+    print(f"REGISTRY_ACTION={result['action']}")
+    print(f"LEGACY_REGISTRY_MIGRATION={result['legacy_migration']}")
+    print(f"MIGRATED_CLIENTS={result['migrated_clients']}")
+    print(f"PRESERVED_PORTS={result['preserved_ports']}")
 
 
 def main(argv=None):
@@ -250,19 +423,31 @@ def main(argv=None):
     p_reg = sub.add_parser('init-registry')
     p_reg.add_argument('--registry', required=True)
     p_reg.add_argument('--ports', default='')
+    p_reg.add_argument('--legacy-registry', default='')
+    p_reg.add_argument('--port-start', type=int, default=1)
+    p_reg.add_argument('--port-end', type=int, default=65535)
+    p_reg.add_argument('--allocator-port', type=int, default=None)
 
     args = parser.parse_args(argv)
     try:
         if args.cmd == 'ensure':
             emit(ensure_server_token(Path(args.etc_dir), backup=args.backup))
         elif args.cmd == 'init-registry':
-            action = init_registry(Path(args.registry), args.ports)
-            print(f'REGISTRY_ACTION={action}')
+            emit_registry(
+                init_registry(
+                    Path(args.registry),
+                    args.ports,
+                    legacy_registry=args.legacy_registry or None,
+                    port_start=args.port_start,
+                    port_end=args.port_end,
+                    allocator_port=args.allocator_port,
+                )
+            )
     except MigrationError as exc:
         print(f'ERROR: {exc}', file=sys.stderr)
         return 1
     except Exception:
-        print('ERROR: FRP token migration failed', file=sys.stderr)
+        print('ERROR: FRP server migration failed', file=sys.stderr)
         return 1
     return 0
 

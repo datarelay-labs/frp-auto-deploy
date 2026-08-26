@@ -18,4 +18,5 @@ access-info.txt
 frpc.toml
 frps.toml
 frps.toml.pre-frp-auto-deploy-*
+registry.json.pre-frp-auto-deploy-*
 !server/config.example.json

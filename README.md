@@ -97,7 +97,11 @@ If this is being installed over an existing FRP server, the installer scans acti
 
 Installing over an existing FRP server preserves the existing FRP authentication token and active published ports. Existing frpc clients therefore do not need to be reconfigured.
 
-Legacy inline `auth.token` values are migrated into `/etc/frp/server_token` without changing the secret. The previous `frps.toml` is copied to a timestamped backup with mode `600` before the file is rewritten. Re-running the installer is idempotent: it will not rotate the token, reset the registry, or drop existing client allocations.
+Legacy inline `auth.token` values are migrated into `/etc/frp/server_token` without changing the secret. The previous `frps.toml` is copied to a timestamped backup with mode `600` before the file is rewritten.
+
+If `/var/lib/frp-auto-deploy/registry.json` is not present, a previous manual allocator registry at `/var/lib/frp-port-allocator/registry.json` is migrated into the new path. Client records, `ssh_port` / `https_port` assignments, and reserved ports are preserved, including ports belonging to currently offline clients. The installer then merges any ports that are currently listening (`ACTIVE_PORTS`). Allocator-only ports such as `6099` are not treated as FRP service-allocation ports. The legacy registry is copied to a mode-`600` timestamped backup before migration. If the new registry already exists, it is left unchanged and the legacy file is not imported again.
+
+Re-running the installer is idempotent: it will not rotate the token, reset the registry, or drop existing client allocations.
 
 ## Firewall/NAT
 
