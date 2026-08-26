@@ -5,7 +5,7 @@
 It automates FRP server/client installation, persistent SSH/HTTPS port assignment, short-lived client enrollment, systemd startup, migration from an existing FRP deployment, and connection-info output.
 
 > **Note**
-> The IP address `203.0.113.10` used in this README is a documentation-only example address. Replace it with your own public firewall/NAT IP when deploying.
+> The IP address `203.0.113.10` used in this README is a documentation-only example address. Replace it with your own public IP when deploying.
 
 Current pinned FRP version: **v0.70.1**
 
@@ -13,7 +13,14 @@ Current pinned FRP version: **v0.70.1**
 
 # Quick Start
 
-## 1. Prepare firewall / NAT
+Two common deployment models are supported:
+
+1. **FRP server behind a firewall/NAT device** — public ports are DNATed to an internal FRP server.
+2. **FRP server directly on a public IP** — no external firewall/NAT device is required; the FRP server itself owns the public IP.
+
+## 1. Choose your network topology
+
+### Option A — FRP server behind firewall / NAT
 
 Example topology:
 
@@ -40,15 +47,7 @@ Required DNAT example:
 203.0.113.10:80        -> 10.10.10.50:6099
 ```
 
-## 2. Install the FRP server
-
-Run on the internal FRP server:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/RickLee-kr/frp-auto-deploy/main/dist/bootstrap-server.sh | sudo bash
-```
-
-The installer asks for deployment values. Example:
+Server installer values:
 
 ```text
 Public firewall/NAT IP:      203.0.113.10
@@ -59,6 +58,69 @@ Service range end:           6098
 Allocator internal port:     6099
 Allocator public URL:        http://203.0.113.10/enroll
 ```
+
+This model is useful when the FRP server has only a private address and a separate firewall/router owns the public IP.
+
+### Option B — FRP server directly on a public IP (no external firewall/NAT)
+
+If the FRP server itself owns the public IP, no DNAT device is required.
+
+```text
+Internet / Remote Linux clients
+        |
+        v
+203.0.113.10  (FRP server public IP)
+        |
+        +-- TCP/443        frps control
+        +-- TCP/6000-6098  SSH/HTTPS published ports
+        +-- TCP/6099       enrollment allocator
+```
+
+Use values like:
+
+```text
+Public firewall/NAT IP:      203.0.113.10
+Internal FRP server IP:      203.0.113.10
+FRP control port:            443
+Service range start:         6000
+Service range end:           6098
+Allocator internal port:     6099
+Allocator public URL:        http://203.0.113.10:6099/enroll
+```
+
+`Internal FRP server IP` is currently used for display/documentation purposes, so when the server directly owns the public address it is fine to enter the same public IP.
+
+Make sure the server or cloud security group allows inbound TCP traffic for:
+
+```text
+443
+6000-6098
+6099
+```
+
+If you prefer the enrollment URL to use normal HTTP port 80 instead of exposing `6099`, place a reverse proxy or local port-forward in front of the allocator:
+
+```text
+203.0.113.10:80 -> 127.0.0.1:6099
+```
+
+Then you can use:
+
+```text
+Allocator public URL:        http://203.0.113.10/enroll
+```
+
+This is equivalent to the firewall/NAT deployment from the client's point of view, but the port forwarding happens locally on the FRP server rather than on a separate firewall.
+
+## 2. Install the FRP server
+
+Run on the FRP server:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/RickLee-kr/frp-auto-deploy/main/dist/bootstrap-server.sh | sudo bash
+```
+
+The installer asks for the deployment values shown in the examples above.
 
 Verify the server:
 
@@ -220,7 +282,7 @@ This project does not need to change the FRP protocol or core FRP code. Keeping 
 
 # Architecture
 
-The intended deployment places the FRP server behind a public firewall/NAT device.
+## Behind a firewall / NAT device
 
 ```text
 Remote Linux clients
@@ -241,6 +303,21 @@ The public service port range must be DNATed to the same port range on the inter
 
 See `examples/pfsense-firewall.md` for firewall/NAT notes.
 
+## Direct public server
+
+```text
+Remote Linux clients
+        |
+        v
+203.0.113.10  (FRP server)
+        |
+        +-- TCP/443        frps control
+        +-- TCP/6000-6098  SSH/HTTPS published ports
+        +-- TCP/6099       enrollment allocator
+```
+
+No external DNAT device is needed. Open the required ports on the host firewall or cloud security group. For a public enrollment endpoint on port 80, use a local reverse proxy or port-forward from `80` to `6099`.
+
 ---
 
 # Security Model
@@ -260,7 +337,7 @@ The enrollment endpoint uses plain HTTP in the tested topology because the origi
 
 Do not publish `/etc/frp/server_token`, enrollment files, generated `frpc.toml`, registry data, or connection-info files.
 
-Where possible, restrict public SSH/service ports by source IP at the firewall.
+Where possible, restrict public SSH/service ports by source IP at the firewall, host firewall, or cloud security group.
 
 ---
 
@@ -425,7 +502,8 @@ The repository should never contain real FRP tokens, enrollment secrets, private
 
 # Notes
 
-- FRP service ports must be forwarded to the same ports on the internal FRP server.
+- Behind a firewall/NAT device, FRP service ports must be forwarded to the same ports on the internal FRP server.
+- On a direct public server, no DNAT is required; allow the required ports on the host firewall or cloud security group.
 - The allocator skips ports already reserved in the registry and ports currently bound by another local service.
 - Client port reservations survive client uninstall/reinstall unless explicitly released from the server.
 - Existing FRP clients can remain connected after migration because the existing FRP authentication token is preserved.
