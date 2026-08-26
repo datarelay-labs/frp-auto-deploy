@@ -7,7 +7,9 @@ dist=root/'dist'
 dist.mkdir(exist_ok=True)
 
 files=[
+ 'VERSION',
  'install-server.sh',
+ 'lib/frp-common.sh',
  'server/frp-port-allocator.py',
  'server/migrate_token.py',
  'server/frps.service',
@@ -18,6 +20,7 @@ files=[
  'tools/frp-release-client',
  'tools/frp-set-client-installer-url',
  'tools/frp-server-status',
+ 'tools/frp-update',
 ]
 
 lines=['#!/usr/bin/env bash','set -euo pipefail','TMP="$(mktemp -d)"','trap \'rm -rf "$TMP"\' EXIT']

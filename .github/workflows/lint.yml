@@ -10,7 +10,7 @@ jobs:
       - name: Shell syntax
         run: |
           git ls-files '*.sh' | xargs -r bash -n
-          bash -n tools/frp-server-status
+          bash -n tools/frp-server-status tools/frp-update
       - name: Python compile
         run: |
           python3 -m py_compile server/frp-port-allocator.py server/migrate_token.py scripts/build-bundles.py
@@ -19,5 +19,15 @@ jobs:
         run: |
           ./tests/test-server-migration.sh
           ./tests/test-legacy-registry-migration.sh
+      - name: FRP update regression tests
+        run: |
+          ./tests/test-frp-update.sh
+          ./tests/test-frp-server-status.sh
+      - name: Secret scan
+        run: ./scripts/secret-scan.sh
       - name: Build standalone bundles
-        run: ./scripts/build-bundles.sh
+        run: |
+          ./scripts/build-bundles.sh
+          git diff --exit-code dist/
+      - name: Whitespace
+        run: git diff --check HEAD

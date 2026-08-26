@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_VERSION="1.0.0"
-FRP_VERSION="0.70.1"
-FRP_SHA256_AMD64="333da23d1b9009d7c01638e9ba38cf4600f7d37d393f854e96ee1396adefa9a6"
-FRP_SHA256_ARM64="3990f396a9a490ee7f0e5f355287750ed41520064ed999eab443b5e9a78d773d"
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ ${EUID} -ne 0 ]]; then
@@ -12,7 +8,12 @@ if [[ ${EUID} -ne 0 ]]; then
   exit 1
 fi
 
+[[ -f "$BASE_DIR/lib/frp-common.sh" ]] || { echo "ERROR: missing project file: $BASE_DIR/lib/frp-common.sh" >&2; exit 1; }
+# shellcheck source=lib/frp-common.sh
+. "$BASE_DIR/lib/frp-common.sh"
+
 for f in \
+  "$BASE_DIR/VERSION" \
   "$BASE_DIR/server/frp-port-allocator.py" \
   "$BASE_DIR/server/migrate_token.py" \
   "$BASE_DIR/server/frps.service" \
@@ -22,7 +23,8 @@ for f in \
   "$BASE_DIR/tools/frp-client-info" \
   "$BASE_DIR/tools/frp-release-client" \
   "$BASE_DIR/tools/frp-set-client-installer-url" \
-  "$BASE_DIR/tools/frp-server-status"; do
+  "$BASE_DIR/tools/frp-server-status" \
+  "$BASE_DIR/tools/frp-update"; do
   [[ -f "$f" ]] || { echo "ERROR: missing project file: $f" >&2; exit 1; }
 done
 
@@ -90,6 +92,7 @@ install -m 0755 "$TMPDIR/frp_${FRP_VERSION}_linux_${FRP_ARCH}/frps" /usr/local/b
 
 mkdir -p /etc/frp /etc/frp-auto-deploy /var/lib/frp-auto-deploy/enrollments /usr/local/lib/frp-auto-deploy
 chmod 700 /etc/frp /etc/frp-auto-deploy /var/lib/frp-auto-deploy /var/lib/frp-auto-deploy/enrollments
+frp_write_version_file /etc/frp-auto-deploy/version
 
 TOKEN_ACTION=""
 TOKEN_PRESERVED="N/A"
@@ -164,9 +167,10 @@ done <<< "$registry_out"
 chmod 600 /var/lib/frp-auto-deploy/registry.json
 
 install -m 0700 "$BASE_DIR/server/frp-port-allocator.py" /usr/local/lib/frp-auto-deploy/frp-port-allocator.py
+install -m 0644 "$BASE_DIR/lib/frp-common.sh" /usr/local/lib/frp-auto-deploy/frp-common.sh
 install -m 0644 "$BASE_DIR/server/frps.service" /etc/systemd/system/frps.service
 install -m 0644 "$BASE_DIR/server/frp-port-allocator.service" /etc/systemd/system/frp-port-allocator.service
-for tool in frp-create-client frp-clients frp-client-info frp-release-client frp-set-client-installer-url frp-server-status; do
+for tool in frp-create-client frp-clients frp-client-info frp-release-client frp-set-client-installer-url frp-server-status frp-update; do
   install -m 0755 "$BASE_DIR/tools/$tool" "/usr/local/sbin/$tool"
 done
 
@@ -186,6 +190,7 @@ cat <<EOF2
  FRP Auto Deploy server installation complete
 ============================================================
 
+Project version   : ${PROJECT_VERSION}
 FRP version       : ${FRP_VERSION}
 Public IP         : ${FRP_PUBLIC_IP}
 Internal FRP IP   : ${FRP_INTERNAL_IP}
@@ -222,6 +227,9 @@ Create a client enrollment:
 
 Server status:
   sudo frp-server-status
+
+Update FRP to the tested version:
+  sudo frp-update
 
 List clients:
   sudo frp-clients

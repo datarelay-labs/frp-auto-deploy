@@ -1,18 +1,124 @@
 #!/usr/bin/env bash
-set -euo pipefail
-echo '=== frps ==='
-systemctl --no-pager --full status frps 2>/dev/null | sed -n '1,12p' || true
-echo
-echo '=== allocator ==='
-systemctl --no-pager --full status frp-port-allocator 2>/dev/null | sed -n '1,12p' || true
-echo
-echo '=== listeners ==='
-if [[ -r /etc/frp-auto-deploy/config.json ]]; then
-  python3 - <<'PY'
-import json,subprocess
-c=json.load(open('/etc/frp-auto-deploy/config.json'))
-print(f"Control: {c['control_port']}")
-print(f"Services: {c['port_start']}-{c['port_end']}")
-print(f"Allocator internal: {c['listen_port']}")
-PY
+# Operator status for an frp-auto-deploy server. Never exits non-zero for
+# missing binaries, config, or upstream lookup failures.
+set -uo pipefail
+
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${_SCRIPT_DIR}/../lib/frp-common.sh" ]]; then
+  # shellcheck source=../lib/frp-common.sh
+  . "${_SCRIPT_DIR}/../lib/frp-common.sh"
+elif [[ -f /usr/local/lib/frp-auto-deploy/frp-common.sh ]]; then
+  # shellcheck disable=SC1091
+  . /usr/local/lib/frp-auto-deploy/frp-common.sh
 fi
+
+if type frp_path >/dev/null 2>&1; then
+  frps_bin="$(frp_path /usr/local/bin/frps)"
+  version_file="$(frp_path /etc/frp-auto-deploy/version)"
+  config_file="$(frp_path /etc/frp-auto-deploy/config.json)"
+  registry_file="$(frp_path /var/lib/frp-auto-deploy/registry.json)"
+else
+  frps_bin=/usr/local/bin/frps
+  version_file=/etc/frp-auto-deploy/version
+  config_file=/etc/frp-auto-deploy/config.json
+  registry_file=/var/lib/frp-auto-deploy/registry.json
+fi
+
+project_version="unknown"
+tested_frp="${FRP_VERSION:-unknown}"
+if [[ -f "$version_file" ]] && type frp_read_kv_file >/dev/null 2>&1; then
+  _pv="$(frp_read_kv_file "$version_file" PROJECT_VERSION)"
+  _tv="$(frp_read_kv_file "$version_file" FRP_VERSION)"
+  [[ -n "${_pv:-}" ]] && project_version="$_pv"
+  [[ -n "${_tv:-}" ]] && tested_frp="$_tv"
+fi
+
+installed_frp="unknown"
+if type frp_parse_binary_version >/dev/null 2>&1; then
+  installed_frp="$(frp_parse_binary_version "$frps_bin")"
+fi
+[[ -n "${installed_frp:-}" ]] || installed_frp="unknown"
+
+upstream_latest="unavailable"
+if type frp_upstream_latest >/dev/null 2>&1; then
+  upstream_latest="$(frp_upstream_latest)"
+fi
+[[ -n "${upstream_latest:-}" ]] || upstream_latest="unavailable"
+
+update_status="unknown"
+if [[ "$installed_frp" == "unknown" || "$tested_frp" == "unknown" ]]; then
+  update_status="unknown"
+elif [[ "$installed_frp" == "$tested_frp" ]]; then
+  if [[ "$upstream_latest" != "unavailable" && "$upstream_latest" != "$tested_frp" ]]; then
+    update_status="up to date (tested version)"
+  else
+    update_status="up to date"
+  fi
+else
+  update_status="update available"
+fi
+
+unit_state() {
+  local unit="$1" state=""
+  if type frp_test_harness_enabled >/dev/null 2>&1 && frp_test_harness_enabled && [[ "${FRP_UPDATE_HOOK_SKIP_SYSTEMD:-}" == "1" ]]; then
+    printf '%s' "unknown"
+    return 0
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    state="$(systemctl is-active "$unit" 2>/dev/null || true)"
+  fi
+  [[ -n "$state" ]] || state="unknown"
+  printf '%s' "$state"
+}
+
+frps_state="$(unit_state frps)"
+allocator_state="$(unit_state frp-port-allocator)"
+
+control_port=""
+port_start=""
+port_end=""
+allocator_port=""
+if [[ -r "$config_file" ]]; then
+  control_port="$(python3 -c 'import json,sys; from pathlib import Path
+c=json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")); v=c.get("control_port"); print("" if v is None else v)' "$config_file" 2>/dev/null || true)"
+  port_start="$(python3 -c 'import json,sys; from pathlib import Path
+c=json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")); v=c.get("port_start"); print("" if v is None else v)' "$config_file" 2>/dev/null || true)"
+  port_end="$(python3 -c 'import json,sys; from pathlib import Path
+c=json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")); v=c.get("port_end"); print("" if v is None else v)' "$config_file" 2>/dev/null || true)"
+  allocator_port="$(python3 -c 'import json,sys; from pathlib import Path
+c=json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")); v=c.get("listen_port"); print("" if v is None else v)' "$config_file" 2>/dev/null || true)"
+fi
+
+clients="0"
+reserved="0"
+if type frp_registry_counts >/dev/null 2>&1 && [[ -r "$registry_file" ]]; then
+  counts="$(frp_registry_counts "$registry_file" 2>/dev/null || echo "0 0")"
+  clients="${counts%% *}"
+  reserved="${counts##* }"
+fi
+
+cat <<EOF
+FRP Auto Deploy
+===============
+
+Project version : ${project_version}
+Installed FRP   : ${installed_frp}
+Tested FRP      : ${tested_frp}
+Upstream latest : ${upstream_latest}
+Update status   : ${update_status}
+
+frps            : ${frps_state}
+allocator       : ${allocator_state}
+EOF
+
+if [[ -n "${control_port:-}" ]]; then
+  echo
+  echo "FRP control     : TCP/${control_port}"
+  echo "Service range   : TCP/${port_start}-${port_end}"
+  echo "Allocator       : TCP/${allocator_port}"
+fi
+
+echo
+echo "Clients         : ${clients}"
+echo "Reserved ports  : ${reserved}"
+exit 0

@@ -126,9 +126,12 @@ Verify the server:
 
 ```bash
 sudo frp-server-status
+sudo frp-update
 ```
 
-or:
+`frp-update` upgrades the FRP server only to the version tested by `frp-auto-deploy` and automatically rolls back if the new server fails its health checks. On a fresh install it is a no-op.
+
+You can also inspect systemd directly:
 
 ```bash
 sudo systemctl status frps --no-pager
@@ -265,6 +268,7 @@ Binaries and systemd units are removed. Token, configuration, and registry are p
 - migration from the legacy manual port allocator
 - client list, connection-info, and reservation management commands
 - uninstall helpers and standalone bootstrap bundles
+- safe FRP server updates to the tested/pinned FRP version, with automatic rollback
 
 FRP itself remains upstream and is downloaded from the official release during installation.
 
@@ -449,6 +453,26 @@ sudo frp-set-client-installer-url \
 sudo frp-server-status
 ```
 
+The status command reports the installed FRP binary version, the FRP version tested by this `frp-auto-deploy` release, an informational upstream latest version, service state, and client/port counts.
+
+## Update FRP
+
+```bash
+sudo frp-update
+```
+
+Check without changing anything:
+
+```bash
+sudo frp-update --check
+```
+
+`frp-update` upgrades the FRP server only to the version tested by `frp-auto-deploy` and automatically rolls back if the new server fails its health checks.
+
+Upstream latest FRP releases are not installed automatically. `frp-auto-deploy` updates only to its tested/pinned FRP version. Availability of existing remote clients takes priority over installing the newest upstream binary.
+
+The update replaces `/usr/local/bin/frps` only. It does not rotate the FRP token, reinitialize the registry, reallocate ports, or change enrollment state. If health checks fail after activation, the previous `frps` binary is restored and restarted.
+
 ---
 
 # Important Files
@@ -459,8 +483,10 @@ sudo frp-server-status
 /etc/frp/server_token
 /etc/frp/frps.toml
 /etc/frp-auto-deploy/config.json
+/etc/frp-auto-deploy/version
 /var/lib/frp-auto-deploy/registry.json
 /var/lib/frp-auto-deploy/enrollments/
+/var/lib/frp-auto-deploy/backups/
 /usr/local/lib/frp-auto-deploy/frp-port-allocator.py
 ```
 
@@ -498,6 +524,14 @@ Generated standalone installers live under `dist/`. Rebuild them after changing 
 
 The repository should never contain real FRP tokens, enrollment secrets, private keys, generated runtime configs, or allocator state.
 
+```bash
+./tests/test-server-migration.sh
+./tests/test-legacy-registry-migration.sh
+./tests/test-frp-update.sh
+./tests/test-frp-server-status.sh
+./scripts/secret-scan.sh
+```
+
 ---
 
 # Notes
@@ -507,4 +541,5 @@ The repository should never contain real FRP tokens, enrollment secrets, private
 - The allocator skips ports already reserved in the registry and ports currently bound by another local service.
 - Client port reservations survive client uninstall/reinstall unless explicitly released from the server.
 - Existing FRP clients can remain connected after migration because the existing FRP authentication token is preserved.
+- FRP server updates install only the tested/pinned FRP version and roll back automatically if health checks fail.
 - Replace all documentation/example IP addresses with values appropriate for your environment before deployment.
