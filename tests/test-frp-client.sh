@@ -202,6 +202,85 @@ if grep -qx enroll "$HOOK"; then fail "noop enrolled"; fi
 if grep -qx restart "$HOOK"; then fail "noop restart"; fi
 pass "no-change apply is a no-op"
 
+# Name-only local metadata
+CAND="$WORKDIR/cand-name.json"
+python3 - "$STATE" "$CAND" <<'PY'
+import json,sys
+from pathlib import Path
+d=json.loads(Path(sys.argv[1]).read_text())
+d['services']['ssh']['name']='ssh'
+Path(sys.argv[2]).write_text(json.dumps(d, indent=2, sort_keys=True)+'\n')
+PY
+toml_before="$(sha256sum "$TREE/etc/frp/frpc.toml" | awk '{print $1}')"
+: >"$HOOK"
+unset FRP_ENROLLMENT_CODE || true
+export FRP_CLIENT_CANDIDATE="$CAND"
+frp_state_diff "$STATE" "$CAND" >"$WORKDIR/name-pending.out"
+frp_ux_print_apply_summary "$STATE" "$CAND" >"$WORKDIR/name-summary.out"
+grep -q 'Display name: SSH -> ssh' "$WORKDIR/name-pending.out" || fail "pending missing name"
+grep -q 'Display name: SSH -> ssh' "$WORKDIR/name-summary.out" || fail "apply summary missing name"
+if grep -A2 '^Changes:' "$WORKDIR/name-summary.out" | grep -q '(none)'; then
+  fail "apply summary Changes=(none) while pending name exists"
+fi
+grep -q 'local connection information only' "$WORKDIR/name-summary.out" || fail "local-only apply help"
+if ! "$ROOT/tools/frp-client" apply >"$WORKDIR/name.out" 2>"$WORKDIR/name.err"; then
+  fail "name-only apply should succeed"
+fi
+grep -q 'Applied local changes.' "$WORKDIR/name.out" || fail "local apply success"
+grep -q 'Allocator contacted : NO' "$WORKDIR/name.out" || fail "local apply allocator line"
+grep -q 'frpc restarted      : NO' "$WORKDIR/name.out" || fail "local apply restart line"
+if grep -q 'Enrollment Code' "$WORKDIR/name.out" "$WORKDIR/name.err"; then
+  fail "name-only asked for Enrollment Code"
+fi
+if grep -qx enroll "$HOOK"; then fail "name-only enrolled"; fi
+if grep -qx restart "$HOOK"; then fail "name-only restarted"; fi
+toml_after="$(sha256sum "$TREE/etc/frp/frpc.toml" | awk '{print $1}')"
+[[ "$toml_before" == "$toml_after" ]] || fail "name-only rewrote frpc.toml"
+python3 - "$STATE" <<'PY' || fail "name-only state"
+import json,sys
+from pathlib import Path
+d=json.loads(Path(sys.argv[1]).read_text())
+assert d['services']['ssh']['name']=='ssh'
+assert d['services']['ssh']['remote_port']==18200
+PY
+grep -q 'ssh -p 18200 aella@203.0.113.10' "$TREE/etc/frp/access-info.txt" || fail "access-info after name"
+pass "name-only is local metadata apply"
+
+# ssh_user-only local metadata
+CAND="$WORKDIR/cand-user.json"
+python3 - "$STATE" "$CAND" <<'PY'
+import json,sys
+from pathlib import Path
+d=json.loads(Path(sys.argv[1]).read_text())
+d['services']['ssh']['ssh_user']='tester'
+Path(sys.argv[2]).write_text(json.dumps(d, indent=2, sort_keys=True)+'\n')
+PY
+toml_before="$(sha256sum "$TREE/etc/frp/frpc.toml" | awk '{print $1}')"
+: >"$HOOK"
+unset FRP_ENROLLMENT_CODE || true
+export FRP_CLIENT_CANDIDATE="$CAND"
+frp_state_diff "$STATE" "$CAND" >"$WORKDIR/user-pending.out"
+frp_ux_print_apply_summary "$STATE" "$CAND" >"$WORKDIR/user-summary.out"
+grep -q 'SSH user: aella -> tester' "$WORKDIR/user-pending.out" || fail "pending missing ssh_user"
+grep -q 'SSH user: aella -> tester' "$WORKDIR/user-summary.out" || fail "apply summary missing ssh_user"
+if ! "$ROOT/tools/frp-client" apply >"$WORKDIR/user.out" 2>"$WORKDIR/user.err"; then
+  fail "ssh_user-only apply should succeed"
+fi
+grep -q 'Applied local changes.' "$WORKDIR/user.out" || fail "ssh_user local apply"
+if grep -qx enroll "$HOOK"; then fail "ssh_user enrolled"; fi
+if grep -qx restart "$HOOK"; then fail "ssh_user restarted"; fi
+toml_after="$(sha256sum "$TREE/etc/frp/frpc.toml" | awk '{print $1}')"
+[[ "$toml_before" == "$toml_after" ]] || fail "ssh_user-only rewrote frpc.toml"
+grep -q 'ssh -p 18200 tester@203.0.113.10' "$TREE/etc/frp/access-info.txt" || fail "access-info ssh_user"
+python3 - "$STATE" <<'PY' || fail "ssh_user state"
+import json,sys
+from pathlib import Path
+d=json.loads(Path(sys.argv[1]).read_text())
+assert d['services']['ssh']['ssh_user']=='tester'
+assert d['services']['ssh']['remote_port']==18200
+PY
+pass "ssh_user-only is local metadata apply"
+
 # Add grafana
 CAND="$WORKDIR/cand-add.json"
 python3 - "$STATE" "$CAND" <<'PY'
@@ -252,7 +331,43 @@ assert d['services']['grafana']['local_ip']=='10.10.20.30'
 assert d['services']['grafana']['remote_port']==18201
 PY
 grep -q 'localIP = "10.10.20.30"' "$TREE/etc/frp/frpc.toml" || fail "toml local ip"
+grep -q 'Target: 127.0.0.1:3000 -> 10.10.20.30:3000' "$WORKDIR/edit.out" || fail "edit summary missing target"
+grep -q 'An Enrollment Code is required' "$WORKDIR/edit.out" || fail "target change requires enrollment"
 pass "edit target preserves remote port"
+
+# Mixed name + target is runtime
+CAND="$WORKDIR/cand-mixed.json"
+python3 - "$STATE" "$CAND" <<'PY'
+import json,sys
+from pathlib import Path
+d=json.loads(Path(sys.argv[1]).read_text())
+d['services']['grafana']['name']='Dash'
+d['services']['grafana']['local_ip']='10.10.20.31'
+Path(sys.argv[2]).write_text(json.dumps(d, indent=2, sort_keys=True)+'\n')
+PY
+: >"$HOOK"
+export FRP_CLIENT_CANDIDATE="$CAND"
+export FRP_ENROLLMENT_CODE="${EID}.${SECRET}"
+frp_state_diff "$STATE" "$CAND" >"$WORKDIR/mixed-pending.out"
+frp_ux_print_apply_summary "$STATE" "$CAND" >"$WORKDIR/mixed-summary.out"
+grep -q 'Display name: Grafana -> Dash' "$WORKDIR/mixed-pending.out" || fail "mixed pending name"
+grep -q 'Target: 10.10.20.30:3000 -> 10.10.20.31:3000' "$WORKDIR/mixed-pending.out" || fail "mixed pending target"
+grep -q 'Display name: Grafana -> Dash' "$WORKDIR/mixed-summary.out" || fail "mixed summary name"
+grep -q 'Target: 10.10.20.30:3000 -> 10.10.20.31:3000' "$WORKDIR/mixed-summary.out" || fail "mixed summary target"
+grep -q 'will restart the FRP client' "$WORKDIR/mixed-summary.out" || fail "mixed is runtime"
+"$ROOT/tools/frp-client" apply >"$WORKDIR/mixed.out"
+if ! grep -qx enroll "$HOOK"; then fail "mixed did not enroll"; fi
+if ! grep -qx restart "$HOOK"; then fail "mixed did not restart"; fi
+python3 - "$STATE" <<'PY' || fail "mixed kept remote port"
+import json,sys
+from pathlib import Path
+d=json.loads(Path(sys.argv[1]).read_text())
+assert d['services']['grafana']['name']=='Dash'
+assert d['services']['grafana']['local_ip']=='10.10.20.31'
+assert d['services']['grafana']['remote_port']==18201
+PY
+grep -q 'localIP = "10.10.20.31"' "$TREE/etc/frp/frpc.toml" || fail "mixed toml ip"
+pass "mixed name+target uses secured apply"
 
 # Disable grafana
 CAND="$WORKDIR/cand-disable.json"
@@ -332,7 +447,7 @@ python3 - "$STATE" "$CAND" <<'PY'
 import json,sys
 from pathlib import Path
 d=json.loads(Path(sys.argv[1]).read_text())
-d['services']['grafana']['name']='GrafanaX'
+d['services']['grafana']['local_ip']='10.10.20.99'
 Path(sys.argv[2]).write_text(json.dumps(d, indent=2, sort_keys=True)+'\n')
 PY
 cp "$STATE" "$WORKDIR/state.before"
@@ -364,7 +479,7 @@ python3 - "$STATE" "$CAND" <<'PY'
 import json,sys
 from pathlib import Path
 d=json.loads(Path(sys.argv[1]).read_text())
-d['services']['grafana']['name']='GrafanaVerify'
+d['services']['grafana']['local_ip']='10.10.20.98'
 Path(sys.argv[2]).write_text(json.dumps(d, indent=2, sort_keys=True)+'\n')
 PY
 export FRP_CLIENT_CANDIDATE="$CAND"
@@ -386,7 +501,7 @@ python3 - "$STATE" "$CAND" <<'PY'
 import json,sys
 from pathlib import Path
 d=json.loads(Path(sys.argv[1]).read_text())
-d['services']['grafana']['name']='GrafanaRestart'
+d['services']['grafana']['local_ip']='10.10.20.97'
 Path(sys.argv[2]).write_text(json.dumps(d, indent=2, sort_keys=True)+'\n')
 PY
 export FRP_CLIENT_HOOK_RESTART_FAIL=1
@@ -397,11 +512,12 @@ fi
 unset FRP_CLIENT_HOOK_RESTART_FAIL
 grep -q 'LOCAL_ROLLBACK=PASS' "$WORKDIR/restart.out" "$WORKDIR/restart.err" || fail "restart local rollback"
 grep -q 'SERVER_ROLLBACK=PASS' "$WORKDIR/restart.out" "$WORKDIR/restart.err" || fail "restart server compensation"
-python3 - "$STATE" <<'PY' || fail "restart left grafana name"
+python3 - "$STATE" <<'PY' || fail "restart left grafana target"
 import json,sys
 from pathlib import Path
 d=json.loads(Path(sys.argv[1]).read_text())
-assert d['services']['grafana']['name']=='Grafana'
+assert d['services']['grafana']['local_ip']=='10.10.20.31'
+assert d['services']['grafana']['name']=='Dash'
 PY
 pass "restart failure restores local files"
 
@@ -410,7 +526,7 @@ python3 - "$STATE" "$CAND" <<'PY'
 import json,sys
 from pathlib import Path
 d=json.loads(Path(sys.argv[1]).read_text())
-d['services']['grafana']['name']='GrafanaProxy'
+d['services']['grafana']['local_ip']='10.10.20.96'
 Path(sys.argv[2]).write_text(json.dumps(d, indent=2, sort_keys=True)+'\n')
 PY
 export FRP_CLIENT_HOOK_PROXY_FAIL=1
@@ -428,7 +544,7 @@ python3 - "$STATE" "$CAND" <<'PY'
 import json,sys
 from pathlib import Path
 d=json.loads(Path(sys.argv[1]).read_text())
-d['services']['grafana']['name']='GrafanaComp'
+d['services']['grafana']['local_ip']='10.10.20.95'
 Path(sys.argv[2]).write_text(json.dumps(d, indent=2, sort_keys=True)+'\n')
 PY
 export FRP_CLIENT_HOOK_VERIFY_FAIL=1

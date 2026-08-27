@@ -558,69 +558,7 @@ PY
 }
 
 frp_ux_print_apply_summary() {
-  local current="$1" candidate="$2"
-  python3 - "$current" "$candidate" <<'PY'
-import json, sys
-from pathlib import Path
-
-def svcs(path):
-    data = json.loads(Path(path).read_text(encoding='utf-8'))
-    services = data.get('services') or {}
-    if isinstance(services, list):
-        return {item['id']: item for item in services}
-    return {sid: dict(item, id=item.get('id') or sid) for sid, item in services.items()}
-
-cur, new = svcs(sys.argv[1]), svcs(sys.argv[2])
-print()
-print('Ready to apply')
-print('==============')
-print()
-print('Current:')
-if not cur:
-    print('  (none)')
-else:
-    for sid, item in cur.items():
-        enabled = 'enabled' if item.get('enabled', True) is not False else 'disabled'
-        remote = item.get('remote_port')
-        extra = f"    public :{remote}" if remote else '    public : assigned automatically'
-        print(f"  {sid}")
-        print(f"    {item.get('local_ip')}:{item.get('local_port')}")
-        print(extra)
-        print(f"    {enabled}")
-print()
-print('Changes:')
-lines = []
-for sid in sorted(set(cur) | set(new)):
-    a, b = cur.get(sid), new.get(sid)
-    if a is None:
-        lines.append(f"  + {sid}")
-        lines.append(f"    {b.get('local_ip')}:{b.get('local_port')}")
-        lines.append('    public port: assigned automatically')
-        continue
-    if b is None:
-        lines.append(f"  - {sid}")
-        lines.append('    removed from local configuration')
-        lines.append('    The public port remains reserved on the FRP server.')
-        continue
-    notes = []
-    if (a.get('enabled', True) is not False) and (b.get('enabled', True) is False):
-        notes.append('disabled (public port remains reserved)')
-    elif (a.get('enabled', True) is False) and (b.get('enabled', True) is not False):
-        notes.append('re-enabled')
-    if a.get('local_ip') != b.get('local_ip') or int(a.get('local_port') or 0) != int(b.get('local_port') or 0):
-        notes.append(f"{a.get('local_ip')}:{a.get('local_port')} -> {b.get('local_ip')}:{b.get('local_port')}")
-    if notes:
-        lines.append(f"  ~ {sid}")
-        for n in notes:
-            lines.append(f"    {n}")
-if not lines:
-    print('  (none)')
-else:
-    print('\n'.join(lines))
-print()
-print('Applying this configuration will restart the FRP client.')
-print()
-PY
+  frp_state_diff_engine summary "$1" "$2"
 }
 
 frp_atomic_write_text() {
@@ -1322,80 +1260,203 @@ frp_decrypt_token() {
   printf '%s' "$token"
 }
 
-frp_state_diff() {
-  python3 - "$1" "$2" <<'PY'
+frp_state_diff_engine() {
+  local mode="$1" current="$2" candidate="$3"
+  python3 - "$mode" "$current" "$candidate" <<'PY'
 import json, sys
 from pathlib import Path
+
+mode = sys.argv[1]
 
 def svcs(path):
     data = json.loads(Path(path).read_text(encoding='utf-8'))
-    services = data.get('services', {})
+    services = data.get('services') or {}
     if isinstance(services, list):
-        return {item['id']: item for item in services}
-    return {sid: dict(item, id=item.get('id') or sid) for sid, item in services.items()}
+        return {item['id']: item for item in services}, data
+    return {sid: dict(item, id=item.get('id') or sid) for sid, item in services.items()}, data
 
-cur = svcs(sys.argv[1])
-new = svcs(sys.argv[2])
-lines = []
+def enabled(item):
+    return item.get('enabled', True) is not False
+
+def port(item):
+    try:
+        return int(item.get('local_port') or 0)
+    except (TypeError, ValueError):
+        return 0
+
+def pair_notes(a, b):
+    notes = []
+    if enabled(a) and not enabled(b):
+        notes.append(('runtime', 'disabled (public port remains reserved)'))
+    elif (not enabled(a)) and enabled(b):
+        notes.append(('runtime', 're-enabled'))
+    if a.get('local_ip') != b.get('local_ip') or port(a) != port(b):
+        notes.append((
+            'runtime',
+            f"Target: {a.get('local_ip')}:{a.get('local_port')} -> {b.get('local_ip')}:{b.get('local_port')}",
+        ))
+    if (a.get('name') or '') != (b.get('name') or ''):
+        notes.append(('local', f"Display name: {a.get('name')} -> {b.get('name')}"))
+    if a.get('preset') == 'ssh' or b.get('preset') == 'ssh':
+        old_user = a.get('ssh_user') or 'root'
+        new_user = b.get('ssh_user') or 'root'
+        if old_user != new_user:
+            notes.append(('local', f'SSH user: {old_user} -> {new_user}'))
+    return notes
+
+cur, cur_data = svcs(sys.argv[2])
+new, _new_data = svcs(sys.argv[3])
+entries = []
+classes = set()
 for sid in sorted(set(cur) | set(new)):
     a, b = cur.get(sid), new.get(sid)
     if a is None:
-        lines.append(f'+ {sid}')
-        lines.append(f"  {b.get('local_ip')}:{b.get('local_port')}")
+        entries.append({
+            'id': sid,
+            'kind': '+',
+            'cls': 'runtime',
+            'notes': [
+                f"{b.get('local_ip')}:{b.get('local_port')}",
+                'public port: assigned automatically',
+            ],
+        })
+        classes.add('runtime')
         continue
     if b is None:
-        lines.append(f'- {sid}')
-        lines.append('  removed from local configuration')
+        entries.append({
+            'id': sid,
+            'kind': '-',
+            'cls': 'runtime',
+            'notes': [
+                'removed from local configuration',
+                'The public port remains reserved on the FRP server.',
+            ],
+        })
+        classes.add('runtime')
         continue
-    changes = []
-    if (a.get('enabled', True) is not False) and (b.get('enabled', True) is False):
-        changes.append('disabled')
-    elif (a.get('enabled', True) is False) and (b.get('enabled', True) is not False):
-        changes.append('re-enabled')
-    if a.get('local_ip') != b.get('local_ip') or int(a.get('local_port', 0) or 0) != int(b.get('local_port', 0) or 0):
-        changes.append(f"{a.get('local_ip')}:{a.get('local_port')} -> {b.get('local_ip')}:{b.get('local_port')}")
-    if a.get('name') != b.get('name'):
-        changes.append(f"name {a.get('name')} -> {b.get('name')}")
-    if a.get('ssh_user') != b.get('ssh_user') and (a.get('preset') == 'ssh' or b.get('preset') == 'ssh'):
-        changes.append(f"ssh_user {a.get('ssh_user')} -> {b.get('ssh_user')}")
-    if changes:
-        mark = '~'
-        lines.append(f'{mark} {sid}')
-        for c in changes:
-            lines.append(f'  {c}')
-if not lines:
+    notes = pair_notes(a, b)
+    if not notes:
+        continue
+    note_cls = 'runtime' if any(c == 'runtime' for c, _t in notes) else 'local'
+    entries.append({
+        'id': sid,
+        'kind': '~',
+        'cls': note_cls,
+        'notes': [text for _c, text in notes],
+    })
+    classes.add(note_cls)
+
+if 'runtime' in classes:
+    overall = 'runtime'
+elif 'local' in classes:
+    overall = 'local'
+else:
+    overall = 'none'
+
+if mode == 'class':
+    print(overall)
     raise SystemExit(0)
-print('Pending changes:')
+
+if mode == 'pending':
+    if overall == 'none':
+        raise SystemExit(0)
+    print('Pending changes:')
+    print()
+    lines = []
+    for item in entries:
+        lines.append(f"{item['kind']} {item['id']}")
+        for note in item['notes']:
+            lines.append(f'  {note}')
+    print('\n'.join(lines))
+    raise SystemExit(0)
+
 print()
-print('\n'.join(lines))
+print('Ready to apply')
+print('==============')
+print()
+print('Current:')
+if not cur:
+    print('  (none)')
+else:
+    for sid, item in cur.items():
+        state = 'enabled' if enabled(item) else 'disabled'
+        remote = item.get('remote_port')
+        extra = f"    public :{remote}" if remote else '    public : assigned automatically'
+        print(f"  {sid}")
+        print(f"    {item.get('local_ip')}:{item.get('local_port')}")
+        print(extra)
+        print(f"    {state}")
+print()
+print('Changes:')
+if not entries:
+    print('  (none)')
+else:
+    lines = []
+    for item in entries:
+        lines.append(f"  {item['kind']} {item['id']}")
+        for note in item['notes']:
+            lines.append(f'    {note}')
+    print('\n'.join(lines))
+print()
+if overall == 'local':
+    print('These changes affect local connection information only.')
+    print('The FRP server and running proxy do not need to be changed.')
+elif overall == 'runtime':
+    print('Applying this configuration will restart the FRP client.')
+print()
 PY
 }
 
+frp_state_diff() {
+  frp_state_diff_engine pending "$1" "$2"
+}
+
+frp_state_change_class() {
+  frp_state_diff_engine class "$1" "$2"
+}
+
 frp_state_has_diff() {
-  python3 - "$1" "$2" <<'PY'
+  local cls
+  cls="$(frp_state_change_class "$1" "$2")"
+  [[ "$cls" == none ]]
+}
+
+frp_apply_local_metadata() {
+  local current="$1" candidate="$2"
+  python3 - "$candidate" "$current" <<'PY'
 import json, sys
 from pathlib import Path
-
-def norm(path):
-    data = json.loads(Path(path).read_text(encoding='utf-8'))
-    services = data.get('services', {})
-    out = {}
-    items = services.items() if isinstance(services, dict) else [(i['id'], i) for i in services]
-    for sid, item in items:
-        rec = {
-            'id': item.get('id') or sid,
-            'name': item.get('name'),
-            'preset': item.get('preset'),
-            'local_ip': item.get('local_ip'),
-            'local_port': int(item.get('local_port') or 0),
-            'enabled': item.get('enabled', True) is not False,
-            'ssh_user': item.get('ssh_user'),
-        }
-        out[sid] = rec
-    return out
-a, b = norm(sys.argv[1]), norm(sys.argv[2])
-raise SystemExit(0 if a == b else 1)
+cand = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+cur = json.loads(Path(sys.argv[2]).read_text(encoding='utf-8'))
+for key in ('allocator_url', 'frp_server', 'frp_server_port', 'hostname', 'machine_id', 'host_id', 'schema_version'):
+    if key in cur and key not in cand:
+        cand[key] = cur[key]
+    elif key in cur:
+        cand.setdefault(key, cur.get(key))
+for sid, rec in (cand.get('services') or {}).items():
+    prev = (cur.get('services') or {}).get(sid) or {}
+    if rec.get('remote_port') in (None, '') and prev.get('remote_port') not in (None, ''):
+        rec['remote_port'] = prev['remote_port']
+Path(sys.argv[1]).write_text(json.dumps(cand, indent=2, sort_keys=True) + '\n', encoding='utf-8')
 PY
+  local server access
+  server="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8")).get("frp_server",""))' "$candidate")"
+  access="$(frp_client_access_path)"
+  local tmp_access
+  tmp_access="$(mktemp)"
+  render_access_info "$tmp_access" "$server" "$candidate"
+  frp_backup_client_files >/dev/null
+  frp_atomic_write_json_file "$(frp_client_state_path)" "$candidate" 0600
+  frp_state_has_secrets "$(frp_client_state_path)" || {
+    echo "ERROR: client-state.json must not contain secrets" >&2
+    rm -f "$tmp_access"
+    return 1
+  }
+  install -m 0644 "$tmp_access" "$access"
+  rm -f "$tmp_access"
+  echo "Applied local changes."
+  echo "Allocator contacted : NO"
+  echo "frpc restarted      : NO"
 }
 
 frp_merge_ports_into_state() {

@@ -346,6 +346,14 @@ frp_apply_candidate() {
       return 0
     fi
   fi
+
+  local change_class
+  change_class="$(frp_state_change_class "$current" "$candidate")"
+  if [[ "$change_class" == local ]]; then
+    frp_apply_local_metadata "$current" "$candidate"
+    return $?
+  fi
+
   echo
   echo "An Enrollment Code is required to authorize this change."
   frp_ux_enrollment_help

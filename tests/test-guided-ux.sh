@@ -197,5 +197,31 @@ need "$WORKDIR/apply.out" 'public port: assigned automatically' 'apply auto port
 need "$WORKDIR/apply.out" 'will restart the FRP client' 'restart warning'
 pass "apply confirmation summary"
 
+python3 - "$WORKDIR" <<'PY'
+import json, sys
+from pathlib import Path
+wd = Path(sys.argv[1])
+cur = {
+  "schema_version": 1,
+  "frp_server": "203.0.113.10",
+  "services": {
+    "ssh": {"id":"ssh","name":"SSH","local_ip":"127.0.0.1","local_port":22,"remote_port":6002,"enabled":True,"preset":"ssh","ssh_user":"aella"}
+  }
+}
+cand = json.loads(json.dumps(cur))
+cand["services"]["ssh"]["name"] = "ssh"
+(wd/"name-cur.json").write_text(json.dumps(cur)+"\n")
+(wd/"name-cand.json").write_text(json.dumps(cand)+"\n")
+PY
+frp_state_diff "$WORKDIR/name-cur.json" "$WORKDIR/name-cand.json" >"$WORKDIR/name-pending.out"
+frp_ux_print_apply_summary "$WORKDIR/name-cur.json" "$WORKDIR/name-cand.json" >"$WORKDIR/name-apply.out"
+need "$WORKDIR/name-pending.out" 'Display name: SSH -> ssh' 'pending name'
+need "$WORKDIR/name-apply.out" 'Display name: SSH -> ssh' 'apply name'
+if grep -A2 '^Changes:' "$WORKDIR/name-apply.out" | grep -q '(none)'; then
+  fail "apply Changes=(none) for a name-only pending change"
+fi
+need "$WORKDIR/name-apply.out" 'local connection information only' 'local-only apply copy'
+pass "pending and apply diffs agree for name-only"
+
 echo
 echo "GUIDED_UX_TEST=PASS"
