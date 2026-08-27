@@ -29,6 +29,7 @@ jobs:
           ./tests/test-client-allocator-url.sh
           ./tests/test-client-platform.sh
           ./tests/test-server-install-config.sh
+          ./tests/test-allocator-ready.sh
           ./tests/test-create-client.sh
           ./tests/test-management-commands.sh
           ./tests/test-frp-client.sh

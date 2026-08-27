@@ -8,7 +8,7 @@ It automates FRP server/client installation, persistent public port assignment f
 > The IP addresses `203.0.113.10` and `192.0.2.50` used in this README are documentation-only example addresses (RFC 5737). Replace them with your own public and internal addresses when deploying.
 
 Current pinned FRP version: **v0.70.1**
-Current project version: **1.3.0**
+Current project version: **1.3.1**
 
 ---
 
@@ -29,7 +29,7 @@ FRP Auto Deploy CLI
 ===================
 
 Role            : Server
-Project version : 1.3.0
+Project version : 1.3.1
 FRP version     : 0.70.1
 
 Type 'help' or '?' for available commands.
@@ -52,7 +52,7 @@ FRP Auto Deploy CLI
 ===================
 
 Role            : Client
-Project version : 1.3.0
+Project version : 1.3.1
 FRP version     : 0.70.1
 
 frpctl> status
@@ -891,6 +891,7 @@ python3 tests/test-mgmt-identity.py
 ./tests/test-client-allocator-url.sh
 ./tests/test-client-platform.sh
 ./tests/test-server-install-config.sh
+./tests/test-allocator-ready.sh
 ./tests/test-create-client.sh
 ./tests/test-management-commands.sh
 ./tests/test-frp-client.sh

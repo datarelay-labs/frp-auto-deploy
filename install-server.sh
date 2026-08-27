@@ -105,6 +105,100 @@ require_value() {
   fi
 }
 
+# Overridable wrappers so installer tests can mock systemd/curl/sleep.
+frp_server_systemctl() {
+  systemctl "$@"
+}
+
+frp_server_curl() {
+  curl "$@"
+}
+
+frp_server_journalctl() {
+  journalctl "$@"
+}
+
+frp_server_sleep() {
+  sleep "$@"
+}
+
+frp_allocator_ready_timeout_sec() {
+  local timeout="${FRP_ALLOCATOR_READY_TIMEOUT_SEC:-30}"
+  if [[ ! "$timeout" =~ ^[1-9][0-9]*$ ]]; then
+    timeout=30
+  fi
+  printf '%s' "$timeout"
+}
+
+frp_allocator_ready_interval_sec() {
+  local interval="${FRP_ALLOCATOR_READY_INTERVAL_SEC:-1}"
+  if [[ ! "$interval" =~ ^[0-9]+([.][0-9]+)?$ ]] || [[ "$interval" == "0" || "$interval" == "0.0" ]]; then
+    interval=1
+  fi
+  printf '%s' "$interval"
+}
+
+frp_print_unit_diagnostics() {
+  local unit="$1"
+  echo >&2
+  echo "----- systemctl status ${unit} -----" >&2
+  frp_server_systemctl status "$unit" --no-pager -l >&2 || true
+  echo >&2
+  echo "----- journalctl -u ${unit} -----" >&2
+  frp_server_journalctl -u "$unit" -n 50 --no-pager >&2 || true
+}
+
+frp_wait_unit_active() {
+  local unit="$1"
+  local timeout interval start now
+  timeout="$(frp_allocator_ready_timeout_sec)"
+  interval="$(frp_allocator_ready_interval_sec)"
+  start="$(date +%s)"
+  while true; do
+    if frp_server_systemctl is-active --quiet "$unit"; then
+      return 0
+    fi
+    now="$(date +%s)"
+    if (( now - start >= timeout )); then
+      echo "ERROR: ${unit} did not become active within ${timeout} seconds" >&2
+      frp_print_unit_diagnostics "$unit"
+      return 1
+    fi
+    frp_server_sleep "$interval"
+  done
+}
+
+frp_wait_allocator_ready() {
+  local port="${1:-${FRP_ALLOCATOR_PORT:-6099}}"
+  local timeout interval start now url announced=0
+  timeout="$(frp_allocator_ready_timeout_sec)"
+  interval="$(frp_allocator_ready_interval_sec)"
+  url="http://127.0.0.1:${port}/healthz"
+  start="$(date +%s)"
+
+  while true; do
+    if ! frp_server_systemctl is-active --quiet frp-port-allocator; then
+      echo "ERROR: frp-port-allocator.service stopped before becoming ready" >&2
+      frp_print_unit_diagnostics frp-port-allocator
+      return 1
+    fi
+    if frp_server_curl -fsS "$url" >/dev/null 2>&1; then
+      return 0
+    fi
+    now="$(date +%s)"
+    if (( now - start >= timeout )); then
+      echo "ERROR: FRP allocator did not become ready within ${timeout} seconds" >&2
+      frp_print_unit_diagnostics frp-port-allocator
+      return 1
+    fi
+    if [[ "$announced" == "0" ]]; then
+      echo "Waiting for FRP allocator HTTP listener on ${url} ..."
+      announced=1
+    fi
+    frp_server_sleep "$interval"
+  done
+}
+
 ensure_deps() {
   if ! command -v apt-get >/dev/null 2>&1; then
     echo "ERROR: automatic server installation currently supports Debian/Ubuntu only" >&2
@@ -357,10 +451,8 @@ EOF2
   systemctl restart frps
   systemctl restart frp-port-allocator
 
-  sleep 2
-  systemctl is-active --quiet frps || { journalctl -u frps -n 50 --no-pager; exit 1; }
-  systemctl is-active --quiet frp-port-allocator || { journalctl -u frp-port-allocator -n 50 --no-pager; exit 1; }
-  curl -fsS "http://127.0.0.1:${FRP_ALLOCATOR_PORT}/healthz" >/dev/null
+  frp_wait_unit_active frps || exit 1
+  frp_wait_allocator_ready "$FRP_ALLOCATOR_PORT" || exit 1
 
   cat <<EOF2
 
