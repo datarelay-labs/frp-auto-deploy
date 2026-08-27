@@ -235,7 +235,7 @@ pass "CLIENT_STATUS_PROJECT_VERSION"
 
 # Server version tracking still uses the shared helper.
 grep -q 'frp_write_version_file /etc/frp-auto-deploy/version' "$ROOT/install-server.sh" || fail "server version helper"
-grep -q 'PROJECT_VERSION=1.2.0' "$ROOT/VERSION" || fail "VERSION file"
+grep -q 'PROJECT_VERSION=1.3.0' "$ROOT/VERSION" || fail "VERSION file"
 pass "SERVER_VERSION_TRACKING_UNBROKEN"
 
 # --- B. Existing enrolled client safe upgrade
@@ -256,7 +256,7 @@ assert_runtime_preserved "$ENROLLED" "$WORKDIR/enrolled.before" || fail "enrolle
 assert_no_leak "$WORKDIR/enrolled.out"
 assert_no_leak "$WORKDIR/enrolled.err"
 [[ -f "$ENROLLED/etc/frp-auto-deploy/version" ]] || fail "version file after upgrade"
-grep -q 'PROJECT_VERSION=1.2.0' "$ENROLLED/etc/frp-auto-deploy/version" || fail "version migrated"
+grep -q 'PROJECT_VERSION=1.3.0' "$ENROLLED/etc/frp-auto-deploy/version" || fail "version migrated"
 assert_mode "$ENROLLED/etc/frp-auto-deploy/version" "0o644"
 [[ -x "$ENROLLED/usr/local/bin/frpctl" ]] || fail "frpctl installed by upgrade"
 NEW_CLIENT_SHA="$(file_sha "$ENROLLED/usr/local/bin/frp-client")"
@@ -265,11 +265,11 @@ grep -q 'old-client' "$ENROLLED/usr/local/bin/frp-client" && fail "old frp-clien
 grep -q 'Enrollment Code : NOT REQUIRED' "$WORKDIR/enrolled.out" || fail "enrollment not required message"
 grep -q 'frpc restarted  : NO' "$WORKDIR/enrolled.out" || fail "no restart message"
 grep -q 'Client state    : preserved' "$WORKDIR/enrolled.out" || fail "state preserved message"
-grep -q '1.1.0 -> 1.2.0' "$WORKDIR/enrolled.out" || fail "version transition"
+grep -q '1.1.0 -> 1.3.0' "$WORKDIR/enrolled.out" || fail "version transition"
 if grep -qx enroll "$HOOK"; then fail "upgrade contacted allocator"; fi
 if grep -qx restart "$HOOK"; then fail "upgrade restarted frpc"; fi
 "$ROOT/tools/frp-client" status >"$WORKDIR/enrolled-status.out"
-grep -q 'Project version : 1.2.0' "$WORKDIR/enrolled-status.out" || fail "status after upgrade"
+grep -q 'Project version : 1.3.0' "$WORKDIR/enrolled-status.out" || fail "status after upgrade"
 grep -q 'Management identity : enrolled' "$WORKDIR/enrolled-status.out" || fail "identity still enrolled"
 python3 - "$ENROLLED/etc/frp/client-state.json" <<'PY' || fail "ports after upgrade"
 import json,sys
@@ -332,13 +332,13 @@ if ! "$ROOT/tools/frp-client" update --source "$ROOT" >"$WORKDIR/legacy.out" 2>"
 fi
 assert_runtime_preserved "$LEGACY" "$WORKDIR/legacy.before" || fail "legacy runtime changed"
 [[ ! -f "$LEGACY/etc/frp/client-identity.key" ]] || fail "legacy upgrade created identity"
-grep -q 'PROJECT_VERSION=1.2.0' "$LEGACY/etc/frp-auto-deploy/version" || fail "legacy version migration"
-grep -q 'legacy / unknown -> 1.2.0' "$WORKDIR/legacy.out" || fail "legacy version transition"
+grep -q 'PROJECT_VERSION=1.3.0' "$LEGACY/etc/frp-auto-deploy/version" || fail "legacy version migration"
+grep -q 'legacy / unknown -> 1.3.0' "$WORKDIR/legacy.out" || fail "legacy version transition"
 grep -q 'Enrollment Code : NOT REQUIRED' "$WORKDIR/legacy.out" || fail "legacy upgrade asked for code"
 if grep -qi 'Enrollment Code:' "$WORKDIR/legacy.out"; then fail "legacy upgrade prompted for code"; fi
 if grep -qx enroll "$HOOK"; then fail "legacy upgrade contacted allocator"; fi
 "$ROOT/tools/frp-client" status >"$WORKDIR/legacy-after.out"
-grep -q 'Project version : 1.2.0' "$WORKDIR/legacy-after.out" || fail "legacy status version after"
+grep -q 'Project version : 1.3.0' "$WORKDIR/legacy-after.out" || fail "legacy status version after"
 grep -q 'Management identity : not established' "$WORKDIR/legacy-after.out" || fail "legacy identity still missing"
 
 # Later server-affecting apply still requires an Enrollment Code.

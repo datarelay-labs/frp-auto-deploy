@@ -401,6 +401,7 @@ Create a client enrollment:
 
 Everyday command (remember this one):
   sudo frpctl
+  Then type help inside the CLI.
 
 Check schema v2 deployment readiness:
   sudo frpctl status

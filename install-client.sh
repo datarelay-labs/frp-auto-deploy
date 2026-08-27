@@ -6,7 +6,7 @@ if [[ -f "${_FRP_INSTALL_CLIENT_DIR}/VERSION" ]]; then
   # shellcheck disable=SC1091
   . "${_FRP_INSTALL_CLIENT_DIR}/VERSION"
 fi
-PROJECT_VERSION="${PROJECT_VERSION:-1.2.0}"
+PROJECT_VERSION="${PROJECT_VERSION:-1.3.0}"
 FRP_VERSION="${FRP_VERSION:-0.70.1}"
 FRP_SHA256_AMD64="333da23d1b9009d7c01638e9ba38cf4600f7d37d393f854e96ee1396adefa9a6"
 FRP_SHA256_ARM64="3990f396a9a490ee7f0e5f355287750ed41520064ed999eab443b5e9a78d773d"
@@ -431,10 +431,12 @@ print('For normal operation, this is the only command you need to remember:')
 print()
 print('  sudo frpctl')
 print()
+print('Then type help inside the CLI.')
+print()
 print('Useful commands')
 print('---------------')
 print()
-print('Everyday menu / status / update:')
+print('Everyday CLI / status / update:')
 print('  sudo frpctl')
 print('  sudo frpctl status')
 print('  sudo frpctl update')

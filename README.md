@@ -8,7 +8,7 @@ It automates FRP server/client installation, persistent public port assignment f
 > The IP addresses `203.0.113.10` and `192.0.2.50` used in this README are documentation-only example addresses (RFC 5737). Replace them with your own public and internal addresses when deploying.
 
 Current pinned FRP version: **v0.70.1**
-Current project version: **1.2.0**
+Current project version: **1.3.0**
 
 ---
 
@@ -20,10 +20,56 @@ For normal operation, this is the only command you need to remember:
 sudo frpctl
 ```
 
-It detects whether this host is an FRP server, an FRP client, or both, then shows a simple menu. Common shortcuts:
+That starts the persistent interactive management CLI. Then type `help` or `?` for the commands that apply to this host.
+
+```text
+$ sudo frpctl
+
+FRP Auto Deploy CLI
+===================
+
+Role            : Server
+Project version : 1.3.0
+FRP version     : 0.70.1
+
+Type 'help' or '?' for available commands.
+
+frpctl> clients
+...
+
+frpctl> client dp-os-upgrade
+...
+
+frpctl> exit
+```
+
+Client example:
+
+```text
+$ sudo frpctl
+
+FRP Auto Deploy CLI
+===================
+
+Role            : Client
+Project version : 1.3.0
+FRP version     : 0.70.1
+
+frpctl> status
+...
+
+frpctl> manage
+...
+frpctl> exit
+```
+
+Inside the CLI, `menu` opens the guided numbered menu. After you leave that menu, you return to `frpctl>`, not to the Linux shell.
+
+Direct commands remain available for automation, scripts, and advanced users:
 
 ```bash
 sudo frpctl status
+sudo frpctl clients
 sudo frpctl update
 sudo frpctl help
 ```
@@ -35,7 +81,7 @@ frps   # FRP server
 frpc   # FRP client
 ```
 
-Commands such as `frpctl`, `frp-client`, `frp-clients`, `frp-create-client`, `frp-server-status`, `frp-release-service`, `frp-revoke-client`, and `frp-update` belong to this `frp-auto-deploy` operational layer. This project does **not** fork or modify FRP. Advanced users and automation may continue calling the individual commands directly.
+`frps` and `frpc` are the official upstream FRP binaries. `frpctl` and the other `frp-*` commands (`frp-client`, `frp-clients`, `frp-create-client`, `frp-server-status`, `frp-release-service`, `frp-revoke-client`, `frp-update`, and so on) belong to this `frp-auto-deploy` operational layer. This project does **not** fork or modify FRP. Advanced users and automation may continue calling the individual commands directly.
 
 ---
 
@@ -161,7 +207,7 @@ sudo frp-server-status --check
 sudo frpctl update
 ```
 
-`frpctl` is the everyday entry point. `frp-server-status --check` confirms registry schema v2 and that the public host and allocator URL are configured. It does not change the server.
+`frpctl` is the everyday entry point. With no arguments it starts the persistent CLI. `frp-server-status --check` confirms registry schema v2 and that the public host and allocator URL are configured. It does not change the server.
 
 `frpctl update` on a server host runs `frp-update`, which upgrades the FRP server binary only to the version tested by `frp-auto-deploy` and automatically rolls back if the new server fails its health checks. On a fresh install it is a no-op.
 
@@ -325,15 +371,21 @@ Connect from another machine with:
 
   ssh -p 6002 aella@203.0.113.10
 
-Useful commands
----------------
-
 For normal operation, this is the only command you need to remember:
 
   sudo frpctl
 
-Advanced direct commands remain available:
+Then type help inside the CLI.
 
+Useful commands
+---------------
+
+Everyday CLI / status / update:
+  sudo frpctl
+  sudo frpctl status
+  sudo frpctl update
+
+Advanced direct commands (still supported):
   sudo frp-client
   sudo frp-client status
   sudo frp-client info
@@ -351,7 +403,7 @@ Need to expose another service later? Do not reinstall FRP. Do not re-run the bo
 sudo frpctl
 ```
 
-That opens the client menu. Equivalents:
+That starts the persistent CLI. Type `manage` to add or edit services, or `menu` for the guided numbered menu. Equivalents:
 
 ```bash
 sudo frpctl manage
@@ -424,7 +476,7 @@ If the bootstrap installer is run again on an already-installed client, it refus
 
 ## 6. Manage clients on the server
 
-The everyday command is still `sudo frpctl`. Direct equivalents remain available:
+The everyday command is still `sudo frpctl`. Inside the CLI, `clients`, `client <name>`, `enroll`, `revoke <name>`, `release-service`, and `release-client` dispatch to the existing tools. Direct equivalents remain available:
 
 List registered clients:
 
@@ -498,7 +550,7 @@ Binaries and systemd units are removed. Token, configuration, and registry are p
 
 - automatic FRP server installation
 - automatic FRP client installation with menu-driven TCP service setup
-- unified `frpctl` operator menu on server and client hosts
+- unified `frpctl` persistent CLI on server and client hosts
 - post-install `frp-client` service add/edit/disable/re-enable without reinstalling FRP
 - persistent client management identity after one-time enrollment
 - persistent public port assignment for SSH, HTTP, HTTPS, and custom TCP services

@@ -101,7 +101,7 @@ frpctl_find_cmd() {
 frpctl_run() {
   local name="$1"
   shift
-  local bin
+  local bin rc
   bin="$(frpctl_find_cmd "$name")" || return 1
   if [[ "${FRP_CTL_DRY_RUN:-}" == "1" ]]; then
     if [[ $# -gt 0 ]]; then
@@ -114,6 +114,8 @@ frpctl_run() {
     return 0
   fi
   "$bin" "$@"
+  rc=$?
+  return "$rc"
 }
 
 frpctl_exec() {
@@ -134,6 +136,15 @@ frpctl_exec() {
   exec "$bin" "$@"
 }
 
+# Direct mode may replace the process. Persistent-shell mode must return.
+frpctl_invoke() {
+  if [[ "${FRP_CTL_REPL:-}" == "1" ]]; then
+    frpctl_run "$@"
+  else
+    frpctl_exec "$@"
+  fi
+}
+
 frpctl_usage() {
   cat <<'EOF'
 Usage: frpctl [command] [args]
@@ -143,24 +154,33 @@ this is the only command you need to remember:
 
     sudo frpctl
 
-It detects whether this host is an FRP server, an FRP client, or both,
-then shows a simple menu or dispatches to the existing tools.
+With no arguments and a TTY, that starts the persistent management CLI.
+Type 'help' or '?' inside the CLI for role-specific commands, or 'menu'
+for the guided numbered menu.
+
+Direct commands remain available for scripts, automation, and advanced use.
 
 Common commands:
-  (no args)          Interactive menu
+  (no args)          Persistent interactive CLI (requires a TTY)
+  menu               Open the guided numbered menu
   status             Show status for this host's role
+  version            Show installed versions (no network)
   update             Upgrade this host's frp-auto-deploy software
   help               Show this help
 
 Client commands:
   manage             Open client service management (frp-client)
+  services           List configured services
   info               Show connection information
 
 Server commands:
   clients            List registered clients
-  create-client      Create a short-lived Enrollment Code
-  client-info NAME   Show one client's connection information
-  revoke-client NAME Revoke a client's management identity
+  client NAME        Show one client's connection information
+  enroll             Create a short-lived Enrollment Code
+  create-client      Same as enroll
+  client-info NAME   Same as client
+  revoke NAME        Revoke a client's management identity
+  revoke-client NAME Same as revoke
   release-service NAME ID
                      Release one service reservation
   release-client NAME
@@ -182,6 +202,12 @@ frpctl_header() {
   echo "Project version : $(frpctl_project_version)"
   echo "FRP version     : $(frpctl_frp_version)"
   echo
+}
+
+frpctl_print_version() {
+  echo "Role            : $(frpctl_role_label)"
+  echo "Project version : $(frpctl_project_version)"
+  echo "FRP version     : $(frpctl_frp_version)"
 }
 
 frpctl_print_client_menu() {
@@ -216,25 +242,54 @@ frpctl_print_both_menu() {
   echo "5) Exit"
 }
 
+frpctl_input_init() {
+  if [[ -n "${FRP_CTL_TEST_INPUT:-}" && -z "${_FRP_CTL_INPUT_READY:-}" ]]; then
+    _FRP_CTL_INPUT_FILE="$(mktemp)"
+    printf '%s' "${FRP_CTL_TEST_INPUT}" >"$_FRP_CTL_INPUT_FILE"
+    if [[ "${FRP_CTL_TEST_INPUT}" != *$'\n' ]]; then
+      printf '\n' >>"$_FRP_CTL_INPUT_FILE"
+    fi
+    exec 9<"$_FRP_CTL_INPUT_FILE"
+    _FRP_CTL_INPUT_READY=1
+  fi
+}
+
+frpctl_input_cleanup() {
+  if [[ -n "${_FRP_CTL_INPUT_FILE:-}" && -f "${_FRP_CTL_INPUT_FILE}" ]]; then
+    rm -f "${_FRP_CTL_INPUT_FILE}"
+  fi
+  if [[ "${_FRP_CTL_INPUT_READY:-}" == "1" ]]; then
+    exec 9<&- 2>/dev/null || true
+  fi
+  _FRP_CTL_INPUT_READY=""
+  _FRP_CTL_INPUT_FILE=""
+}
+
+# Returns 1 on EOF. Empty Enter is a successful empty string.
+frpctl_try_read() {
+  local prompt="$1"
+  local value=""
+  frpctl_input_init
+  if [[ -n "${FRP_CTL_TEST_INPUT:-}" ]]; then
+    if ! IFS= read -r value <&9; then
+      return 1
+    fi
+  elif [[ -t 0 ]]; then
+    if ! IFS= read -r -p "$prompt" value; then
+      return 1
+    fi
+  else
+    echo "ERROR: no TTY for interactive menu; pass a command such as: frpctl status" >&2
+    return 1
+  fi
+  printf '%s' "$value"
+  return 0
+}
+
 frpctl_read() {
   local prompt="$1" default="${2:-}"
   local value=""
-  if [[ -n "${FRP_CTL_TEST_INPUT:-}" ]]; then
-    if [[ -z "${_FRP_CTL_INPUT_FILE:-}" ]]; then
-      _FRP_CTL_INPUT_FILE="$(mktemp)"
-      printf '%s' "${FRP_CTL_TEST_INPUT}" >"$_FRP_CTL_INPUT_FILE"
-      if [[ "${FRP_CTL_TEST_INPUT}" != *$'\n' ]]; then
-        printf '\n' >>"$_FRP_CTL_INPUT_FILE"
-      fi
-      exec 9<"$_FRP_CTL_INPUT_FILE"
-    fi
-    if ! IFS= read -r value <&9; then
-      value="$default"
-    fi
-  elif [[ -t 0 ]]; then
-    IFS= read -r -p "$prompt" value || true
-  else
-    echo "ERROR: no TTY for interactive menu; pass a command such as: frpctl status" >&2
+  if ! value="$(frpctl_try_read "$prompt")"; then
     return 1
   fi
   if [[ -z "$value" ]]; then
@@ -433,84 +488,482 @@ frpctl_require_server() {
   fi
 }
 
-frpctl_main() {
+frpctl_usage_error() {
+  echo "ERROR: usage: $1" >&2
+  if [[ "${FRP_CTL_REPL:-}" == "1" ]]; then
+    return 0
+  fi
+  return 2
+}
+
+frpctl_help_navigation() {
+  cat <<'EOF'
+Navigation
+  menu                  Open guided menu
+  help, ?               Show this help
+  clear                 Clear the screen
+  exit, quit            Exit frpctl
+EOF
+}
+
+frpctl_help_client_body() {
+  cat <<'EOF'
+Service management
+  services              List configured services
+  manage                Add/edit/enable/disable services
+  info                  Show connection information
+
+System
+  status                Show client status
+  update                Update frp-auto-deploy
+  version               Show installed versions
+EOF
+}
+
+frpctl_help_server_body() {
+  cat <<'EOF'
+Clients
+  clients               List registered clients
+  client <name>         Show client information
+  enroll                Create a short-lived Enrollment Code
+
+Security
+  revoke <name>         Revoke client management access
+
+Reservations
+  release-service <client> <service-id>
+                        Release one service reservation
+  release-client <client>
+                        Release all reservations for a client
+
+System
+  status                Show server status
+  update                Update the tested FRP binary on this server
+  version               Show installed versions
+EOF
+}
+
+frpctl_repl_help() {
+  local client=0 server=0
+  frpctl_is_client && client=1
+  frpctl_is_server && server=1
+  echo
+  if [[ "$client" == "1" && "$server" == "1" ]]; then
+    echo "FRP Auto Deploy — Commands"
+    echo "=========================="
+    echo
+    echo "This host has both an FRP client and an FRP server installed."
+    echo
+    echo "Client commands"
+    echo "---------------"
+    echo "  services              List configured services"
+    echo "  manage                Add/edit/enable/disable services"
+    echo "  info                  Show connection information"
+    echo
+    echo "Server commands"
+    echo "---------------"
+    echo "  clients               List registered clients"
+    echo "  client <name>         Show client information"
+    echo "  enroll                Create a short-lived Enrollment Code"
+    echo "  revoke <name>         Revoke client management access"
+    echo "  release-service <client> <service-id>"
+    echo "                        Release one service reservation"
+    echo "  release-client <client>"
+    echo "                        Release all reservations for a client"
+    echo
+    echo "Common commands"
+    echo "---------------"
+    echo "  status                Show client and server status"
+    echo "  client-status         Show client status only"
+    echo "  server-status         Show server status only"
+    echo "  update                Update client tools, then the tested FRP server binary"
+    echo "  client-update         Update client management tools"
+    echo "  server-update         Update the tested FRP binary on this server"
+    echo "  version               Show installed versions"
+    echo
+    frpctl_help_navigation
+  elif [[ "$client" == "1" ]]; then
+    echo "FRP Auto Deploy — Client Commands"
+    echo "================================="
+    echo
+    frpctl_help_client_body
+    echo
+    frpctl_help_navigation
+  elif [[ "$server" == "1" ]]; then
+    echo "FRP Auto Deploy — Server Commands"
+    echo "================================="
+    echo
+    frpctl_help_server_body
+    echo
+    frpctl_help_navigation
+  else
+    frpctl_usage
+  fi
+  echo
+}
+
+frpctl_clear_screen() {
+  if command -v clear >/dev/null 2>&1; then
+    command clear
+  else
+    printf '\033[H\033[2J'
+  fi
+}
+
+frpctl_known_commands() {
+  local client=0 server=0
+  frpctl_is_client && client=1
+  frpctl_is_server && server=1
+  printf '%s\n' help menu status version update clear exit quit q
+  if [[ "$client" == "1" ]]; then
+    printf '%s\n' services manage info client-status client-update
+  fi
+  if [[ "$server" == "1" ]]; then
+    printf '%s\n' clients client client-info enroll create-client \
+      revoke revoke-client release-service release-client \
+      server-status server-update
+  fi
+}
+
+frpctl_edit_distance() {
+  python3 - "$1" "$2" <<'PY'
+import sys
+a, b = sys.argv[1], sys.argv[2]
+la, lb = len(a), len(b)
+if abs(la - lb) > 3:
+    print(99)
+    raise SystemExit(0)
+prev = list(range(lb + 1))
+for i, ca in enumerate(a, 1):
+    cur = [i]
+    for j, cb in enumerate(b, 1):
+        ins, delete, sub = cur[j - 1] + 1, prev[j] + 1, prev[j - 1] + (ca != cb)
+        cur.append(min(ins, delete, sub))
+    prev = cur
+print(prev[-1])
+PY
+}
+
+frpctl_suggest() {
+  local unknown="$1"
+  local cmd dist
+  local -a suggestions=()
+  [[ -n "$unknown" ]] || return 0
+  while IFS= read -r cmd; do
+    [[ -n "$cmd" ]] || continue
+    [[ "$cmd" != "?" ]] || continue
+    if [[ ${#unknown} -ge 3 && "$cmd" == "$unknown"* ]]; then
+      suggestions+=("$cmd")
+      continue
+    fi
+    if [[ ${#cmd} -ge 3 && "$unknown" == "$cmd"* ]]; then
+      suggestions+=("$cmd")
+      continue
+    fi
+    dist="$(frpctl_edit_distance "$unknown" "$cmd" 2>/dev/null || echo 99)"
+    if [[ "$dist" =~ ^[0-9]+$ ]] && [[ "$dist" -ge 1 && "$dist" -le 2 ]]; then
+      suggestions+=("$cmd")
+    fi
+  done < <(frpctl_known_commands | sort -u)
+  if [[ ${#suggestions[@]} -eq 0 ]]; then
+    return 0
+  fi
+  echo "Did you mean:"
+  local seen="" s
+  for s in "${suggestions[@]}"; do
+    case " $seen " in
+      *" $s "*) continue ;;
+    esac
+    echo "  $s"
+    seen="${seen} ${s}"
+  done
+  echo
+}
+
+frpctl_unknown_command() {
+  local cmd="$1"
+  if [[ "${FRP_CTL_REPL:-}" == "1" ]]; then
+    echo "Unknown command: ${cmd}" >&2
+    echo >&2
+    frpctl_suggest "$cmd" >&2
+    echo "Type 'help' for available commands." >&2
+    return 0
+  fi
+  echo "ERROR: unknown command: ${cmd}" >&2
+  echo >&2
+  frpctl_usage >&2
+  return 2
+}
+
+frpctl_reject_shell() {
+  echo "ERROR: arbitrary shell execution is not allowed." >&2
+  echo "frpctl is not a general-purpose shell. Type 'help' for commands." >&2
+  if [[ "${FRP_CTL_REPL:-}" == "1" ]]; then
+    return 0
+  fi
+  return 2
+}
+
+frpctl_dispatch() {
   local cmd="${1:-}"
+  shift || true
   case "$cmd" in
-    '' )
-      frpctl_interactive
-      ;;
-    -h|--help|help)
+    -h|--help)
       frpctl_usage
       ;;
+    help|'?')
+      if [[ "${FRP_CTL_REPL:-}" == "1" ]]; then
+        frpctl_repl_help
+      else
+        frpctl_usage
+      fi
+      ;;
+    menu)
+      frpctl_interactive
+      ;;
     status)
-      shift
       frpctl_status "$@"
       ;;
+    client-status)
+      frpctl_require_client || return 1
+      frpctl_run frp-client status "$@"
+      ;;
+    server-status)
+      frpctl_require_server || return 1
+      frpctl_run frp-server-status "$@"
+      ;;
+    version)
+      echo
+      frpctl_print_version
+      echo
+      ;;
     update)
-      shift
       frpctl_update "$@"
+      ;;
+    client-update)
+      frpctl_require_client || return 1
+      frpctl_client_update "$@"
+      ;;
+    server-update)
+      frpctl_require_server || return 1
+      frpctl_run frp-update "$@"
+      ;;
+    clear)
+      frpctl_clear_screen
+      ;;
+    exit|quit|q)
+      if [[ "${FRP_CTL_REPL:-}" == "1" ]]; then
+        _FRP_CTL_SHOULD_EXIT=1
+        return 0
+      fi
+      return 0
       ;;
     manage)
       frpctl_require_client || return 1
-      shift
-      frpctl_exec frp-client "$@"
+      frpctl_invoke frp-client "$@"
+      ;;
+    services)
+      frpctl_require_client || return 1
+      frpctl_invoke frp-client list "$@"
       ;;
     info)
       frpctl_require_client || return 1
-      shift
-      frpctl_exec frp-client info "$@"
+      frpctl_invoke frp-client info "$@"
       ;;
     clients)
       frpctl_require_server || return 1
-      shift
-      frpctl_exec frp-clients "$@"
+      frpctl_invoke frp-clients "$@"
       ;;
-    create-client)
+    enroll|create-client)
       frpctl_require_server || return 1
-      shift
-      frpctl_exec frp-create-client "$@"
+      frpctl_invoke frp-create-client "$@"
       ;;
-    client-info)
+    client|client-info)
       frpctl_require_server || return 1
-      shift
       if [[ $# -lt 1 ]]; then
-        echo "ERROR: usage: frpctl client-info <client>" >&2
-        return 2
+        if [[ "$cmd" == "client" ]]; then
+          frpctl_usage_error "client <name>"
+        else
+          frpctl_usage_error "frpctl client-info <client>"
+        fi
+        return $?
       fi
-      frpctl_exec frp-client-info "$@"
+      frpctl_invoke frp-client-info "$@"
       ;;
-    revoke-client)
+    revoke|revoke-client)
       frpctl_require_server || return 1
-      shift
       if [[ $# -lt 1 ]]; then
-        echo "ERROR: usage: frpctl revoke-client <client>" >&2
-        return 2
+        if [[ "$cmd" == "revoke" ]]; then
+          frpctl_usage_error "revoke <name>"
+        else
+          frpctl_usage_error "frpctl revoke-client <client>"
+        fi
+        return $?
       fi
-      frpctl_exec frp-revoke-client "$@"
+      frpctl_invoke frp-revoke-client "$@"
       ;;
     release-service)
       frpctl_require_server || return 1
-      shift
       if [[ $# -lt 2 ]]; then
-        echo "ERROR: usage: frpctl release-service <client> <service-id>" >&2
-        return 2
+        if [[ "${FRP_CTL_REPL:-}" == "1" ]]; then
+          frpctl_usage_error "release-service <client> <service-id>"
+        else
+          frpctl_usage_error "frpctl release-service <client> <service-id>"
+        fi
+        return $?
       fi
-      frpctl_exec frp-release-service "$@"
+      frpctl_invoke frp-release-service "$@"
       ;;
     release-client)
       frpctl_require_server || return 1
-      shift
       if [[ $# -lt 1 ]]; then
-        echo "ERROR: usage: frpctl release-client <client>" >&2
-        return 2
+        if [[ "${FRP_CTL_REPL:-}" == "1" ]]; then
+          frpctl_usage_error "release-client <client>"
+        else
+          frpctl_usage_error "frpctl release-client <client>"
+        fi
+        return $?
       fi
-      frpctl_exec frp-release-client "$@"
+      frpctl_invoke frp-release-client "$@"
+      ;;
+    shell|exec|bash|sh|system)
+      frpctl_reject_shell
+      ;;
+    '!'*|\!*)
+      frpctl_reject_shell
+      ;;
+    '')
+      if [[ "${FRP_CTL_REPL:-}" == "1" ]]; then
+        return 0
+      fi
+      frpctl_repl
       ;;
     *)
-      echo "ERROR: unknown command: ${cmd}" >&2
-      echo >&2
-      frpctl_usage >&2
-      return 2
+      frpctl_unknown_command "$cmd"
+      ;;
+  esac
+}
+
+frpctl_tokenize() {
+  local line="$1"
+  _FRP_CTL_TOKENS=()
+  line="${line#"${line%%[![:space:]]*}"}"
+  line="${line%"${line##*[![:space:]]}"}"
+  [[ -n "$line" ]] || return 0
+  # Whitespace-delimited tokens only. Do not eval, glob, or expand.
+  IFS=$' \t' read -r -a _FRP_CTL_TOKENS <<< "$line" || true
+}
+
+frpctl_repl_sigint() {
+  _FRP_CTL_SIGINT=1
+}
+
+frpctl_repl_banner() {
+  echo "FRP Auto Deploy CLI"
+  echo "==================="
+  echo
+  echo "Role            : $(frpctl_role_label)"
+  echo "Project version : $(frpctl_project_version)"
+  echo "FRP version     : $(frpctl_frp_version)"
+  echo
+  echo "Type 'help' or '?' for available commands."
+  echo "Type 'menu' for the guided menu."
+  echo "Type 'exit' to leave."
+  echo
+}
+
+frpctl_repl_read_line() {
+  _FRP_CTL_LINE=""
+  frpctl_input_init
+  if [[ -n "${FRP_CTL_TEST_INPUT:-}" ]]; then
+    printf 'frpctl> '
+    if ! IFS= read -r _FRP_CTL_LINE <&9; then
+      return 1
+    fi
+    printf '%s\n' "$_FRP_CTL_LINE"
+    return 0
+  fi
+  if [[ ! -t 0 ]]; then
+    echo "ERROR: interactive frpctl requires a TTY." >&2
+    echo "Use: frpctl <command>" >&2
+    return 1
+  fi
+  printf 'frpctl> '
+  if ! IFS= read -r _FRP_CTL_LINE; then
+    return 1
+  fi
+  return 0
+}
+
+frpctl_repl() {
+  local rc
+  frpctl_require_install || return 1
+  if [[ -z "${FRP_CTL_TEST_INPUT:-}" && ! -t 0 ]]; then
+    echo "ERROR: interactive frpctl requires a TTY." >&2
+    echo "Use: frpctl <command>" >&2
+    return 1
+  fi
+
+  # In-memory interaction only. Do not persist command history.
+  unset HISTFILE
+  FRP_CTL_REPL=1
+  _FRP_CTL_SHOULD_EXIT=0
+  _FRP_CTL_SIGINT=0
+  trap 'frpctl_repl_sigint' INT
+
+  frpctl_repl_banner
+
+  while true; do
+    _FRP_CTL_SIGINT=0
+    _FRP_CTL_LINE=""
+    if ! frpctl_repl_read_line; then
+      if [[ "${_FRP_CTL_SIGINT}" == "1" ]]; then
+        echo
+        continue
+      fi
+      echo
+      break
+    fi
+    if [[ "${_FRP_CTL_SIGINT}" == "1" ]]; then
+      echo
+      continue
+    fi
+    frpctl_tokenize "$_FRP_CTL_LINE"
+    if [[ ${#_FRP_CTL_TOKENS[@]} -eq 0 ]]; then
+      continue
+    fi
+    case "${_FRP_CTL_TOKENS[0]}" in
+      '!'*|shell|exec|bash|sh|system)
+        frpctl_reject_shell || true
+        continue
+        ;;
+    esac
+    rc=0
+    frpctl_dispatch "${_FRP_CTL_TOKENS[@]}" || rc=$?
+    if [[ "${_FRP_CTL_SHOULD_EXIT}" == "1" ]]; then
+      break
+    fi
+    if [[ "$rc" -ne 0 && "$rc" -ne 130 ]]; then
+      echo
+      echo "Command failed with exit code ${rc}."
+      echo
+    fi
+  done
+
+  trap - INT
+  frpctl_input_cleanup
+  FRP_CTL_REPL=0
+  return 0
+}
+
+frpctl_main() {
+  local cmd="${1:-}"
+  case "$cmd" in
+    '')
+      frpctl_repl
+      ;;
+    *)
+      frpctl_dispatch "$@"
       ;;
   esac
 }
