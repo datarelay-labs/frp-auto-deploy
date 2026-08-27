@@ -1,0 +1,750 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+frp_client_source_lib() {
+  local here cand
+  if [[ -n "${FRP_CLIENT_LIB:-}" && -f "${FRP_CLIENT_LIB}" ]]; then
+    # shellcheck source=lib/frp-client-common.sh
+    . "${FRP_CLIENT_LIB}"
+    return 0
+  fi
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  for cand in \
+    "$here/lib/frp-client-common.sh" \
+    "$here/../lib/frp-client-common.sh" \
+    /usr/local/lib/frp-auto-deploy/frp-client-common.sh
+  do
+    if [[ -f "$cand" ]]; then
+      # shellcheck source=lib/frp-client-common.sh
+      . "$cand"
+      return 0
+    fi
+  done
+  echo "ERROR: missing frp-client-common.sh" >&2
+  exit 1
+}
+
+frp_client_source_lib
+
+prompt_secret() {
+  local prompt="$1" var="$2"
+  if [[ -n "${!var:-}" ]]; then return 0; fi
+  if [[ -r /dev/tty ]]; then
+    read -r -s -p "$prompt" "$var" </dev/tty
+    echo >/dev/tty
+  else
+    echo "ERROR: no TTY and $var is not set" >&2
+    exit 1
+  fi
+}
+
+read_tty() {
+  local prompt="$1" default="${2:-}"
+  local value=""
+  if [[ -r /dev/tty ]]; then
+    read -r -p "$prompt" value </dev/tty || true
+  else
+    echo "ERROR: no TTY for interactive setup; set non-interactive inputs" >&2
+    exit 1
+  fi
+  printf '%s' "${value:-$default}"
+}
+
+infer_ssh_user() {
+  local user="${FRP_SSH_USER:-${SUDO_USER:-root}}"
+  if [[ "$user" == "root" && -n "${LOGNAME:-}" && "$LOGNAME" != root ]]; then
+    user="$LOGNAME"
+  fi
+  printf '%s' "$user"
+}
+
+probe_tcp() {
+  local host="$1" port="$2"
+  timeout 3 bash -c "echo >/dev/tcp/${host}/${port}" >/dev/null 2>&1
+}
+
+maybe_warn_connectivity() {
+  local host="$1" port="$2" label="$3"
+  if [[ "${FRP_SKIP_CONNECTIVITY_CHECK:-}" == "1" ]]; then
+    return 0
+  fi
+  if probe_tcp "$host" "$port"; then
+    return 0
+  fi
+  echo "WARNING: cannot connect to ${label} ${host}:${port} (continuing; target may be remote or not yet listening)"
+}
+
+service_payload() {
+  python3 - "$@" <<'PY'
+import json, sys
+preset = sys.argv[1]
+sid = sys.argv[2]
+name = sys.argv[3]
+host = sys.argv[4]
+port = sys.argv[5]
+payload = {
+  'id': sid,
+  'name': name,
+  'protocol': 'tcp',
+  'local_ip': host,
+  'local_port': port,
+  'preset': preset,
+}
+if preset == 'ssh':
+    payload['ssh_user'] = sys.argv[6] if len(sys.argv) > 6 else 'root'
+print(json.dumps(payload))
+PY
+}
+
+frp_state_add_payload() {
+  python3 - "$CANDIDATE_FILE" "$1" <<'PY'
+import json, re, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+raw = json.loads(sys.argv[2])
+state = json.loads(path.read_text(encoding='utf-8'))
+services = state.setdefault('services', {})
+sid = str(raw.get('id', '')).strip().lower()
+if not re.fullmatch(r'[a-z0-9][a-z0-9._-]{0,31}', sid or ''):
+    raise SystemExit('ERROR: invalid service id; use [a-z0-9][a-z0-9._-]{0,31}')
+if sid in services:
+    raise SystemExit(f'ERROR: duplicate service id: {sid}')
+protocol = str(raw.get('protocol', 'tcp') or 'tcp').strip().lower()
+if protocol != 'tcp':
+    raise SystemExit('ERROR: only tcp services are supported')
+preset = str(raw.get('preset', 'custom') or 'custom').strip().lower()
+if preset not in ('ssh', 'http', 'https', 'custom'):
+    raise SystemExit('ERROR: invalid service preset')
+name = str(raw.get('name', '') or sid).strip() or sid
+if len(name) > 64 or '\n' in name or '\r' in name:
+    raise SystemExit('ERROR: invalid service display name')
+local_ip = str(raw.get('local_ip', '')).strip()
+if not local_ip or any(c in local_ip for c in ' \t\r\n/\\;|&$`\'"<>'):
+    raise SystemExit('ERROR: invalid target host')
+try:
+    local_port = int(str(raw.get('local_port', '')).strip())
+except Exception:
+    raise SystemExit('ERROR: invalid local_port; must be an integer 1-65535')
+if local_port < 1 or local_port > 65535:
+    raise SystemExit('ERROR: invalid local_port; must be an integer 1-65535')
+if len(services) >= 32:
+    raise SystemExit('ERROR: too many services')
+item = {
+    'id': sid,
+    'name': name,
+    'protocol': 'tcp',
+    'local_ip': local_ip,
+    'local_port': local_port,
+    'preset': preset,
+    'enabled': True,
+}
+if preset == 'ssh':
+    ssh_user = str(raw.get('ssh_user', '') or 'root').strip() or 'root'
+    if not re.fullmatch(r'[A-Za-z0-9._@-]{1,32}', ssh_user):
+        raise SystemExit('ERROR: invalid ssh_user')
+    item['ssh_user'] = ssh_user
+services[sid] = item
+path.write_text(json.dumps(state, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+PY
+}
+
+frp_require_root() {
+  if [[ ${EUID} -ne 0 && -z "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
+    echo "ERROR: run as root, e.g. sudo frp-client" >&2
+    exit 1
+  fi
+}
+
+frp_copy_state() {
+  python3 - "$1" "$2" <<'PY'
+import json, sys
+from pathlib import Path
+src, dest = Path(sys.argv[1]), Path(sys.argv[2])
+data = json.loads(src.read_text(encoding='utf-8'))
+dest.write_text(json.dumps(data, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+PY
+}
+
+frp_client_status() {
+  local path
+  path="$(frp_client_state_path)"
+  frp_load_client_state "$path"
+  python3 - "$path" "${FRP_VERSION:-0.70.1}" "${FRP_CLIENT_TEST_ROOT:-}" "${FRP_SKIP_SYSTEMD:-}" <<'PY'
+import json, subprocess, sys
+from pathlib import Path
+data = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+tested = sys.argv[2]
+test_root = sys.argv[3]
+skip_systemd = sys.argv[4]
+services = data.get('services') or {}
+enabled = sum(1 for s in services.values() if s.get('enabled', True) is not False)
+disabled = len(services) - enabled
+active = 'unknown'
+if test_root or skip_systemd == '1':
+    active = 'test'
+else:
+    try:
+        r = subprocess.run(['systemctl', 'is-active', 'frpc'], capture_output=True, text=True, timeout=3)
+        active = (r.stdout or r.stderr or 'unknown').strip() or 'unknown'
+    except Exception:
+        active = 'unknown'
+allocator = 'configured' if data.get('allocator_url') else 'missing'
+print('FRP Client')
+print('==========')
+print()
+print(f"Hostname        : {data.get('hostname', '')}")
+print(f"FRP server      : {data.get('frp_server', '')}:{data.get('frp_server_port', '')}")
+print(f"Allocator       : {allocator}")
+print(f"FRP version     : {tested}")
+print(f"frpc            : {active}")
+print()
+print(f"Services        : {enabled} enabled / {disabled} disabled")
+print()
+for sid, item in services.items():
+    state = 'enabled' if item.get('enabled', True) is not False else 'disabled'
+    print(item.get('id') or sid)
+    if item.get('local_ip') is not None:
+        print(f"  target        : {item.get('local_ip')}:{item.get('local_port')}")
+    if item.get('remote_port') is not None:
+        print(f"  public port   : {item.get('remote_port')}")
+    print(f"  state         : {state}")
+    print()
+PY
+}
+
+frp_client_info() {
+  local access
+  access="$(frp_client_access_path)"
+  if [[ -f "$access" ]]; then
+    cat "$access"
+    return 0
+  fi
+  local path
+  path="$(frp_client_state_path)"
+  if [[ ! -f "$path" ]]; then
+    echo "ERROR: This client predates local management state." >&2
+    echo "Re-enroll once with the current bootstrap installer to initialize frp-client management." >&2
+    return 1
+  fi
+  frp_load_client_state "$path"
+  python3 - "$path" <<'PY'
+import json, sys
+from pathlib import Path
+data = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+server = data.get('frp_server', '')
+print(f'FRP Server: {server}')
+print()
+print('Services:')
+print()
+for sid, item in (data.get('services') or {}).items():
+    if item.get('enabled', True) is False:
+        continue
+    name = item.get('name') or sid
+    remote = item.get('remote_port')
+    print(sid if name == sid else f'{sid} ({name})')
+    print(f"  Target : {item.get('local_ip')}:{item.get('local_port')}")
+    print(f"  Public : {server}:{remote}")
+    preset = item.get('preset') or 'custom'
+    if preset == 'ssh':
+        print('  Connect:')
+        print(f"    ssh -p {remote} {item.get('ssh_user') or 'root'}@{server}")
+    elif preset == 'http':
+        print('  URL:')
+        print(f'    http://{server}:{remote}')
+    elif preset == 'https':
+        print('  URL:')
+        print(f'    https://{server}:{remote}')
+    else:
+        print('  Connect:')
+        print(f'    {server}:{remote}')
+    print()
+PY
+}
+
+frp_client_list() {
+  local path
+  path="$(frp_client_state_path)"
+  frp_load_client_state "$path"
+  frp_print_state_services "$path"
+}
+
+frp_select_service_id() {
+  python3 - "$CANDIDATE_FILE" "$1" <<'PY'
+import json, sys
+from pathlib import Path
+state = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+services = list((state.get('services') or {}).items())
+try:
+    idx = int(sys.argv[2])
+except Exception:
+    raise SystemExit('ERROR: invalid service number')
+if idx < 1 or idx > len(services):
+    raise SystemExit('ERROR: service number out of range')
+print(services[idx-1][0])
+PY
+}
+
+menu_add_service() {
+  local choice sid host port user name payload
+  while true; do
+    echo
+    echo "Add service"
+    echo
+    echo "1) SSH"
+    echo "2) HTTP"
+    echo "3) HTTPS"
+    echo "4) Custom TCP"
+    echo "5) Back"
+    echo
+    choice="$(read_tty "Select: " "")"
+    case "$choice" in
+      1)
+        sid="$(read_tty "Service ID [ssh]: " "ssh")"
+        host="$(read_tty "Target host [127.0.0.1]: " "127.0.0.1")"
+        port="$(read_tty "Target port [22]: " "22")"
+        user="$(read_tty "SSH user [$(infer_ssh_user)]: " "$(infer_ssh_user)")"
+        maybe_warn_connectivity "$host" "$port" "SSH"
+        payload="$(service_payload ssh "$sid" SSH "$host" "$port" "$user")"
+        frp_state_add_payload "$payload"
+        return 0
+        ;;
+      2)
+        sid="$(read_tty "Service ID [http]: " "http")"
+        host="$(read_tty "Target host [127.0.0.1]: " "127.0.0.1")"
+        port="$(read_tty "Target port [80]: " "80")"
+        maybe_warn_connectivity "$host" "$port" "HTTP"
+        payload="$(service_payload http "$sid" HTTP "$host" "$port")"
+        frp_state_add_payload "$payload"
+        return 0
+        ;;
+      3)
+        sid="$(read_tty "Service ID [https]: " "https")"
+        host="$(read_tty "Target host [127.0.0.1]: " "127.0.0.1")"
+        port="$(read_tty "Target port [443]: " "443")"
+        maybe_warn_connectivity "$host" "$port" "HTTPS"
+        payload="$(service_payload https "$sid" HTTPS "$host" "$port")"
+        frp_state_add_payload "$payload"
+        return 0
+        ;;
+      4)
+        sid="$(read_tty "Service ID: " "")"
+        name="$(read_tty "Display name [${sid}]: " "$sid")"
+        host="$(read_tty "Target host [127.0.0.1]: " "127.0.0.1")"
+        port="$(read_tty "Target port: " "")"
+        maybe_warn_connectivity "$host" "$port" "TCP"
+        payload="$(service_payload custom "$sid" "$name" "$host" "$port")"
+        frp_state_add_payload "$payload"
+        return 0
+        ;;
+      5) return 0 ;;
+      *) echo "ERROR: select 1-5" >&2 ;;
+    esac
+  done
+}
+
+menu_edit_service() {
+  local choice sid name host port user
+  echo
+  echo "Current services:"
+  echo
+  frp_print_state_services "$CANDIDATE_FILE"
+  choice="$(read_tty "Edit service number: " "")"
+  sid="$(frp_select_service_id "$choice")"
+  echo "Service ID ${sid} cannot be changed. Add a new service to use a different ID."
+  local meta old_name old_host old_port old_user preset
+  meta="$(python3 - "$CANDIDATE_FILE" "$sid" <<'PY'
+import json,sys
+from pathlib import Path
+item=json.loads(Path(sys.argv[1]).read_text())['services'][sys.argv[2]]
+print(item.get('name',''))
+print(item.get('local_ip',''))
+print(item.get('local_port',''))
+print(item.get('ssh_user','root'))
+print(item.get('preset','custom'))
+PY
+)"
+  old_name="$(printf '%s\n' "$meta" | sed -n '1p')"
+  old_host="$(printf '%s\n' "$meta" | sed -n '2p')"
+  old_port="$(printf '%s\n' "$meta" | sed -n '3p')"
+  old_user="$(printf '%s\n' "$meta" | sed -n '4p')"
+  preset="$(printf '%s\n' "$meta" | sed -n '5p')"
+  echo "Service ID ${sid} cannot be changed. Add a new service to use a different ID."
+  name="$(read_tty "Display name [${old_name}]: " "$old_name")"
+  host="$(read_tty "Target host [${old_host}]: " "$old_host")"
+  port="$(read_tty "Target port [${old_port}]: " "$old_port")"
+  user="$old_user"
+  if [[ "$preset" == ssh ]]; then
+    user="$(read_tty "SSH user [${old_user}]: " "$old_user")"
+  fi
+  maybe_warn_connectivity "$host" "$port" "TCP"
+  python3 - "$CANDIDATE_FILE" "$sid" "$name" "$host" "$port" "$user" <<'PY'
+import json, re, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+sid, name, host, port, user = sys.argv[2:7]
+state = json.loads(path.read_text(encoding='utf-8'))
+item = state['services'][sid]
+if len(name) > 64 or '\n' in name or '\r' in name:
+    raise SystemExit('ERROR: invalid service display name')
+if not host or any(c in host for c in ' \t\r\n/\\;|&$`\'"<>'):
+    raise SystemExit('ERROR: invalid target host')
+try:
+    local_port = int(port)
+except Exception:
+    raise SystemExit('ERROR: invalid local_port; must be an integer 1-65535')
+if local_port < 1 or local_port > 65535:
+    raise SystemExit('ERROR: invalid local_port; must be an integer 1-65535')
+item['name'] = name.strip() or sid
+item['local_ip'] = host
+item['local_port'] = local_port
+if item.get('preset') == 'ssh':
+    if not re.fullmatch(r'[A-Za-z0-9._@-]{1,32}', user):
+        raise SystemExit('ERROR: invalid ssh_user')
+    item['ssh_user'] = user
+path.write_text(json.dumps(state, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+PY
+}
+
+menu_enable_disable() {
+  local choice sid
+  echo
+  echo "Current services:"
+  echo
+  frp_print_state_services "$CANDIDATE_FILE"
+  choice="$(read_tty "Service number: " "")"
+  sid="$(frp_select_service_id "$choice")"
+  python3 - "$CANDIDATE_FILE" "$sid" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+sid = sys.argv[2]
+state = json.loads(path.read_text(encoding='utf-8'))
+item = state['services'][sid]
+currently = item.get('enabled', True) is not False
+if currently:
+    enabled_count = sum(1 for rec in state['services'].values() if rec.get('enabled', True) is not False)
+    if enabled_count <= 1:
+        raise SystemExit('ERROR: at least one enabled service is required.')
+    item['enabled'] = False
+    print(f"Service {sid} will be disabled.")
+    print('The server-side public port reservation will remain.')
+else:
+    item['enabled'] = True
+    print(f"Service {sid} will be re-enabled.")
+path.write_text(json.dumps(state, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+PY
+}
+
+frp_apply_candidate() {
+  local current candidate
+  current="$(frp_client_state_path)"
+  candidate="$CANDIDATE_FILE"
+  if frp_state_has_diff "$current" "$candidate"; then
+    echo "No pending changes."
+    return 0
+  fi
+  if [[ "$(frp_count_enabled_services "$candidate")" == "0" ]]; then
+    echo "ERROR: at least one enabled service is required." >&2
+    return 1
+  fi
+
+  echo
+  frp_state_diff "$current" "$candidate" || true
+  echo
+  echo "An Enrollment Code is required to authorize this change."
+  prompt_secret "Enrollment Code: " FRP_ENROLLMENT_CODE
+  if [[ "$FRP_ENROLLMENT_CODE" != *.* ]]; then
+    echo "ERROR: invalid enrollment code format" >&2
+    unset FRP_ENROLLMENT_CODE
+    return 1
+  fi
+  local enroll_id enroll_secret
+  enroll_id="${FRP_ENROLLMENT_CODE%%.*}"
+  enroll_secret="${FRP_ENROLLMENT_CODE#*.}"
+  unset FRP_ENROLLMENT_CODE
+
+  local work allocated meta token server port host_id machine_id hostname_value allocator_url
+  local ciphertext backup local_rollback="N/A" server_rollback="N/A" restore_needed=0
+  work="$(mktemp -d)"
+  allocated="$work/allocated.json"
+  meta="$work/meta.json"
+
+  python3 - "$candidate" "$current" <<'PY'
+import json,sys
+from pathlib import Path
+cand=json.loads(Path(sys.argv[1]).read_text())
+cur=json.loads(Path(sys.argv[2]).read_text())
+for key in ('allocator_url','frp_server','frp_server_port','hostname','machine_id','host_id'):
+    cand.setdefault(key, cur.get(key))
+Path(sys.argv[1]).write_text(json.dumps(cand, indent=2, sort_keys=True)+'\n', encoding='utf-8')
+PY
+
+  allocator_url="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["allocator_url"])' "$candidate")"
+  machine_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["machine_id"])' "$candidate")"
+  hostname_value="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["hostname"])' "$candidate")"
+  host_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["host_id"])' "$candidate")"
+
+  if ! frp_enroll_services "$allocator_url" "$enroll_id" "$enroll_secret" \
+    "$machine_id" "$hostname_value" "$candidate" "$allocated" "$meta"; then
+    rm -rf "$work"
+    unset enroll_secret
+    echo "ERROR: enrollment failed; local configuration was not changed." >&2
+    return 1
+  fi
+  server="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["frp_server"])' "$meta")"
+  port="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["frp_server_port"])' "$meta")"
+  ciphertext="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["token_ciphertext"])' "$meta")"
+  if ! token="$(frp_decrypt_token "$ciphertext" "$enroll_secret")"; then
+    echo "ERROR: token decryption failed; local configuration was not changed." >&2
+    if frp_compensate_previous "$allocator_url" "$enroll_id" "$enroll_secret" \
+      "$machine_id" "$hostname_value" "$current"; then
+      server_rollback="PASS"
+    else
+      server_rollback="FAIL"
+    fi
+    rm -rf "$work"
+    unset enroll_secret
+    echo "LOCAL_ROLLBACK=PASS"
+    echo "SERVER_ROLLBACK=${server_rollback}"
+    if [[ "$server_rollback" != "PASS" ]]; then
+      echo "WARNING: server registry may not match local configuration. Reconcile with a new enrollment." >&2
+    fi
+    return 1
+  fi
+
+  python3 - "$candidate" "$server" "$port" <<'PY'
+import json,sys
+from pathlib import Path
+p=Path(sys.argv[1])
+s=json.loads(p.read_text())
+s['frp_server']=sys.argv[2]
+s['frp_server_port']=int(sys.argv[3])
+p.write_text(json.dumps(s, indent=2, sort_keys=True)+'\n')
+PY
+  if ! frp_merge_ports_into_state "$candidate" "$allocated"; then
+    echo "ERROR: allocator response could not be merged; local configuration was not changed." >&2
+    frp_compensate_previous "$allocator_url" "$enroll_id" "$enroll_secret" \
+      "$machine_id" "$hostname_value" "$current" || true
+    rm -rf "$work"
+    unset enroll_secret token
+    return 1
+  fi
+
+  local tmp_toml tmp_access tmp_state enabled_list
+  tmp_toml="$work/frpc.toml"
+  tmp_access="$work/access-info.txt"
+  tmp_state="$work/client-state.json"
+  enabled_list="$work/enabled.json"
+  frp_enabled_services_list "$candidate" >"$enabled_list"
+  render_frpc_toml "$tmp_toml" "$server" "$port" "$token" "$host_id" "$enabled_list"
+  if ! frp_client_verify_config "$tmp_toml"; then
+    echo "ERROR: generated frpc configuration failed verification." >&2
+    if frp_compensate_previous "$allocator_url" "$enroll_id" "$enroll_secret" \
+      "$machine_id" "$hostname_value" "$current"; then
+      server_rollback="PASS"
+    else
+      server_rollback="FAIL"
+    fi
+    rm -rf "$work"
+    unset enroll_secret token
+    echo "LOCAL_ROLLBACK=PASS"
+    echo "SERVER_ROLLBACK=${server_rollback}"
+    if [[ "$server_rollback" != "PASS" ]]; then
+      echo "WARNING: server registry may not match local configuration. Reconcile with a new enrollment." >&2
+    fi
+    return 1
+  fi
+  render_access_info "$tmp_access" "$server" "$enabled_list"
+  frp_copy_state "$candidate" "$tmp_state"
+  frp_state_has_secrets "$tmp_state" || {
+    echo "ERROR: refusing to write client-state containing secrets" >&2
+    rm -rf "$work"
+    unset enroll_secret token
+    return 1
+  }
+
+  backup="$(frp_backup_client_files)"
+  install -m 0600 "$tmp_toml" "$(frp_client_toml_path)"
+  install -m 0644 "$tmp_access" "$(frp_client_access_path)"
+  install -m 0600 "$tmp_state" "$(frp_client_state_path)"
+
+  if ! frp_client_restart; then
+    restore_needed=1
+  else
+    mapfile -t PROXY_NAMES < <(SERVICES_FILE="$enabled_list" proxy_names_from_services "$host_id")
+    if ! frp_client_wait_proxies "${PROXY_NAMES[@]}"; then
+      restore_needed=1
+    fi
+  fi
+
+  if [[ "$restore_needed" == "1" ]]; then
+    echo "ERROR: activation failed; restoring previous local configuration." >&2
+    if frp_restore_client_files "$backup" && frp_client_restart; then
+      local_rollback="PASS"
+    else
+      local_rollback="FAIL"
+    fi
+    if frp_compensate_previous "$allocator_url" "$enroll_id" "$enroll_secret" \
+      "$machine_id" "$hostname_value" "$current"; then
+      server_rollback="PASS"
+    else
+      server_rollback="FAIL"
+    fi
+    rm -rf "$work"
+    unset enroll_secret token
+    echo "LOCAL_ROLLBACK=${local_rollback}"
+    echo "SERVER_ROLLBACK=${server_rollback}"
+    if [[ "$server_rollback" != "PASS" ]]; then
+      echo "WARNING: server registry may not match local configuration. Reconcile with a new enrollment." >&2
+    fi
+    return 1
+  fi
+
+  frp_copy_state "$(frp_client_state_path)" "$CANDIDATE_FILE"
+  rm -rf "$work"
+  unset enroll_secret token
+  echo "Applied pending changes."
+  echo "LOCAL_ROLLBACK=N/A"
+  echo "SERVER_ROLLBACK=N/A"
+}
+
+frp_compensate_previous() {
+  local allocator_url="$1" enroll_id="$2" enroll_secret="$3"
+  local machine_id="$4" hostname_value="$5" previous_state="$6"
+  local work allocated meta
+  work="$(mktemp -d)"
+  allocated="$work/allocated.json"
+  meta="$work/meta.json"
+  echo "Attempting server registry compensation with the previous service set ..."
+  if frp_enroll_services "$allocator_url" "$enroll_id" "$enroll_secret" \
+    "$machine_id" "$hostname_value" "$previous_state" "$allocated" "$meta"; then
+    rm -rf "$work"
+    return 0
+  fi
+  rm -rf "$work"
+  return 1
+}
+
+frp_client_interactive() {
+  local current
+  current="$(frp_client_state_path)"
+  frp_load_client_state "$current"
+  CANDIDATE_FILE="$(mktemp)"
+  frp_copy_state "$current" "$CANDIDATE_FILE"
+  frp_acquire_client_lock || exit 1
+  trap 'rm -f "$CANDIDATE_FILE"; unset FRP_ENROLLMENT_CODE; frp_release_client_lock' EXIT
+
+  local choice
+  while true; do
+    python3 - "$CANDIDATE_FILE" <<'PY'
+import json,sys
+from pathlib import Path
+data=json.loads(Path(sys.argv[1]).read_text())
+print()
+print('FRP Client Management')
+print('=====================')
+print()
+print(f"Client: {data.get('hostname','')}")
+print(f"Server: {data.get('frp_server','')}")
+print()
+print('Current services:')
+print()
+PY
+    frp_print_state_services "$CANDIDATE_FILE"
+    if ! frp_state_has_diff "$(frp_client_state_path)" "$CANDIDATE_FILE"; then
+      echo
+      frp_state_diff "$(frp_client_state_path)" "$CANDIDATE_FILE" || true
+      echo
+    fi
+    echo "Actions:"
+    echo
+    echo "1) Add service"
+    echo "2) Edit service"
+    echo "3) Enable / disable service"
+    echo "4) Show connection info"
+    echo "5) Status"
+    echo "6) Apply pending changes"
+    echo "7) Discard pending changes"
+    echo "8) Exit"
+    echo
+    if [[ "${FRP_CLIENT_TEST_MENU:-}" == "1" ]]; then
+      return 0
+    fi
+    choice="$(read_tty "Select: " "")"
+    case "$choice" in
+      1) menu_add_service ;;
+      2) menu_edit_service ;;
+      3) menu_enable_disable ;;
+      4) echo; frp_client_info ;;
+      5) echo; frp_client_status ;;
+      6) frp_apply_candidate ;;
+      7)
+        frp_copy_state "$(frp_client_state_path)" "$CANDIDATE_FILE"
+        echo "Pending changes discarded."
+        ;;
+      8)
+        echo "Exit."
+        return 0
+        ;;
+      *) echo "ERROR: select 1-8" >&2 ;;
+    esac
+  done
+}
+
+frp_client_cmd_main() {
+  local cmd="${1:-}"
+  case "$cmd" in
+    '' )
+      frp_require_root
+      frp_client_interactive
+      ;;
+    status)
+      frp_require_root
+      frp_client_status
+      ;;
+    info)
+      frp_require_root
+      frp_client_info
+      ;;
+    list)
+      frp_require_root
+      frp_client_list
+      ;;
+    apply)
+      frp_require_root
+      current="$(frp_client_state_path)"
+      frp_load_client_state "$current"
+      CANDIDATE_FILE="${FRP_CLIENT_CANDIDATE:-}"
+      if [[ -z "$CANDIDATE_FILE" || ! -f "$CANDIDATE_FILE" ]]; then
+        echo "ERROR: FRP_CLIENT_CANDIDATE must point at a candidate state file" >&2
+        exit 1
+      fi
+      frp_acquire_client_lock || exit 1
+      trap 'unset FRP_ENROLLMENT_CODE; frp_release_client_lock' EXIT
+      frp_apply_candidate
+      ;;
+    -h|--help|help)
+      cat <<'EOF'
+Usage: frp-client [status|info|list]
+
+  (no args)   Interactive service management menu
+  status      Show local client and service status
+  info        Show connection information
+  list        List configured services
+
+An Enrollment Code is required only when applying changes that
+update server-side port allocations. Read-only commands do not
+contact the allocator.
+EOF
+      ;;
+    *)
+      echo "ERROR: unknown command: $cmd" >&2
+      echo "Usage: frp-client [status|info|list]" >&2
+      exit 2
+      ;;
+  esac
+}
+
+if [[ "${FRP_CLIENT_TOOL_SOURCED:-}" != "1" ]]; then
+  frp_client_cmd_main "$@"
+fi

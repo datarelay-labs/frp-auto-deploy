@@ -18,6 +18,7 @@ files=[
  'tools/frp-clients',
  'tools/frp-client-info',
  'tools/frp-release-client',
+ 'tools/frp-release-service',
  'tools/frp-set-client-installer-url',
  'tools/frp-server-status',
  'tools/frp-update',
@@ -38,7 +39,27 @@ lines.append('exec "$TMP/install-server.sh" "$@"')
 (dist/'bootstrap-server.sh').write_text('\n'.join(lines)+'\n')
 (dist/'bootstrap-server.sh').chmod(0o755)
 
-for src,dst in [('install-client.sh','bootstrap-client.sh'),('uninstall-client.sh','uninstall-client.sh'),('uninstall-server.sh','uninstall-server.sh')]:
+client_files=[
+ 'install-client.sh',
+ 'lib/frp-client-common.sh',
+ 'tools/frp-client',
+]
+client_lines=['#!/usr/bin/env bash','set -euo pipefail','TMP="$(mktemp -d)"','trap \'rm -rf "$TMP"\' EXIT']
+for rel in client_files:
+    data=base64.b64encode((root/rel).read_bytes()).decode()
+    parent=str(Path(rel).parent)
+    if parent!='.': client_lines.append(f'mkdir -p "$TMP/{parent}"')
+    client_lines.append(f"base64 -d >\"$TMP/{rel}\" <<'B64'")
+    for i in range(0,len(data),76): client_lines.append(data[i:i+76])
+    client_lines.append('B64')
+for rel in client_files:
+    if rel.endswith('.sh') or rel.startswith('tools/'):
+        client_lines.append(f'chmod +x "$TMP/{rel}"')
+client_lines.append('exec "$TMP/install-client.sh" "$@"')
+(dist/'bootstrap-client.sh').write_text('\n'.join(client_lines)+'\n')
+(dist/'bootstrap-client.sh').chmod(0o755)
+
+for src,dst in [('uninstall-client.sh','uninstall-client.sh'),('uninstall-server.sh','uninstall-server.sh')]:
     (dist/dst).write_bytes((root/src).read_bytes())
     (dist/dst).chmod(0o755)
 print('Built dist/bootstrap-server.sh and client bundles')

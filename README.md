@@ -239,7 +239,48 @@ cat /etc/frp/access-info.txt
 
 The assigned ports are persistent. Reinstalling the same service on the same machine reuses the previous public port based on `/etc/machine-id` plus the service ID. Changing a service's local target does not reallocate its public port.
 
-## 5. Manage clients
+A successful install writes `/etc/frp/client-state.json` (mode 600, no secrets). `frpc.toml` and `access-info.txt` are generated from that state. Do not treat `frpc.toml` as the document to edit.
+
+## 5. Manage an installed client
+
+Need to expose another service later? Do not reinstall FRP.
+
+```bash
+sudo frp-client
+```
+
+Example:
+
+```text
+FRP Client Management
+=====================
+
+Client: dp-example
+Server: 203.0.113.10
+
+1) Add service
+→ Custom TCP
+→ grafana
+→ 127.0.0.1:3000
+
+6) Apply pending changes
+Enrollment Code:
+```
+
+Read-only commands do not require an Enrollment Code and do not contact the allocator:
+
+```bash
+sudo frp-client status
+sudo frp-client info
+```
+
+Applying add/edit/enable/disable changes that update server-side allocations requires a new short-lived Enrollment Code from `sudo frp-create-client` on the FRP server. No permanent client management password is used.
+
+Disable a service to stop publishing it. The public port stays reserved. Re-enable to get the same port back. Permanent per-service release is done on the server with `sudo frp-release-service <client> <service-id>`. `frp-release-client` still releases the whole client.
+
+At least one enabled service is required. Clients installed before this management state must be re-enrolled once with the current bootstrap installer.
+
+## 6. Manage clients on the server
 
 List registered clients:
 
@@ -259,6 +300,12 @@ Release a client's reserved ports after its remote `frpc` has been stopped or un
 sudo frp-release-client customer-dp
 ```
 
+Release one service reservation while leaving the rest of the client intact:
+
+```bash
+sudo frp-release-service customer-dp grafana
+```
+
 Create a longer-lived enrollment code when needed:
 
 ```bash
@@ -275,7 +322,7 @@ sudo frp-create-client --ttl 1800 --note customer-dp
 curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/uninstall-client.sh | sudo bash
 ```
 
-The local FRP client is removed, but the central port reservation is intentionally preserved. Release it on the FRP server only when you want those ports reused.
+The local FRP client, `frp-client`, generated config, and local client-state are removed, but the central port reservation is intentionally preserved. Release it on the FRP server only when you want those ports reused.
 
 ## Server
 
@@ -295,6 +342,7 @@ Binaries and systemd units are removed. Token, configuration, and registry are p
 
 - automatic FRP server installation
 - automatic FRP client installation with menu-driven TCP service setup
+- post-install `frp-client` service add/edit/disable/re-enable without reinstalling FRP
 - persistent public port assignment for SSH, HTTP, HTTPS, and custom TCP services
 - short-lived enrollment codes
 - HMAC-authenticated enrollment requests and responses
@@ -494,6 +542,14 @@ sudo frp-release-client customer-dp
 
 If the client still appears online, the command refuses by default. `--force` is available for recovery situations.
 
+## Release one service
+
+```bash
+sudo frp-release-service customer-dp grafana
+```
+
+This frees only that service's reserved public port. Other services on the same client are left unchanged. If the port still appears active, the command refuses unless `--force` is used.
+
 ## Configure the client installer URL
 
 ```bash
@@ -551,10 +607,16 @@ The update replaces `/usr/local/bin/frps` only. It does not rotate the FRP token
 
 ```text
 /etc/frp/frpc.toml
+/etc/frp/client-state.json
 /etc/frp/access-info.txt
+/etc/frp/backups/
 /etc/systemd/system/frpc.service
 /usr/local/bin/frpc
+/usr/local/bin/frp-client
+/usr/local/lib/frp-auto-deploy/frp-client-common.sh
 ```
+
+`client-state.json` is the local desired/current service metadata (schema version 1). `frpc.toml` is generated runtime config. The server `registry.json` is the persistent service/port allocation. Future management UIs should use these structured IDs rather than parsing `frpc.toml`.
 
 ---
 
@@ -592,6 +654,7 @@ python3 tests/test-enrollment-security.py
 ./tests/test-server-install-config.sh
 ./tests/test-create-client.sh
 ./tests/test-management-commands.sh
+./tests/test-frp-client.sh
 ./tests/test-frp-update.sh
 ./tests/test-frp-server-status.sh
 ./scripts/secret-scan.sh
@@ -605,6 +668,8 @@ python3 tests/test-enrollment-security.py
 - On a direct public server, no DNAT is required; allow the required ports on the host firewall or cloud security group.
 - The allocator skips ports already reserved in the registry, ports belonging to any client service, and ports currently bound by another local service.
 - Client port reservations survive client uninstall/reinstall unless explicitly released from the server.
+- Disable a published service to stop advertising it; the public port stays reserved until `frp-release-service` or `frp-release-client`.
+- At least one enabled client service is required.
 - SSH is optional; HTTP/HTTPS presets are TCP passthrough, not FRP virtual-host modes.
 - Existing FRP clients can remain connected after migration because the existing FRP authentication token is preserved.
 - FRP server updates install only the tested/pinned FRP version and roll back automatically if health checks fail.

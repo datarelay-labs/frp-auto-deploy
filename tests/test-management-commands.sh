@@ -132,6 +132,26 @@ PY
 grep -q 'http: 6005' "$WORKDIR/release.out" || fail "release listed service port"
 pass "frp-release-client generic"
 
+printf 'nope\n' | python3 "$ROOT/tools/frp-release-service" dev-dp-mirror grafana >"$WORKDIR/svc-cancel.out" 2>"$WORKDIR/svc-cancel.err" && fail "service release cancel should fail"
+python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY' || fail "cancel mutated grafana"
+import json,sys
+from pathlib import Path
+state=json.loads(Path(sys.argv[1]).read_text())
+assert 'grafana' in state['clients']['aabbccdd']['services']
+PY
+printf 'RELEASE\n' | python3 "$ROOT/tools/frp-release-service" dev-dp-mirror grafana >"$WORKDIR/svc-release.out"
+python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY' || fail "service release"
+import json,sys
+from pathlib import Path
+state=json.loads(Path(sys.argv[1]).read_text())
+svc=state['clients']['aabbccdd']['services']
+assert 'grafana' not in svc
+assert svc['ssh']['remote_port']==6002
+assert svc['api']['remote_port']==6004
+PY
+grep -q 'service grafana' "$WORKDIR/svc-release.out" || fail "service release output"
+pass "frp-release-service generic"
+
 # shellcheck source=../lib/frp-common.sh
 . "$ROOT/lib/frp-common.sh"
 MARKER="$WORKDIR/harness.marker"
@@ -148,8 +168,8 @@ if ! env \
   fail "status exited non-zero"
 fi
 grep -q 'Clients         : 1' "$STATUS_OUT" || fail "status client count after release"
-# reserved 6000 + ssh 6002 + grafana 6003 + api 6004 = 4
-grep -q 'Reserved ports  : 4' "$STATUS_OUT" || fail "status reserved ports"
+# reserved 6000 + ssh 6002 + api 6004 = 3 (grafana released)
+grep -q 'Reserved ports  : 3' "$STATUS_OUT" || fail "status reserved ports"
 pass "frp-server-status generic"
 
 echo

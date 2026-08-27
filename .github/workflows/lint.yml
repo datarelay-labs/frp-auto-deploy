@@ -10,11 +10,11 @@ jobs:
       - name: Shell syntax
         run: |
           git ls-files '*.sh' | xargs -r bash -n
-          bash -n tools/frp-server-status tools/frp-update
+          bash -n tools/frp-server-status tools/frp-update tools/frp-client
       - name: Python compile
         run: |
           python3 -m py_compile server/frp-port-allocator.py server/migrate_token.py scripts/build-bundles.py
-          python3 -m py_compile tools/frp-create-client tools/frp-clients tools/frp-client-info tools/frp-release-client tools/frp-set-client-installer-url
+          python3 -m py_compile tools/frp-create-client tools/frp-clients tools/frp-client-info tools/frp-release-client tools/frp-release-service tools/frp-set-client-installer-url
           python3 -m py_compile tests/test-allocator.py tests/test-enrollment-security.py
       - name: Migration regression tests
         run: |
@@ -30,6 +30,7 @@ jobs:
           ./tests/test-server-install-config.sh
           ./tests/test-create-client.sh
           ./tests/test-management-commands.sh
+          ./tests/test-frp-client.sh
       # Live distro containers are not used here: most images lack a working
       # systemd, and privileged Docker would make CI flaky. Package manager and
       # os-release behavior is covered by tests/test-client-platform.sh.

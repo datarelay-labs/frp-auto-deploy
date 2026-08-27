@@ -13,7 +13,7 @@ fi
 # Runtime artifacts must never be committed.
 while IFS= read -r path; do
   case "$path" in
-    */server_token|*/install_key|*/registry.json|*/access-info.txt|*/frpc.toml|*/frps.toml)
+    */server_token|*/install_key|*/registry.json|*/access-info.txt|*/frpc.toml|*/frps.toml|*/client-state.json)
       fail "runtime secret/config is tracked: $path"
       ;;
   esac

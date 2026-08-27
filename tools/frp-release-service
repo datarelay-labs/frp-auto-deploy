@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import socket
+import tempfile
+from pathlib import Path
+
+ROOT = os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
+
+
+def require_v2(state):
+    if not isinstance(state, dict) or state.get('schema_version') != 2:
+        version = 1
+        if isinstance(state, dict) and 'schema_version' in state:
+            version = state.get('schema_version')
+        raise SystemExit(
+            f'ERROR: unsupported registry schema version {version}.\n\n'
+            'This release requires registry schema version 2.\n\n'
+            'Back up the existing registry and redeploy/reset it explicitly before continuing.'
+        )
+    for client in (state.get('clients') or {}).values():
+        if not isinstance(client, dict):
+            raise SystemExit(
+                'ERROR: unsupported registry schema version 2.\n\n'
+                'This release requires registry schema version 2.\n\n'
+                'Back up the existing registry and redeploy/reset it explicitly before continuing.'
+            )
+        if 'ssh_port' in client or 'https_port' in client:
+            raise SystemExit(
+                'ERROR: unsupported registry schema version 2.\n\n'
+                'Legacy SSH/HTTPS fields are present. This release requires the generic multi-service registry.\n\n'
+                'Back up the existing registry and redeploy/reset it explicitly before continuing.'
+            )
+
+
+parser = argparse.ArgumentParser(description='Release one service reservation for a client')
+parser.add_argument('query', help='hostname or machine-id prefix')
+parser.add_argument('service_id', help='service id to release')
+parser.add_argument('--force', action='store_true', help='release even if the published port is currently active')
+args = parser.parse_args()
+
+
+def active(port):
+    if not port:
+        return False
+    s = socket.socket()
+    s.settimeout(0.3)
+    try:
+        return s.connect_ex(('127.0.0.1', int(port))) == 0
+    finally:
+        s.close()
+
+
+cfg = json.loads(Path(ROOT + '/etc/frp-auto-deploy/config.json').read_text())
+path = Path(cfg['registry_file'])
+if ROOT and not str(path).startswith(ROOT):
+    path = Path(ROOT + str(path))
+state = json.loads(path.read_text())
+require_v2(state)
+
+matches = []
+for mid, client in (state.get('clients') or {}).items():
+    if mid.startswith(args.query) or client.get('hostname') == args.query:
+        matches.append((mid, client))
+if len(matches) != 1:
+    raise SystemExit('Expected exactly one matching client')
+mid, client = matches[0]
+
+sid = str(args.service_id).strip().lower()
+services = client.get('services') or {}
+if not isinstance(services, dict) or sid not in services:
+    raise SystemExit(f'ERROR: service {sid} was not found on this client')
+svc = services[sid]
+if not isinstance(svc, dict):
+    raise SystemExit(f'ERROR: service {sid} was not found on this client')
+port = svc.get('remote_port')
+if port and active(port) and not args.force:
+    raise SystemExit(
+        f'Service {sid} appears online on port {port}. Stop publishing it first, or use --force.'
+    )
+
+print(f'Releasing {client.get("hostname")} ({mid}) service {sid}')
+if port:
+    print(f'Port: {port}')
+answer = input('Type RELEASE to continue: ')
+if answer != 'RELEASE':
+    raise SystemExit('Cancelled')
+
+services.pop(sid)
+if services:
+    client['services'] = services
+    state['clients'][mid] = client
+else:
+    state['clients'].pop(mid)
+
+fd, tmp = tempfile.mkstemp(prefix='registry.', suffix='.tmp', dir=str(path.parent))
+with os.fdopen(fd, 'w') as f:
+    json.dump(state, f, indent=2, sort_keys=True)
+    f.write('\n')
+    f.flush()
+    os.fsync(f.fileno())
+os.chmod(tmp, 0o600)
+os.replace(tmp, path)
+print('Released.')

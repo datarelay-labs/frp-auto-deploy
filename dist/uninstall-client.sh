@@ -6,8 +6,8 @@ if command -v systemctl >/dev/null 2>&1; then
   systemctl disable frpc 2>/dev/null || true
 fi
 pkill -x frpc 2>/dev/null || true
-rm -f /etc/systemd/system/frpc.service /usr/local/bin/frpc
-rm -rf /etc/frp
+rm -f /etc/systemd/system/frpc.service /usr/local/bin/frpc /usr/local/bin/frp-client
+rm -rf /etc/frp /usr/local/lib/frp-auto-deploy/frp-client-common.sh
 if command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload
   systemctl reset-failed 2>/dev/null || true
