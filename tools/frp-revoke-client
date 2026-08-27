@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+"""Revoke a client's persistent management identity.
+
+Service port reservations are left in place. This is not the same as
+frp-release-service / frp-release-client.
+"""
+import argparse
+import json
+import os
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
+
+
+def utc_now_iso():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+
+
+def require_v2(state):
+    if not isinstance(state, dict) or state.get('schema_version') != 2:
+        version = 1
+        if isinstance(state, dict) and 'schema_version' in state:
+            version = state.get('schema_version')
+        raise SystemExit(
+            f'ERROR: unsupported registry schema version {version}.\n\n'
+            'This release requires registry schema version 2.\n\n'
+            'Back up the existing registry and redeploy/reset it explicitly before continuing.'
+        )
+    for client in (state.get('clients') or {}).values():
+        if not isinstance(client, dict):
+            raise SystemExit(
+                'ERROR: unsupported registry schema version 2.\n\n'
+                'This release requires registry schema version 2.\n\n'
+                'Back up the existing registry and redeploy/reset it explicitly before continuing.'
+            )
+        if 'ssh_port' in client or 'https_port' in client:
+            raise SystemExit(
+                'ERROR: unsupported registry schema version 2.\n\n'
+                'Legacy SSH/HTTPS fields are present. This release requires the generic multi-service registry.\n\n'
+                'Back up the existing registry and redeploy/reset it explicitly before continuing.'
+            )
+
+
+def mgmt_status(client):
+    status = client.get('mgmt_status')
+    if status in ('enrolled', 'legacy', 'revoked'):
+        return status
+    if client.get('mgmt_pubkey'):
+        return 'enrolled'
+    return 'legacy'
+
+
+parser = argparse.ArgumentParser(
+    description='Revoke a client management identity without releasing service ports'
+)
+parser.add_argument('query', help='hostname or machine-id prefix')
+parser.add_argument('--force', action='store_true', help='skip interactive confirmation')
+args = parser.parse_args()
+
+cfg = json.loads(Path(ROOT + '/etc/frp-auto-deploy/config.json').read_text())
+path = Path(cfg['registry_file'])
+if ROOT and not str(path).startswith(ROOT):
+    path = Path(ROOT + str(path))
+state = json.loads(path.read_text())
+require_v2(state)
+
+matches = []
+for mid, client in (state.get('clients') or {}).items():
+    if mid.startswith(args.query) or client.get('hostname') == args.query:
+        matches.append((mid, client))
+if len(matches) != 1:
+    raise SystemExit('Expected exactly one matching client')
+mid, client = matches[0]
+
+status = mgmt_status(client)
+fingerprint = str(client.get('mgmt_fingerprint') or '')
+short_fp = ('sha256:' + fingerprint[:16]) if fingerprint else '(none)'
+services = client.get('services') or {}
+if not isinstance(services, dict):
+    services = {}
+
+print(f'Revoking management identity for {client.get("hostname")} ({mid})')
+print(f'Management identity : {status}')
+print(f'Fingerprint         : {short_fp}')
+print('Service reservations will be kept:')
+if services:
+    for sid, svc in sorted(services.items()):
+        if not isinstance(svc, dict):
+            continue
+        port = svc.get('remote_port') or '-'
+        suffix = '' if svc.get('enabled', True) else ' (reserved)'
+        print(f'  {sid}: {port}{suffix}')
+else:
+    print('  (none)')
+print()
+print('The client will need a new Enrollment Code to establish trust again.')
+print('This does not release public ports. Use frp-release-service for that.')
+
+if not args.force:
+    answer = input('Type REVOKE to continue: ')
+    if answer != 'REVOKE':
+        raise SystemExit('Cancelled')
+
+if status == 'revoked':
+    print('Management identity is already revoked.')
+    raise SystemExit(0)
+
+client['mgmt_status'] = 'revoked'
+client['mgmt_revoked_at'] = utc_now_iso()
+client['mgmt_mac_key'] = None
+# Keep public key/fingerprint for operator audit; signed requests still fail on status.
+state['clients'][mid] = client
+
+fd, tmp = tempfile.mkstemp(prefix='registry.', suffix='.tmp', dir=str(path.parent))
+with os.fdopen(fd, 'w') as f:
+    json.dump(state, f, indent=2, sort_keys=True)
+    f.write('\n')
+    f.flush()
+    os.fsync(f.fileno())
+os.chmod(tmp, 0o600)
+os.replace(tmp, path)
+print('Revoked.')
+print('Create a new Enrollment Code with sudo frp-create-client, then re-enroll the client.')

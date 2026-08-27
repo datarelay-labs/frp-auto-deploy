@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import hmac
+import importlib.util
 import ipaddress
 import json
 import os
@@ -17,6 +18,8 @@ from pathlib import Path
 
 LOCK = threading.Lock()
 MAX_CLOCK_SKEW = 300
+MGMT_NONCE_TTL = 900
+MAX_NONCES_PER_CLIENT = 256
 REGISTRY_SCHEMA_VERSION = 2
 SERVICE_ID_RE = re.compile(r'^[a-z0-9][a-z0-9._-]{0,31}$')
 MAX_SERVICES = 32
@@ -24,6 +27,24 @@ MAX_NAME_LEN = 64
 MAX_HOST_LEN = 253
 ALLOWED_PRESETS = ('ssh', 'http', 'https', 'custom')
 ALLOWED_PROTOCOLS = ('tcp',)
+NONCE_RE = re.compile(r'^[0-9a-f]{64}$')
+
+
+def _load_mgmt_auth():
+    candidates = [
+        Path(__file__).resolve().parent / 'frp_mgmt_auth.py',
+        Path(__file__).resolve().parent.parent / 'lib' / 'frp_mgmt_auth.py',
+    ]
+    for path in candidates:
+        if path.is_file():
+            spec = importlib.util.spec_from_file_location('frp_mgmt_auth', path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+    raise RuntimeError('missing frp_mgmt_auth.py')
+
+
+MGMT = _load_mgmt_auth()
 
 
 def unsupported_registry_message(state=None):
@@ -298,6 +319,7 @@ class Allocator:
         self.enrollments_dir = Path(self.cfg['enrollments_dir'])
         self.enrollments_dir.mkdir(parents=True, exist_ok=True)
         self.token_file = self.cfg['token_file']
+        self.nonce_file = Path(self.registry_file).resolve().parent / 'mgmt-nonces.json'
 
     def load_registry(self):
         if not Path(self.registry_file).exists():
@@ -360,6 +382,151 @@ class Allocator:
                     path.unlink(missing_ok=True)
             except Exception:
                 continue
+        self.expire_nonces(now)
+
+    def load_nonces(self):
+        path = self.nonce_file
+        if not path.exists():
+            return {'schema_version': 1, 'nonces': {}}
+        try:
+            data = load_json(path)
+        except (OSError, json.JSONDecodeError):
+            return {'schema_version': 1, 'nonces': {}}
+        if not isinstance(data, dict):
+            return {'schema_version': 1, 'nonces': {}}
+        nonces = data.get('nonces')
+        if not isinstance(nonces, dict):
+            nonces = {}
+        return {'schema_version': 1, 'nonces': nonces}
+
+    def save_nonces(self, data):
+        atomic_write_json(self.nonce_file, data)
+
+    def expire_nonces(self, now=None):
+        now = int(now if now is not None else time.time())
+        data = self.load_nonces()
+        nonces = data['nonces']
+        changed = False
+        for key, exp in list(nonces.items()):
+            try:
+                expiry = int(exp)
+            except (TypeError, ValueError):
+                nonces.pop(key, None)
+                changed = True
+                continue
+            if expiry < now:
+                nonces.pop(key, None)
+                changed = True
+        if changed:
+            self.save_nonces(data)
+        return data
+
+    def consume_nonce(self, machine_id, nonce, now):
+        """Replay defense: a captured signed request cannot be reused.
+
+        Nonces are stored as machine_id:nonce -> expiry. Entries expire after
+        MGMT_NONCE_TTL seconds (900), which is longer than MAX_CLOCK_SKEW so a
+        request stays non-replayable for its entire accepted timestamp window.
+        Per-client count is capped; oldest entries are dropped first.
+        """
+        if not NONCE_RE.fullmatch(nonce or ''):
+            return 'invalid nonce'
+        data = self.expire_nonces(now)
+        nonces = data['nonces']
+        key = f'{machine_id}:{nonce}'
+        if key in nonces:
+            return 'replayed request'
+        prefix = machine_id + ':'
+        owned = sorted(
+            ((k, nonces[k]) for k in list(nonces) if k.startswith(prefix)),
+            key=lambda item: item[1],
+        )
+        while len(owned) >= MAX_NONCES_PER_CLIENT:
+            old_key, _exp = owned.pop(0)
+            nonces.pop(old_key, None)
+        nonces[key] = now + MGMT_NONCE_TTL
+        self.save_nonces(data)
+        return None
+
+    @staticmethod
+    def mgmt_status(client):
+        if not isinstance(client, dict):
+            return 'legacy'
+        status = client.get('mgmt_status')
+        if status in ('enrolled', 'legacy', 'revoked'):
+            return status
+        if client.get('mgmt_pubkey'):
+            return 'enrolled'
+        return 'legacy'
+
+    def register_mgmt_identity(self, client, payload, enrollment_secret, machine_id):
+        raw = payload.get('mgmt_pubkey')
+        if raw in (None, ''):
+            if not client.get('mgmt_status'):
+                client['mgmt_status'] = self.mgmt_status(client)
+            return None, None
+        try:
+            pem = MGMT.canonicalize_pubkey_pem(raw)
+            fingerprint = MGMT.pubkey_fingerprint(pem)
+        except Exception:
+            return None, 'invalid management public key'
+        alg = str(payload.get('mgmt_alg') or MGMT.MGMT_ALG).strip().lower()
+        if alg != MGMT.MGMT_ALG:
+            return None, 'unsupported management signature algorithm'
+        mac = MGMT.derive_mac_key(enrollment_secret, machine_id)
+        now_iso = utc_now_iso()
+        existing_pem = client.get('mgmt_pubkey')
+        status = self.mgmt_status(client)
+        same = False
+        if status == 'enrolled' and existing_pem:
+            try:
+                same = MGMT.canonicalize_pubkey_pem(existing_pem) == pem
+            except Exception:
+                same = False
+        client['mgmt_pubkey'] = pem
+        client['mgmt_alg'] = MGMT.MGMT_ALG
+        client['mgmt_fingerprint'] = fingerprint
+        client['mgmt_status'] = 'enrolled'
+        client['mgmt_mac_key'] = mac
+        if not same:
+            client['mgmt_enrolled_at'] = now_iso
+        client['mgmt_revoked_at'] = None
+        return mac, None
+
+    def verify_mgmt_against_client(self, client, machine_id, headers, body):
+        try:
+            ts = int(str(headers.get('X-Timestamp') or headers.get('X-Mgmt-Timestamp') or ''))
+        except Exception:
+            return 'invalid timestamp', None
+        nonce = str(headers.get('X-Mgmt-Nonce') or '').strip().lower()
+        signature = str(headers.get('X-Mgmt-Signature') or '').strip()
+        if not signature:
+            return 'missing signature', None
+        now = int(time.time())
+        if abs(now - ts) > MAX_CLOCK_SKEW:
+            return 'request timestamp outside allowed window', None
+        if not isinstance(client, dict):
+            return 'unknown client identity', None
+        status = self.mgmt_status(client)
+        if status == 'revoked':
+            return (
+                "this client's management identity has been revoked. "
+                'Run the server enrollment command to create a new Enrollment Code, '
+                'then re-enroll this client.'
+            ), None
+        if status != 'enrolled' or not client.get('mgmt_pubkey'):
+            return 'this client does not have a management identity', None
+        message = MGMT.signed_message(machine_id, body, ts, nonce)
+        try:
+            ok = MGMT.verify_signature(client['mgmt_pubkey'], message, signature)
+        except ValueError as exc:
+            return str(exc), None
+        if not ok:
+            return 'invalid signature', None
+        nonce_error = self.consume_nonce(machine_id, nonce, now)
+        if nonce_error:
+            return nonce_error, None
+        return None, now
 
     def verify_request(self, enrollment_id, timestamp, signature, body):
         record, path = self.load_enrollment(enrollment_id)
@@ -383,10 +550,18 @@ class Allocator:
             return None, None, 'invalid signature'
         return record, path, None
 
-    def enroll(self, enrollment_id, timestamp, signature, body):
-        record, enroll_path, error = self.verify_request(enrollment_id, timestamp, signature, body)
-        if error:
-            return 403, {'error': error}
+    def enroll(self, enrollment_id, timestamp, signature, body, headers=None):
+        headers = headers or {}
+        identity_auth = str(headers.get('X-Mgmt-Auth') or '').strip() == '1'
+
+        record = None
+        enroll_path = None
+        if not identity_auth:
+            record, enroll_path, error = self.verify_request(
+                enrollment_id, timestamp, signature, body
+            )
+            if error:
+                return 403, {'error': error}
 
         try:
             payload = json.loads(body.decode())
@@ -407,9 +582,11 @@ class Allocator:
         except ServiceValidationError as exc:
             return 400, {'error': str(exc)}
 
-        bound_machine_id = record.get('bound_machine_id')
-        if bound_machine_id and bound_machine_id != machine_id:
-            return 403, {'error': 'enrollment code is already bound to another machine'}
+        issued_mac = None
+        if not identity_auth:
+            bound_machine_id = record.get('bound_machine_id')
+            if bound_machine_id and bound_machine_id != machine_id:
+                return 403, {'error': 'enrollment code is already bound to another machine'}
 
         try:
             with LOCK:
@@ -418,11 +595,31 @@ class Allocator:
                 client = clients.get(machine_id)
                 now_iso = utc_now_iso()
 
-                if client is None:
+                if identity_auth:
+                    error, _now = self.verify_mgmt_against_client(
+                        client, machine_id, headers, body
+                    )
+                    if error:
+                        code = 403 if 'invalid JSON' not in error else 400
+                        if error.startswith('malformed') or error.startswith('invalid nonce'):
+                            code = 403
+                        if error.startswith('unknown') or 'revoked' in error or 'does not have' in error:
+                            code = 403
+                        return code, {'error': error}
+                    if payload.get('mgmt_pubkey'):
+                        try:
+                            presented = MGMT.canonicalize_pubkey_pem(payload.get('mgmt_pubkey'))
+                            stored = MGMT.canonicalize_pubkey_pem(client.get('mgmt_pubkey'))
+                        except Exception:
+                            return 403, {'error': 'invalid management public key'}
+                        if presented != stored:
+                            return 403, {'error': 'management public key does not match this client'}
+                elif client is None:
                     client = {
                         'hostname': hostname,
                         'created_at': now_iso,
                         'last_enrolled_at': now_iso,
+                        'mgmt_status': 'legacy',
                         'services': {},
                     }
                     clients[machine_id] = client
@@ -431,6 +628,20 @@ class Allocator:
                     client['last_enrolled_at'] = now_iso
                     if not isinstance(client.get('services'), dict):
                         client['services'] = {}
+
+                if client is None:
+                    return 403, {'error': 'unknown client identity'}
+                client['hostname'] = hostname or client.get('hostname', '')
+                client['last_enrolled_at'] = now_iso
+                if not isinstance(client.get('services'), dict):
+                    client['services'] = {}
+
+                if not identity_auth:
+                    issued_mac, ident_error = self.register_mgmt_identity(
+                        client, payload, record['secret'], machine_id
+                    )
+                    if ident_error:
+                        return 400, {'error': ident_error}
 
                 existing_services = dict(client.get('services') or {})
                 used = self.used_ports(state)
@@ -472,30 +683,43 @@ class Allocator:
                 client['services'] = updated
                 self.save_registry(state)
 
-                record['bound_machine_id'] = machine_id
-                record['used_at'] = record.get('used_at') or now_iso
-                record['last_used_at'] = now_iso
-                self.save_enrollment(enroll_path, record)
+                if record is not None and enroll_path is not None:
+                    record['bound_machine_id'] = machine_id
+                    record['used_at'] = record.get('used_at') or now_iso
+                    record['last_used_at'] = now_iso
+                    self.save_enrollment(enroll_path, record)
+                response_mac_key = client.get('mgmt_mac_key') if identity_auth else None
         except RegistrySchemaError as exc:
             return 500, {'error': str(exc)}
         except RuntimeError as exc:
             return 500, {'error': str(exc)}
 
-        secret = record['secret']
-        token_ciphertext = encrypt_token(read_text(self.token_file), secret)
         response_payload = {
             'frp_server': self.cfg['public_ip'],
             'frp_server_port': int(self.cfg['control_port']),
             'services': allocated,
-            'token_ciphertext': token_ciphertext,
         }
+        if identity_auth:
+            mac_secret = response_mac_key
+            if not mac_secret:
+                return 500, {'error': 'management response authentication is not available'}
+            response_payload['response_hmac'] = MGMT.hmac_hex(
+                mac_secret, canonical_json(response_payload)
+            )
+            return 200, response_payload
+
+        secret = record['secret']
+        token_ciphertext = encrypt_token(read_text(self.token_file), secret)
+        response_payload['token_ciphertext'] = token_ciphertext
+        if issued_mac:
+            response_payload['mgmt_status'] = 'enrolled'
         response_payload['response_hmac'] = hmac_hex(secret, canonical_json(response_payload))
         return 200, response_payload
 
 
 def make_handler(allocator):
     class Handler(BaseHTTPRequestHandler):
-        server_version = 'frp-auto-deploy/1.0'
+        server_version = 'frp-auto-deploy/1.1'
 
         def log_message(self, fmt, *args):
             print('%s - %s' % (self.address_string(), fmt % args), flush=True)
@@ -529,6 +753,7 @@ def make_handler(allocator):
                     self.headers.get('X-Timestamp', ''),
                     self.headers.get('X-Signature', ''),
                     body,
+                    headers=self.headers,
                 )
                 self.send_json(code, result)
             except json.JSONDecodeError:

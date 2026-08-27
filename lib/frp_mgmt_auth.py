@@ -1,0 +1,396 @@
+#!/usr/bin/env python3
+"""Client management identity helpers (P2.3).
+
+Algorithm choice
+----------------
+ECDSA P-256 with SHA-256 via OpenSSL (`openssl dgst -sha256 -sign/-verify`).
+
+Ed25519 is a strong default where OpenSSL 1.1.1+ is guaranteed. This project
+still supports Amazon Linux 2 (OpenSSL 1.0.2), where Ed25519 is unavailable.
+ECDSA P-256 is a standard, non-custom primitive and the same OpenSSL CLI works
+from OpenSSL 1.0.2 through 3.x, matching the existing OpenSSL dependency.
+
+This module does not implement original cryptography. It shells out to OpenSSL.
+
+Canonical signed object (mgmt schema 1)
+---------------------------------------
+The signed bytes are canonical JSON:
+
+  json.dumps(obj, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+
+with UTF-8 encoding and these fields only:
+
+  {
+    "alg": "ecdsa-p256-sha256",
+    "body_sha256": "<hex SHA-256 of the exact HTTP body bytes>",
+    "machine_id": "<client machine identity>",
+    "nonce": "<64 lowercase hex chars, 32 bytes>",
+    "op": "enroll",
+    "schema": 1,
+    "ts": <unix seconds as JSON integer>
+  }
+
+The signature is ECDSA-SHA256 over those canonical bytes (OpenSSL DER), then
+standard Base64 without newlines.
+
+The signed object binds protocol version, algorithm, client/machine identity,
+operation, timestamp, nonce, and payload digest. Do not sign ad-hoc string
+concatenation.
+
+Private keys stay on the client. The server stores the public key PEM, a
+SHA-256 fingerprint of the DER public key, a response MAC key, and status.
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import hmac
+import json
+import os
+import re
+import secrets
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+MGMT_ALG = 'ecdsa-p256-sha256'
+MGMT_SIGN_SCHEMA = 1
+MGMT_OP_ENROLL = 'enroll'
+MGMT_NONCE_HEX_LEN = 64
+PUBKEY_PEM_RE = re.compile(
+    r'-----BEGIN PUBLIC KEY-----\n[A-Za-z0-9+/=\n]+\n-----END PUBLIC KEY-----\n?\Z'
+)
+MAX_PUBKEY_PEM_LEN = 4096
+
+
+def canonical_json(data):
+    return json.dumps(data, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+
+
+def sha256_hex(data):
+    if isinstance(data, str):
+        data = data.encode('utf-8')
+    return hashlib.sha256(data).hexdigest()
+
+
+def hmac_hex(secret, message):
+    if isinstance(secret, str):
+        secret = secret.encode('utf-8')
+    if isinstance(message, str):
+        message = message.encode('utf-8')
+    return hmac.new(secret, message, hashlib.sha256).hexdigest()
+
+
+def new_nonce():
+    return secrets.token_hex(MGMT_NONCE_HEX_LEN // 2)
+
+
+def new_mac_key():
+    return secrets.token_hex(32)
+
+
+def derive_mac_key(secret, machine_id):
+    """Derive the response-auth MAC key from an Enrollment Code secret.
+
+    HMAC-SHA256(enrollment_secret, "frp-mgmt-mac-v1\\n" + machine_id)
+
+    The FRP token is never used. The private key is never used. This key
+    authenticates later management responses and is stored on both sides;
+    it is not sent in subsequent requests.
+    """
+    return hmac_hex(secret, 'frp-mgmt-mac-v1\n' + str(machine_id))
+
+
+def signed_object(machine_id, body, ts, nonce, op=MGMT_OP_ENROLL):
+    if isinstance(body, str):
+        body_bytes = body.encode('utf-8')
+    else:
+        body_bytes = body
+    return {
+        'alg': MGMT_ALG,
+        'body_sha256': sha256_hex(body_bytes),
+        'machine_id': str(machine_id),
+        'nonce': str(nonce).strip().lower(),
+        'op': op,
+        'schema': MGMT_SIGN_SCHEMA,
+        'ts': int(ts),
+    }
+
+
+def signed_message(machine_id, body, ts, nonce, op=MGMT_OP_ENROLL):
+    return canonical_json(signed_object(machine_id, body, ts, nonce, op=op))
+
+
+def _run_openssl(args, input_bytes=None, extra_env=None):
+    env = os.environ.copy()
+    if extra_env:
+        env.update(extra_env)
+    proc = subprocess.run(
+        ['openssl', *args],
+        input=input_bytes,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        check=False,
+    )
+    if proc.returncode != 0:
+        err = (proc.stderr or b'').decode('utf-8', errors='replace').strip()
+        raise RuntimeError(err or 'openssl command failed')
+    return proc.stdout
+
+
+def generate_keypair(key_path, pub_path):
+    """Create an ECDSA P-256 key pair atomically. Never overwrites key_path."""
+    key_path = Path(key_path)
+    pub_path = Path(pub_path)
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        placeholder = os.open(str(key_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(placeholder)
+    except FileExistsError as exc:
+        raise FileExistsError(str(key_path)) from exc
+    fd, tmp_key = tempfile.mkstemp(prefix=key_path.name + '.', suffix='.tmp', dir=str(key_path.parent))
+    os.close(fd)
+    fd, tmp_pub = tempfile.mkstemp(prefix=pub_path.name + '.', suffix='.tmp', dir=str(key_path.parent))
+    os.close(fd)
+    try:
+        os.chmod(tmp_key, 0o600)
+        _run_openssl(['ecparam', '-name', 'prime256v1', '-genkey', '-noout', '-out', tmp_key])
+        os.chmod(tmp_key, 0o600)
+        pub_pem = canonicalize_pubkey_from_private(tmp_key)
+        Path(tmp_pub).write_text(pub_pem, encoding='utf-8')
+        os.chmod(tmp_pub, 0o644)
+        os.replace(tmp_key, key_path)
+        os.replace(tmp_pub, pub_path)
+        os.chmod(key_path, 0o600)
+    except Exception:
+        try:
+            if key_path.exists() and key_path.stat().st_size == 0:
+                key_path.unlink()
+        except OSError:
+            pass
+        raise
+    finally:
+        for tmp in (tmp_key, tmp_pub):
+            if os.path.exists(tmp):
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+
+
+def canonicalize_pubkey_from_private(key_path):
+    out = _run_openssl(['ec', '-in', str(key_path), '-pubout'])
+    text = out.decode('utf-8')
+    return canonicalize_pubkey_pem(text)
+
+
+def canonicalize_pubkey_pem(pem):
+    text = str(pem or '').replace('\r\n', '\n').strip() + '\n'
+    if len(text) > MAX_PUBKEY_PEM_LEN:
+        raise ValueError('public key is too large')
+    if 'PRIVATE KEY' in text.upper():
+        raise ValueError('private key material is not allowed')
+    if not text.startswith('-----BEGIN PUBLIC KEY-----'):
+        raise ValueError('public key must be a PUBLIC KEY PEM')
+    fd, tmp_in = tempfile.mkstemp(prefix='frp-pubkey.', suffix='.pem')
+    os.close(fd)
+    try:
+        os.chmod(tmp_in, 0o600)
+        Path(tmp_in).write_text(text, encoding='utf-8')
+        out = _run_openssl(['pkey', '-pubin', '-in', tmp_in, '-pubout'])
+        canon = out.decode('utf-8').replace('\r\n', '\n')
+        if not canon.endswith('\n'):
+            canon += '\n'
+        _assert_p256_public(tmp_in)
+        return canon
+    finally:
+        try:
+            os.unlink(tmp_in)
+        except OSError:
+            pass
+
+
+def _assert_p256_public(pub_path):
+    text = _run_openssl(['ec', '-pubin', '-in', str(pub_path), '-text', '-noout']).decode('utf-8')
+    lowered = text.lower()
+    if 'private-key' in lowered or 'priv:' in lowered:
+        raise ValueError('public key rejected')
+    if 'nist curve: p-256' not in lowered and 'asn1 oid: prime256v1' not in lowered:
+        raise ValueError('management public key must be ECDSA P-256')
+
+
+def pubkey_der(pem):
+    canon = canonicalize_pubkey_pem(pem)
+    fd, tmp_in = tempfile.mkstemp(prefix='frp-pubkey.', suffix='.pem')
+    os.close(fd)
+    try:
+        os.chmod(tmp_in, 0o600)
+        Path(tmp_in).write_text(canon, encoding='utf-8')
+        return _run_openssl(['pkey', '-pubin', '-in', tmp_in, '-outform', 'DER'])
+    finally:
+        try:
+            os.unlink(tmp_in)
+        except OSError:
+            pass
+
+
+def pubkey_fingerprint(pem):
+    return hashlib.sha256(pubkey_der(pem)).hexdigest()
+
+
+def fingerprint_display(fingerprint_hex):
+    text = str(fingerprint_hex or '').strip().lower()
+    if not text:
+        return ''
+    return 'sha256:' + text[:16]
+
+
+def validate_private_key(key_path):
+    key_path = Path(key_path)
+    if not key_path.is_file():
+        raise ValueError('management identity is missing')
+    mode = key_path.stat().st_mode & 0o777
+    if mode & 0o077:
+        raise ValueError('management identity key permissions are too open (expected 0600)')
+    pem = key_path.read_text(encoding='utf-8')
+    if 'BEGIN' not in pem or 'PRIVATE KEY' not in pem.upper() and 'EC PRIVATE KEY' not in pem.upper():
+        if 'PRIVATE KEY' not in pem.upper():
+            raise ValueError('management identity key is not a private key PEM')
+    if 'BEGIN PUBLIC KEY' in pem and 'PRIVATE KEY' not in pem.upper():
+        raise ValueError('management identity key is not a private key PEM')
+    canonicalize_pubkey_from_private(key_path)
+    return True
+
+
+def sign_message(key_path, message):
+    if isinstance(message, str):
+        message = message.encode('utf-8')
+    fd, tmp_sig = tempfile.mkstemp(prefix='frp-sig.', suffix='.bin')
+    os.close(fd)
+    try:
+        os.chmod(tmp_sig, 0o600)
+        _run_openssl(
+            ['dgst', '-sha256', '-sign', str(key_path), '-out', tmp_sig],
+            input_bytes=message,
+        )
+        sig = Path(tmp_sig).read_bytes()
+        if not sig:
+            raise RuntimeError('empty signature')
+        return base64.b64encode(sig).decode('ascii')
+    finally:
+        try:
+            os.unlink(tmp_sig)
+        except OSError:
+            pass
+
+
+def verify_signature(pub_pem, message, signature_b64):
+    if isinstance(message, str):
+        message = message.encode('utf-8')
+    try:
+        raw = str(signature_b64 or '').strip()
+        if not raw:
+            raise ValueError('malformed signature')
+        sig = base64.b64decode(raw)
+    except Exception as exc:
+        raise ValueError('malformed signature') from exc
+    if not sig:
+        raise ValueError('malformed signature')
+    canon = canonicalize_pubkey_pem(pub_pem)
+    fd_pub, tmp_pub = tempfile.mkstemp(prefix='frp-pub.', suffix='.pem')
+    os.close(fd_pub)
+    fd_sig, tmp_sig = tempfile.mkstemp(prefix='frp-sig.', suffix='.bin')
+    os.close(fd_sig)
+    try:
+        os.chmod(tmp_pub, 0o600)
+        os.chmod(tmp_sig, 0o600)
+        Path(tmp_pub).write_text(canon, encoding='utf-8')
+        Path(tmp_sig).write_bytes(sig)
+        proc = subprocess.run(
+            ['openssl', 'dgst', '-sha256', '-verify', tmp_pub, '-signature', tmp_sig],
+            input=message,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        out = (proc.stdout or b'').decode('utf-8', errors='replace')
+        if proc.returncode != 0 or 'Verified OK' not in out:
+            return False
+        return True
+    finally:
+        for tmp in (tmp_pub, tmp_sig):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description='FRP client management identity helpers')
+    sub = parser.add_subparsers(dest='cmd', required=True)
+    gen = sub.add_parser('gen-key')
+    gen.add_argument('key')
+    gen.add_argument('pub')
+    pub = sub.add_parser('pub')
+    pub.add_argument('key')
+    fp = sub.add_parser('fingerprint')
+    fp.add_argument('pub')
+    sign = sub.add_parser('sign')
+    sign.add_argument('key')
+    ver = sub.add_parser('verify')
+    ver.add_argument('pub')
+    ver.add_argument('signature')
+    chk = sub.add_parser('check-key')
+    chk.add_argument('key')
+    der = sub.add_parser('derive-mac')
+    der.add_argument('machine_id')
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    if args.cmd == 'gen-key':
+        generate_keypair(args.key, args.pub)
+        return 0
+    if args.cmd == 'pub':
+        sys.stdout.write(canonicalize_pubkey_from_private(args.key))
+        return 0
+    if args.cmd == 'fingerprint':
+        pem = Path(args.pub).read_text(encoding='utf-8')
+        sys.stdout.write(pubkey_fingerprint(pem) + '\n')
+        return 0
+    if args.cmd == 'sign':
+        message = sys.stdin.buffer.read()
+        sys.stdout.write(sign_message(args.key, message))
+        return 0
+    if args.cmd == 'verify':
+        message = sys.stdin.buffer.read()
+        pem = Path(args.pub).read_text(encoding='utf-8')
+        if verify_signature(pem, message, args.signature):
+            return 0
+        return 1
+    if args.cmd == 'check-key':
+        validate_private_key(args.key)
+        return 0
+    if args.cmd == 'derive-mac':
+        secret = os.environ.get('MGMT_ENROLL_SECRET', '')
+        if not secret:
+            print('ERROR: MGMT_ENROLL_SECRET is not set', file=sys.stderr)
+            return 1
+        sys.stdout.write(derive_mac_key(secret, args.machine_id))
+        return 0
+    return 2
+
+
+if __name__ == '__main__':
+    try:
+        raise SystemExit(main())
+    except FileExistsError as exc:
+        print(f'ERROR: identity already exists: {exc}', file=sys.stderr)
+        raise SystemExit(1)
+    except Exception as exc:
+        print(f'ERROR: {exc}', file=sys.stderr)
+        raise SystemExit(1)

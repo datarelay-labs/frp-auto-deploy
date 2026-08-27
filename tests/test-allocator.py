@@ -262,6 +262,20 @@ def case_g_duplicate():
         env.cleanup()
 
 
+def case_g2_case_insensitive_id():
+    env = Env()
+    try:
+        code, result = env.enroll([
+            {**svc('ssh', preset='ssh'), 'id': 'ssh'},
+            {**svc('ssh', preset='ssh'), 'id': 'SSH'},
+        ])
+        if code != 400 or 'duplicate' not in str(result.get('error', '')).lower():
+            fail('CASE G2', result)
+        pass_('CASE G2 case-insensitive duplicate service id')
+    finally:
+        env.cleanup()
+
+
 def case_h_invalid_id():
     env = Env()
     try:
@@ -465,6 +479,7 @@ def main():
     case_e_local_target_change()
     case_f_add_later()
     case_g_duplicate()
+    case_g2_case_insensitive_id()
     case_h_invalid_id()
     case_i_invalid_port()
     case_j_exhaustion()

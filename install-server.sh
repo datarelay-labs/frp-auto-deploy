@@ -13,11 +13,13 @@ for f in \
   "$BASE_DIR/server/migrate_token.py" \
   "$BASE_DIR/server/frps.service" \
   "$BASE_DIR/server/frp-port-allocator.service" \
+  "$BASE_DIR/lib/frp_mgmt_auth.py" \
   "$BASE_DIR/tools/frp-create-client" \
   "$BASE_DIR/tools/frp-clients" \
   "$BASE_DIR/tools/frp-client-info" \
   "$BASE_DIR/tools/frp-release-client" \
   "$BASE_DIR/tools/frp-release-service" \
+  "$BASE_DIR/tools/frp-revoke-client" \
   "$BASE_DIR/tools/frp-set-client-installer-url" \
   "$BASE_DIR/tools/frp-server-status" \
   "$BASE_DIR/tools/frp-update"; do
@@ -341,10 +343,11 @@ EOF2
   chmod 600 /var/lib/frp-auto-deploy/registry.json
 
   install -m 0700 "$BASE_DIR/server/frp-port-allocator.py" /usr/local/lib/frp-auto-deploy/frp-port-allocator.py
+  install -m 0644 "$BASE_DIR/lib/frp_mgmt_auth.py" /usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py
   install -m 0644 "$BASE_DIR/lib/frp-common.sh" /usr/local/lib/frp-auto-deploy/frp-common.sh
   install -m 0644 "$BASE_DIR/server/frps.service" /etc/systemd/system/frps.service
   install -m 0644 "$BASE_DIR/server/frp-port-allocator.service" /etc/systemd/system/frp-port-allocator.service
-  for tool in frp-create-client frp-clients frp-client-info frp-release-client frp-release-service frp-set-client-installer-url frp-server-status frp-update; do
+  for tool in frp-create-client frp-clients frp-client-info frp-release-client frp-release-service frp-revoke-client frp-set-client-installer-url frp-server-status frp-update; do
     install -m 0755 "$BASE_DIR/tools/$tool" "/usr/local/sbin/$tool"
   done
 

@@ -38,7 +38,11 @@ sid = str(raw.get('id', '')).strip().lower()
 if not re.fullmatch(r'[a-z0-9][a-z0-9._-]{0,31}', sid or ''):
     raise SystemExit('ERROR: invalid service id; use [a-z0-9][a-z0-9._-]{0,31}')
 if sid in services:
-    raise SystemExit(f'ERROR: duplicate service id: {sid}')
+    raise SystemExit(
+        f'ERROR: duplicate service id: {sid}\n\n'
+        'A service with this ID already exists.\n'
+        'Service IDs are lowercase and case-insensitive.'
+    )
 protocol = str(raw.get('protocol', 'tcp') or 'tcp').strip().lower()
 if protocol != 'tcp':
     raise SystemExit('ERROR: only tcp services are supported')
@@ -99,7 +103,7 @@ frp_client_status() {
   local path
   path="$(frp_client_state_path)"
   frp_load_client_state "$path"
-  python3 - "$path" "${FRP_VERSION:-0.70.1}" "${FRP_CLIENT_TEST_ROOT:-}" "${FRP_SKIP_SYSTEMD:-}" <<'PY'
+  python3 - "$path" "${FRP_VERSION:-0.70.1}" "${FRP_CLIENT_TEST_ROOT:-}" "${FRP_SKIP_SYSTEMD:-}" "$(frp_identity_label)" <<'PY'
 import json, subprocess, sys
 from pathlib import Path
 data = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
@@ -125,6 +129,7 @@ print()
 print(f"Hostname        : {data.get('hostname', '')}")
 print(f"FRP server      : {data.get('frp_server', '')}:{data.get('frp_server_port', '')}")
 print(f"Allocator       : {allocator}")
+print(f"Management identity : {sys.argv[5]}")
 print(f"FRP version     : {tested}")
 print(f"frpc            : {active}")
 print()
@@ -220,7 +225,9 @@ menu_add_service() {
   if [[ -z "$payload" ]]; then
     return 0
   fi
-  frp_state_add_payload "$payload"
+  if ! frp_state_add_payload "$payload"; then
+    return 0
+  fi
 }
 
 menu_edit_service() {
@@ -230,7 +237,9 @@ menu_edit_service() {
   echo
   frp_print_state_services "$CANDIDATE_FILE"
   choice="$(read_tty "Edit service number: " "")"
-  sid="$(frp_select_service_id "$choice")"
+  if ! sid="$(frp_select_service_id "$choice")"; then
+    return 0
+  fi
   echo "Service ID ${sid} cannot be changed."
   echo "The Service ID plus this machine's identity keeps the public port stable."
   echo "To use a different ID, add a new service and disable this one."
@@ -266,7 +275,7 @@ PY
     user="$(read_tty "SSH user [${old_user}]: " "$old_user")"
   fi
   maybe_warn_connectivity "$host" "$port" "TCP"
-  python3 - "$CANDIDATE_FILE" "$sid" "$name" "$host" "$port" "$user" <<'PY'
+  if ! python3 - "$CANDIDATE_FILE" "$sid" "$name" "$host" "$port" "$user" <<'PY'
 import json, re, sys
 from pathlib import Path
 path = Path(sys.argv[1])
@@ -292,6 +301,9 @@ if item.get('preset') == 'ssh':
     item['ssh_user'] = user
 path.write_text(json.dumps(state, indent=2, sort_keys=True) + '\n', encoding='utf-8')
 PY
+  then
+    return 0
+  fi
 }
 
 menu_enable_disable() {
@@ -301,8 +313,10 @@ menu_enable_disable() {
   echo
   frp_print_state_services "$CANDIDATE_FILE"
   choice="$(read_tty "Service number: " "")"
-  sid="$(frp_select_service_id "$choice")"
-  python3 - "$CANDIDATE_FILE" "$sid" <<'PY'
+  if ! sid="$(frp_select_service_id "$choice")"; then
+    return 0
+  fi
+  if ! python3 - "$CANDIDATE_FILE" "$sid" <<'PY'
 import json, sys
 from pathlib import Path
 path = Path(sys.argv[1])
@@ -322,6 +336,9 @@ else:
     print(f"Service {sid} will be re-enabled.")
 path.write_text(json.dumps(state, indent=2, sort_keys=True) + '\n', encoding='utf-8')
 PY
+  then
+    return 0
+  fi
 }
 
 frp_apply_candidate() {
@@ -340,6 +357,26 @@ frp_apply_candidate() {
   echo
   frp_state_diff "$current" "$candidate" || true
   frp_ux_print_apply_summary "$current" "$candidate"
+
+  local change_class ident_status auth_mode="enrollment"
+  change_class="$(frp_state_change_class "$current" "$candidate")"
+  ident_status="$(frp_identity_status)"
+  if [[ "$change_class" == runtime ]]; then
+    if [[ "$ident_status" == enrolled ]]; then
+      echo "Authentication: existing client identity"
+    elif [[ "$ident_status" == corrupt ]]; then
+      echo "ERROR: this client's management identity is unusable." >&2
+      echo "Create a new Enrollment Code on the FRP server with sudo frp-create-client," >&2
+      echo "then re-enroll this client. Do not overwrite the damaged identity file automatically." >&2
+      return 1
+    else
+      echo "This is an existing client without a management identity."
+      echo "A one-time Enrollment Code is required to establish trust."
+      echo "Future configuration changes will not require an Enrollment Code."
+      echo "Authentication: one-time Enrollment Code"
+    fi
+    echo
+  fi
   if [[ -z "${FRP_CLIENT_CANDIDATE:-}" ]]; then
     if ! frp_confirm_yes "Continue? [Y/n]: "; then
       echo "Apply cancelled."
@@ -347,26 +384,34 @@ frp_apply_candidate() {
     fi
   fi
 
-  local change_class
-  change_class="$(frp_state_change_class "$current" "$candidate")"
   if [[ "$change_class" == local ]]; then
     frp_apply_local_metadata "$current" "$candidate"
     return $?
   fi
 
-  echo
-  echo "An Enrollment Code is required to authorize this change."
-  frp_ux_enrollment_help
-  prompt_secret "Enrollment Code: " FRP_ENROLLMENT_CODE
-  if [[ "$FRP_ENROLLMENT_CODE" != *.* ]]; then
-    echo "ERROR: invalid enrollment code format" >&2
+  local enroll_id="" enroll_secret=""
+  if [[ "$ident_status" == enrolled ]]; then
+    auth_mode="identity"
+    echo
+    echo "Authenticating client..."
+  else
+    echo
+    frp_ux_enrollment_help
+    prompt_secret "Enrollment Code: " FRP_ENROLLMENT_CODE
+    if [[ "$FRP_ENROLLMENT_CODE" != *.* ]]; then
+      echo "ERROR: invalid enrollment code format" >&2
+      unset FRP_ENROLLMENT_CODE
+      return 1
+    fi
+    enroll_id="${FRP_ENROLLMENT_CODE%%.*}"
+    enroll_secret="${FRP_ENROLLMENT_CODE#*.}"
     unset FRP_ENROLLMENT_CODE
-    return 1
+    if ! frp_identity_ensure; then
+      return 1
+    fi
+    echo "Authenticating client..."
   fi
-  local enroll_id enroll_secret
-  enroll_id="${FRP_ENROLLMENT_CODE%%.*}"
-  enroll_secret="${FRP_ENROLLMENT_CODE#*.}"
-  unset FRP_ENROLLMENT_CODE
+  echo "Applying configuration..."
 
   local work allocated meta token server port host_id machine_id hostname_value allocator_url
   local ciphertext backup local_rollback="N/A" server_rollback="N/A" restore_needed=0
@@ -389,8 +434,43 @@ PY
   hostname_value="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["hostname"])' "$candidate")"
   host_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["host_id"])' "$candidate")"
 
-  if ! frp_enroll_services "$allocator_url" "$enroll_id" "$enroll_secret" \
-    "$machine_id" "$hostname_value" "$candidate" "$allocated" "$meta"; then
+  local enroll_rc=0
+  frp_enroll_services "$allocator_url" "$enroll_id" "$enroll_secret" \
+    "$machine_id" "$hostname_value" "$candidate" "$allocated" "$meta" "$auth_mode" \
+    || enroll_rc=$?
+  if [[ "$enroll_rc" -eq 2 && "$auth_mode" == identity ]]; then
+    echo "ERROR: this client's management identity has been revoked." >&2
+    echo "Run the server enrollment command to create a new Enrollment Code," >&2
+    echo "then re-enroll this client." >&2
+    if [[ -z "${FRP_ENROLLMENT_CODE:-}" && -n "${FRP_CLIENT_CANDIDATE:-}" ]]; then
+      rm -rf "$work"
+      unset enroll_secret
+      return 1
+    fi
+    echo
+    echo "A one-time Enrollment Code is required to re-establish trust."
+    echo "Future configuration changes will not require an Enrollment Code."
+    echo
+    frp_ux_enrollment_help
+    prompt_secret "Enrollment Code: " FRP_ENROLLMENT_CODE
+    if [[ "$FRP_ENROLLMENT_CODE" != *.* ]]; then
+      echo "ERROR: invalid enrollment code format" >&2
+      unset FRP_ENROLLMENT_CODE
+      rm -rf "$work"
+      return 1
+    fi
+    enroll_id="${FRP_ENROLLMENT_CODE%%.*}"
+    enroll_secret="${FRP_ENROLLMENT_CODE#*.}"
+    unset FRP_ENROLLMENT_CODE
+    auth_mode="enrollment"
+    echo "Authenticating client..."
+    echo "Applying configuration..."
+    enroll_rc=0
+    frp_enroll_services "$allocator_url" "$enroll_id" "$enroll_secret" \
+      "$machine_id" "$hostname_value" "$candidate" "$allocated" "$meta" "$auth_mode" \
+      || enroll_rc=$?
+  fi
+  if [[ "$enroll_rc" -ne 0 ]]; then
     rm -rf "$work"
     unset enroll_secret
     echo "ERROR: enrollment failed; local configuration was not changed." >&2
@@ -398,23 +478,40 @@ PY
   fi
   server="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["frp_server"])' "$meta")"
   port="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["frp_server_port"])' "$meta")"
-  ciphertext="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["token_ciphertext"])' "$meta")"
-  if ! token="$(frp_decrypt_token "$ciphertext" "$enroll_secret")"; then
-    echo "ERROR: token decryption failed; local configuration was not changed." >&2
-    if frp_compensate_previous "$allocator_url" "$enroll_id" "$enroll_secret" \
-      "$machine_id" "$hostname_value" "$current"; then
-      server_rollback="PASS"
-    else
-      server_rollback="FAIL"
+  ciphertext="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8")).get("token_ciphertext") or "")' "$meta")"
+  if [[ -n "$ciphertext" ]]; then
+    if ! token="$(frp_decrypt_token "$ciphertext" "$enroll_secret")"; then
+      echo "ERROR: token decryption failed; local configuration was not changed." >&2
+      if frp_compensate_previous "$allocator_url" "$enroll_id" "$enroll_secret" \
+        "$machine_id" "$hostname_value" "$current" "$auth_mode"; then
+        server_rollback="PASS"
+      else
+        server_rollback="FAIL"
+      fi
+      rm -rf "$work"
+      unset enroll_secret
+      echo "LOCAL_ROLLBACK=PASS"
+      echo "SERVER_ROLLBACK=${server_rollback}"
+      if [[ "$server_rollback" != "PASS" ]]; then
+        echo "WARNING: server registry may not match local configuration. Reconcile with a new enrollment." >&2
+      fi
+      return 1
     fi
-    rm -rf "$work"
-    unset enroll_secret
-    echo "LOCAL_ROLLBACK=PASS"
-    echo "SERVER_ROLLBACK=${server_rollback}"
-    if [[ "$server_rollback" != "PASS" ]]; then
-      echo "WARNING: server registry may not match local configuration. Reconcile with a new enrollment." >&2
+  else
+    if ! token="$(frp_read_existing_token)"; then
+      echo "ERROR: existing FRP client configuration is missing the FRP token; re-enroll this client." >&2
+      if frp_compensate_previous "$allocator_url" "$enroll_id" "$enroll_secret" \
+        "$machine_id" "$hostname_value" "$current" "$auth_mode"; then
+        server_rollback="PASS"
+      else
+        server_rollback="FAIL"
+      fi
+      rm -rf "$work"
+      unset enroll_secret
+      echo "LOCAL_ROLLBACK=PASS"
+      echo "SERVER_ROLLBACK=${server_rollback}"
+      return 1
     fi
-    return 1
   fi
 
   python3 - "$candidate" "$server" "$port" <<'PY'
@@ -429,7 +526,7 @@ PY
   if ! frp_merge_ports_into_state "$candidate" "$allocated"; then
     echo "ERROR: allocator response could not be merged; local configuration was not changed." >&2
     frp_compensate_previous "$allocator_url" "$enroll_id" "$enroll_secret" \
-      "$machine_id" "$hostname_value" "$current" || true
+      "$machine_id" "$hostname_value" "$current" "$auth_mode" || true
     rm -rf "$work"
     unset enroll_secret token
     return 1
@@ -445,7 +542,7 @@ PY
   if ! frp_client_verify_config "$tmp_toml"; then
     echo "ERROR: generated frpc configuration failed verification." >&2
     if frp_compensate_previous "$allocator_url" "$enroll_id" "$enroll_secret" \
-      "$machine_id" "$hostname_value" "$current"; then
+      "$machine_id" "$hostname_value" "$current" "$auth_mode"; then
       server_rollback="PASS"
     else
       server_rollback="FAIL"
@@ -490,7 +587,7 @@ PY
       local_rollback="FAIL"
     fi
     if frp_compensate_previous "$allocator_url" "$enroll_id" "$enroll_secret" \
-      "$machine_id" "$hostname_value" "$current"; then
+      "$machine_id" "$hostname_value" "$current" "$auth_mode"; then
       server_rollback="PASS"
     else
       server_rollback="FAIL"
@@ -516,13 +613,14 @@ PY
 frp_compensate_previous() {
   local allocator_url="$1" enroll_id="$2" enroll_secret="$3"
   local machine_id="$4" hostname_value="$5" previous_state="$6"
+  local auth_mode="${7:-enrollment}"
   local work allocated meta
   work="$(mktemp -d)"
   allocated="$work/allocated.json"
   meta="$work/meta.json"
   echo "Attempting server registry compensation with the previous service set ..."
   if frp_enroll_services "$allocator_url" "$enroll_id" "$enroll_secret" \
-    "$machine_id" "$hostname_value" "$previous_state" "$allocated" "$meta"; then
+    "$machine_id" "$hostname_value" "$previous_state" "$allocated" "$meta" "$auth_mode"; then
     rm -rf "$work"
     return 0
   fi
@@ -553,7 +651,8 @@ print(f"Client: {data.get('hostname','')}")
 print(f"Server: {data.get('frp_server','')}")
 print()
 print('Values in [brackets] are defaults. Press Enter to accept.')
-print('An Enrollment Code is needed only when applying server-affecting changes.')
+print('After enrollment, ordinary changes use this client identity.')
+print('An Enrollment Code is only needed to establish or recover that identity.')
 print()
 print('Current services:')
 print()
@@ -585,7 +684,7 @@ PY
       3) menu_enable_disable ;;
       4) echo; frp_client_info ;;
       5) echo; frp_client_status ;;
-      6) frp_apply_candidate ;;
+      6) frp_apply_candidate || true ;;
       7)
         frp_copy_state "$(frp_client_state_path)" "$CANDIDATE_FILE"
         echo "Pending changes discarded."
@@ -640,9 +739,10 @@ Usage: frp-client [status|info|list]
   info        Show connection information
   list        List configured services
 
-An Enrollment Code is required only when applying changes that
-update server-side port allocations. Read-only commands do not
-contact the allocator.
+An Enrollment Code is required only to enroll this client or to
+recover its management identity. Ordinary later changes are
+authorized by the local client identity and do not require a
+new Enrollment Code. Read-only commands do not contact the allocator.
 EOF
       ;;
     *)

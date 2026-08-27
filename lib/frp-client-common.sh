@@ -39,6 +39,204 @@ frp_client_lock_dir() {
   frp_client_path /etc/frp/client-manage.lock
 }
 
+frp_client_identity_key_path() {
+  frp_client_path /etc/frp/client-identity.key
+}
+
+frp_client_identity_pub_path() {
+  frp_client_path /etc/frp/client-identity.pub
+}
+
+frp_client_identity_mac_path() {
+  frp_client_path /etc/frp/client-identity.mac
+}
+
+frp_mgmt_auth_py() {
+  local cand libdir here
+  if [[ -n "${FRP_MGMT_AUTH_PY:-}" && -f "${FRP_MGMT_AUTH_PY}" ]]; then
+    printf '%s' "$FRP_MGMT_AUTH_PY"
+    return 0
+  fi
+  libdir="$(frp_client_lib_dir)"
+  for cand in \
+    "${libdir}/frp_mgmt_auth.py" \
+    "${FRP_CLIENT_LIB:-}/frp_mgmt_auth.py"
+  do
+    if [[ -f "$cand" ]]; then
+      printf '%s' "$cand"
+      return 0
+    fi
+  done
+  if [[ -n "${FRP_CLIENT_LIB:-}" && -f "${FRP_CLIENT_LIB}" ]]; then
+    cand="$(dirname "$FRP_CLIENT_LIB")/frp_mgmt_auth.py"
+    if [[ -f "$cand" ]]; then
+      printf '%s' "$cand"
+      return 0
+    fi
+  fi
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  for cand in \
+    "$here/frp_mgmt_auth.py" \
+    "$here/../lib/frp_mgmt_auth.py" \
+    /usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py
+  do
+    if [[ -f "$cand" ]]; then
+      printf '%s' "$cand"
+      return 0
+    fi
+  done
+  echo "ERROR: missing frp_mgmt_auth.py" >&2
+  return 1
+}
+
+frp_identity_status() {
+  local key pub mac macval
+  key="$(frp_client_identity_key_path)"
+  pub="$(frp_client_identity_pub_path)"
+  mac="$(frp_client_identity_mac_path)"
+  if [[ ! -e "$key" && ! -e "$pub" && ! -e "$mac" ]]; then
+    printf 'missing'
+    return 0
+  fi
+  if [[ ! -f "$key" ]]; then
+    printf 'corrupt'
+    return 0
+  fi
+  if ! python3 "$(frp_mgmt_auth_py)" check-key "$key" >/dev/null 2>&1; then
+    printf 'corrupt'
+    return 0
+  fi
+  # A local key without a confirmed response key is not enrolled. This avoids
+  # treating a half-finished first enrollment as a usable identity.
+  if [[ ! -f "$mac" ]]; then
+    printf 'pending'
+    return 0
+  fi
+  macval="$(tr -d '\n' <"$mac" 2>/dev/null || true)"
+  if [[ ${#macval} -ne 64 ]]; then
+    printf 'pending'
+    return 0
+  fi
+  printf 'enrolled'
+}
+
+frp_identity_label() {
+  case "$(frp_identity_status)" in
+    enrolled) printf 'enrolled' ;;
+    corrupt) printf 'unusable' ;;
+    *) printf 'not established' ;;
+  esac
+}
+
+frp_identity_ensure() {
+  local key pub status py
+  key="$(frp_client_identity_key_path)"
+  pub="$(frp_client_identity_pub_path)"
+  py="$(frp_mgmt_auth_py)" || return 1
+  mkdir -p "$(dirname "$key")"
+  chmod 700 "$(dirname "$key")" 2>/dev/null || true
+  status="$(frp_identity_status)"
+  if [[ "$status" == corrupt ]]; then
+    echo "ERROR: this client's management identity is unusable." >&2
+    echo "The local identity file exists but cannot be used." >&2
+    echo "Create a new Enrollment Code on the FRP server with sudo frp-create-client," >&2
+    echo "move the damaged identity aside, then re-enroll this client." >&2
+    echo "Do not overwrite ${key} automatically." >&2
+    return 1
+  fi
+  if [[ "$status" == enrolled || "$status" == pending ]]; then
+    if [[ ! -f "$pub" ]]; then
+      python3 "$py" pub "$key" >"${pub}.tmp"
+      chmod 644 "${pub}.tmp"
+      mv "${pub}.tmp" "$pub"
+    fi
+    return 0
+  fi
+  python3 "$py" gen-key "$key" "$pub"
+  chmod 600 "$key"
+  chmod 644 "$pub" 2>/dev/null || true
+}
+
+frp_identity_public_pem() {
+  local key pub py
+  py="$(frp_mgmt_auth_py)" || return 1
+  key="$(frp_client_identity_key_path)"
+  pub="$(frp_client_identity_pub_path)"
+  if [[ -f "$pub" ]]; then
+    python3 "$py" pub "$key"
+    return 0
+  fi
+  python3 "$py" pub "$key"
+}
+
+frp_identity_store_mac() {
+  local dest value="${1:-}"
+  dest="$(frp_client_identity_mac_path)"
+  MGMT_MAC_VALUE="$value" python3 - "$dest" <<'PY'
+import os, sys, tempfile
+from pathlib import Path
+dest = Path(sys.argv[1])
+text = os.environ.get('MGMT_MAC_VALUE', '').strip() + '\n'
+if len(text.strip()) != 64:
+    raise SystemExit('ERROR: invalid management response key')
+dest.parent.mkdir(parents=True, exist_ok=True)
+fd, tmp = tempfile.mkstemp(prefix=dest.name + '.', suffix='.tmp', dir=str(dest.parent))
+try:
+    with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, dest)
+except Exception:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise
+PY
+  unset MGMT_MAC_VALUE
+}
+
+frp_identity_load_mac() {
+  local path
+  path="$(frp_client_identity_mac_path)"
+  if [[ ! -f "$path" ]]; then
+    echo "ERROR: management identity is missing a response key; re-enroll this client." >&2
+    return 1
+  fi
+  tr -d '\n' <"$path"
+}
+
+frp_identity_derive_and_store_mac() {
+  local machine_id="$1" secret="$2" mac py
+  py="$(frp_mgmt_auth_py)" || return 1
+  mac="$(MGMT_ENROLL_SECRET="$secret" python3 "$py" derive-mac "$machine_id")" || return 1
+  unset MGMT_ENROLL_SECRET
+  if [[ ${#mac} -ne 64 ]]; then
+    echo "ERROR: failed to derive management response key" >&2
+    return 1
+  fi
+  frp_identity_store_mac "$mac"
+}
+
+frp_read_existing_token() {
+  python3 - "$(frp_client_toml_path)" <<'PY'
+import re, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+if not path.is_file():
+    raise SystemExit('ERROR: existing FRP client configuration is missing; re-enroll this client.')
+text = path.read_text(encoding='utf-8')
+for line in text.splitlines():
+    m = re.match(r'^\s*auth\.token\s*=\s*"(.*)"\s*$', line)
+    if m:
+        sys.stdout.write(m.group(1))
+        raise SystemExit(0)
+raise SystemExit('ERROR: existing FRP client configuration is missing the FRP token; re-enroll this client.')
+PY
+}
+
 frp_client_lib_dir() {
   frp_client_path /usr/local/lib/frp-auto-deploy
 }
@@ -218,8 +416,10 @@ Generate one on the FRP server with:
   sudo frp-create-client
 
 The Enrollment Code is short-lived. Enter it only here.
-It authorizes this enrollment. It is not stored on this client
-and it is not the FRP token.
+It authorizes this first enrollment (or a later recovery).
+It is not stored on this client and it is not the FRP token.
+After enrollment, this client uses a local management identity
+for ordinary configuration changes.
 
 Tip:
   Values shown in [brackets] are defaults.
@@ -232,8 +432,11 @@ frp_ux_enrollment_help() {
   cat <<'EOF'
 Enrollment Code
   Generated on the FRP server with: sudo frp-create-client
-  Short-lived. Entered interactively. Not stored. Not the FRP token.
-  It authorizes enrollment and later configuration changes.
+  Short-lived bootstrap/recovery credential. Entered interactively.
+  Not stored. Not the FRP token.
+  Needed for first enrollment, recovering a lost local identity,
+  or after an administrator revokes this client's management access.
+  Ordinary later changes use this client's local management identity.
 
 EOF
 }
@@ -252,6 +455,8 @@ frp_ux_service_id_help() {
   cat <<EOF
 Service ID
   A short unique name for this service.
+  Service IDs are lowercase and case-insensitive.
+  SSH, ssh, and Ssh are the same ID.
 
   The Service ID is used together with this machine's identity
   to keep the same public port after reinstall or later changes.
@@ -622,7 +827,7 @@ from pathlib import Path
 forbidden = {
     'token', 'auth.token', 'token_ciphertext', 'frp_token', 'server_token',
     'enrollment_code', 'enrollment_secret', 'enroll_secret', 'secret',
-    'password', 'private_key',
+    'password', 'private_key', 'mgmt_mac_key', 'mac_key',
 }
 def walk(obj, path=''):
     if isinstance(obj, dict):
@@ -826,7 +1031,11 @@ sid = str(raw.get('id', '')).strip().lower()
 if not re.fullmatch(r'[a-z0-9][a-z0-9._-]{0,31}', sid or ''):
     raise SystemExit('ERROR: invalid service id; use [a-z0-9][a-z0-9._-]{0,31}')
 if any(item.get('id') == sid for item in data):
-    raise SystemExit(f'ERROR: duplicate service id: {sid}')
+    raise SystemExit(
+        f'ERROR: duplicate service id: {sid}\n\n'
+        'A service with this ID already exists.\n'
+        'Service IDs are lowercase and case-insensitive.'
+    )
 protocol = str(raw.get('protocol', 'tcp') or 'tcp').strip().lower()
 if protocol != 'tcp':
     raise SystemExit('ERROR: only tcp services are supported')
@@ -876,7 +1085,11 @@ def add(path, raw):
     if not re.fullmatch(r'[a-z0-9][a-z0-9._-]{0,31}', sid or ''):
         raise SystemExit('ERROR: invalid service id; use [a-z0-9][a-z0-9._-]{0,31}')
     if any(item.get('id') == sid for item in data):
-        raise SystemExit(f'ERROR: duplicate service id: {sid}')
+        raise SystemExit(
+            f'ERROR: duplicate service id: {sid}\n\n'
+            'A service with this ID already exists.\n'
+            'Service IDs are lowercase and case-insensitive.'
+        )
     protocol = str(raw.get('protocol', 'tcp') or 'tcp').strip().lower()
     if protocol != 'tcp':
         raise SystemExit('ERROR: only tcp services are supported')
@@ -1138,7 +1351,9 @@ frp_enroll_services() {
   local allocator_url="$1" enroll_id="$2" enroll_secret="$3"
   local machine_id="$4" hostname_value="$5" services_file="$6"
   local allocated_file="$7" meta_file="$8"
-  local request timestamp signature response curl_err
+  local auth_mode="${9:-${FRP_MGMT_AUTH:-enrollment}}"
+  local request timestamp signature response curl_err nonce py key_path pubkey_pem
+  local verify_rc=0
   frp_client_hook_log enroll
   if [[ "${FRP_CLIENT_HOOK_ENROLL_FAIL:-}" == "1" ]]; then
     echo "ERROR: allocator unavailable" >&2
@@ -1160,7 +1375,15 @@ PY
       fi
     fi
   fi
-  request="$(python3 - "$machine_id" "$hostname_value" "$services_file" <<'PY'
+  pubkey_pem=""
+  if [[ "$auth_mode" != identity ]]; then
+    case "$(frp_identity_status)" in
+      enrolled|pending)
+        pubkey_pem="$(frp_identity_public_pem)" || return 1
+        ;;
+    esac
+  fi
+  request="$(python3 - "$machine_id" "$hostname_value" "$services_file" "$pubkey_pem" <<'PY'
 import json,sys
 from pathlib import Path
 raw=json.loads(Path(sys.argv[3]).read_text(encoding='utf-8'))
@@ -1187,14 +1410,106 @@ for item in services:
     if out['preset']=='ssh':
         out['ssh_user']=item.get('ssh_user') or 'root'
     enabled.append(out)
-print(json.dumps({
+payload={
   'machine_id': sys.argv[1],
   'hostname': sys.argv[2],
   'services': enabled,
-}, separators=(',', ':')))
+}
+pub=sys.argv[4]
+if pub:
+    payload['mgmt_pubkey']=pub
+    payload['mgmt_alg']='ecdsa-p256-sha256'
+print(json.dumps(payload, separators=(',', ':')))
 PY
 )"
   timestamp="$(date +%s)"
+  py="$(frp_mgmt_auth_py)" || return 1
+  curl_err="$(mktemp)"
+  if [[ "$auth_mode" == identity ]]; then
+    key_path="$(frp_client_identity_key_path)"
+    if [[ "$(frp_identity_status)" != enrolled ]]; then
+      echo "ERROR: this client does not have a usable management identity." >&2
+      rm -f "$curl_err"
+      return 1
+    fi
+    nonce="$(python3 - "$py" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location('frp_mgmt_auth', sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+print(mod.new_nonce())
+PY
+)"
+    signature="$(BODY="$request" python3 - "$py" "$key_path" "$machine_id" "$timestamp" "$nonce" <<'PY'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location('frp_mgmt_auth', sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+key, machine_id, ts, nonce = sys.argv[2:6]
+body = os.environ['BODY']
+message = mod.signed_message(machine_id, body, ts, nonce)
+sys.stdout.write(mod.sign_message(key, message))
+PY
+)"
+    if ! response="$(curl --silent --show-error \
+      -X POST \
+      -H 'Content-Type: application/json' \
+      -H 'X-Mgmt-Auth: 1' \
+      -H "X-Timestamp: ${timestamp}" \
+      -H "X-Mgmt-Nonce: ${nonce}" \
+      -H "X-Mgmt-Signature: ${signature}" \
+      --data "$request" \
+      "$allocator_url" 2>"$curl_err")"; then
+      echo "ERROR: allocator request failed" >&2
+      cat "$curl_err" >&2 || true
+      rm -f "$curl_err"
+      return 1
+    fi
+    rm -f "$curl_err"
+    local mac
+    mac="$(frp_identity_load_mac)" || return 1
+    if MGMT_MAC_KEY="$mac" RESPONSE="$response" ALLOCATED_FILE="$allocated_file" META_FILE="$meta_file" python3 - <<'PY'
+import hashlib,hmac,json,os,sys
+from pathlib import Path
+secret=os.environ['MGMT_MAC_KEY']
+d=json.loads(os.environ['RESPONSE'])
+if isinstance(d, dict) and d.get('error'):
+    err=str(d.get('error') or '')
+    print(f'ERROR: allocator rejected the change: {err}', file=sys.stderr)
+    lowered=err.lower()
+    if 'revoked' in lowered or 'does not have a management identity' in lowered or 'unknown client identity' in lowered:
+        raise SystemExit(2)
+    raise SystemExit(1)
+received=d.pop('response_hmac',None)
+canonical=json.dumps(d,sort_keys=True,separators=(',',':'),ensure_ascii=False)
+expected=hmac.new(secret.encode(),canonical.encode(),hashlib.sha256).hexdigest()
+if not received or not hmac.compare_digest(received,expected):
+    raise SystemExit('ERROR: allocator response HMAC verification failed')
+if 'ssh_port' in d or 'https_port' in d:
+    raise SystemExit('ERROR: allocator returned a legacy SSH/HTTPS response')
+if 'token_ciphertext' in d or 'mgmt_mac_key' in d or d.get('token'):
+    raise SystemExit('ERROR: allocator returned unexpected secret material')
+services=d.get('services')
+if not isinstance(services, list) or not services:
+    raise SystemExit('ERROR: allocator response is missing services')
+Path(os.environ['ALLOCATED_FILE']).write_text(json.dumps(services)+'\n', encoding='utf-8')
+meta={
+    'frp_server': str(d['frp_server']),
+    'frp_server_port': str(d['frp_server_port']),
+    'token_ciphertext': '',
+}
+Path(os.environ['META_FILE']).write_text(json.dumps(meta)+'\n', encoding='utf-8')
+PY
+    then
+      return 0
+    else
+      verify_rc=$?
+      if [[ "$verify_rc" -eq 2 ]]; then
+        return 2
+      fi
+      return 1
+    fi
+  fi
   signature="$(ENROLL_SECRET="$enroll_secret" TS="$timestamp" BODY="$request" python3 - <<'PY'
 import hashlib,hmac,os
 secret=os.environ['ENROLL_SECRET'].encode()
@@ -1202,8 +1517,7 @@ message=(os.environ['TS']+'\n'+os.environ['BODY']).encode()
 print(hmac.new(secret,message,hashlib.sha256).hexdigest())
 PY
 )"
-  curl_err="$(mktemp)"
-  if ! response="$(curl --fail --silent --show-error \
+  if ! response="$(curl --silent --show-error \
     -X POST \
     -H 'Content-Type: application/json' \
     -H "X-Enrollment-ID: ${enroll_id}" \
@@ -1231,6 +1545,8 @@ if not received or not hmac.compare_digest(received,expected):
     raise SystemExit('ERROR: allocator response HMAC verification failed')
 if 'ssh_port' in d or 'https_port' in d:
     raise SystemExit('ERROR: allocator returned a legacy SSH/HTTPS response')
+if 'mgmt_mac_key' in d:
+    raise SystemExit('ERROR: allocator returned unexpected secret material')
 services=d.get('services')
 if not isinstance(services, list) or not services:
     raise SystemExit('ERROR: allocator response is missing services')
@@ -1242,9 +1558,13 @@ meta={
     'frp_server': str(d['frp_server']),
     'frp_server_port': str(d['frp_server_port']),
     'token_ciphertext': token,
+    'mgmt_status': str(d.get('mgmt_status') or ''),
 }
 Path(os.environ['META_FILE']).write_text(json.dumps(meta)+'\n', encoding='utf-8')
 PY
+  if [[ -n "$pubkey_pem" ]]; then
+    frp_identity_derive_and_store_mac "$machine_id" "$enroll_secret" || return 1
+  fi
 }
 
 frp_decrypt_token() {

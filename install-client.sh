@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_VERSION="1.0.0"
+PROJECT_VERSION="1.1.0"
 FRP_VERSION="0.70.1"
 FRP_SHA256_AMD64="333da23d1b9009d7c01638e9ba38cf4600f7d37d393f854e96ee1396adefa9a6"
 FRP_SHA256_ARM64="3990f396a9a490ee7f0e5f355287750ed41520064ed999eab443b5e9a78d773d"
@@ -294,7 +294,9 @@ menu_add_service() {
   if [[ -z "$payload" ]]; then
     return 0
   fi
-  services_add_json "$payload"
+  if ! services_add_json "$payload"; then
+    return 0
+  fi
 }
 
 menu_remove_service() {
@@ -312,7 +314,9 @@ menu_remove_service() {
   echo "Nothing has been published yet, so no public port is reserved."
   echo
   choice="$(read_tty "Remove service number: " "")"
-  services_remove_index "$choice"
+  if ! services_remove_index "$choice"; then
+    return 0
+  fi
 }
 
 collect_services_interactive() {
@@ -492,6 +496,10 @@ frp_client_main() {
 
   HOSTNAME_VALUE="${FRP_TEST_HOSTNAME:-$(hostname -s)}"
 
+  if ! frp_identity_ensure; then
+    exit 1
+  fi
+
   echo "Validating enrollment and requesting persistent public ports ..."
   frp_enroll_services "$ALLOCATOR_URL" "$ENROLL_ID" "$ENROLL_SECRET" \
     "$MACHINE_ID" "$HOSTNAME_VALUE" "$SERVICES_FILE" "$ALLOCATED_FILE" "$ENROLL_META_FILE" \
@@ -569,6 +577,10 @@ EOF2
   if [[ -f "${_FRP_INSTALL_CLIENT_DIR}/lib/frp-client-common.sh" ]]; then
     install -m 0644 "${_FRP_INSTALL_CLIENT_DIR}/lib/frp-client-common.sh" \
       "$(frp_client_lib_dir)/frp-client-common.sh"
+  fi
+  if [[ -f "${_FRP_INSTALL_CLIENT_DIR}/lib/frp_mgmt_auth.py" ]]; then
+    install -m 0644 "${_FRP_INSTALL_CLIENT_DIR}/lib/frp_mgmt_auth.py" \
+      "$(frp_client_lib_dir)/frp_mgmt_auth.py"
   fi
   if [[ -f "${_FRP_INSTALL_CLIENT_DIR}/tools/frp-client" ]]; then
     install -m 0755 "${_FRP_INSTALL_CLIENT_DIR}/tools/frp-client" \

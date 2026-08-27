@@ -132,8 +132,36 @@ for bad in ('token_ciphertext','enrollment_code','enrollment_secret','server_tok
     assert bad not in json.dumps(d)
 PY
 frp_state_has_secrets "$STATE" || fail "secrets in client-state"
+[[ -f "$TREE/etc/frp/client-identity.key" ]] || fail "identity key missing"
+[[ -f "$TREE/etc/frp/client-identity.pub" ]] || fail "identity pub missing"
+[[ -f "$TREE/etc/frp/client-identity.mac" ]] || fail "identity mac missing"
+ident_mode="$(python3 - "$TREE/etc/frp/client-identity.key" <<'PY'
+import os,stat,sys
+print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode)))
+PY
+)"
+[[ "$ident_mode" == "0o600" ]] || fail "identity key mode $ident_mode"
+if grep -q 'BEGIN .*PRIVATE KEY' "$STATE" "$TREE/etc/frp/access-info.txt" "$ALLOC_ROOT/registry.json"; then
+  fail "private key leaked"
+fi
+python3 - "$ALLOC_ROOT/registry.json" "$TREE/etc/frp/client-identity.key" "$TREE/etc/frp/client-identity.mac" <<'PY' || fail "registry stores pubkey only"
+import json,sys
+from pathlib import Path
+reg=json.loads(Path(sys.argv[1]).read_text())
+priv=Path(sys.argv[2]).read_text()
+text=json.dumps(reg)
+assert 'PRIVATE KEY' not in text
+client=next(iter(reg['clients'].values()))
+assert client.get('mgmt_status')=='enrolled'
+assert 'BEGIN PUBLIC KEY' in (client.get('mgmt_pubkey') or '')
+assert client.get('mgmt_mac_key')
+assert client['mgmt_mac_key'] not in priv
+file_mac=Path(sys.argv[3]).read_text().strip()
+assert file_mac==client.get('mgmt_mac_key')
+PY
 [[ -x "$TREE/usr/local/bin/frp-client" ]] || fail "frp-client not installed"
 [[ -f "$TREE/usr/local/lib/frp-auto-deploy/frp-client-common.sh" ]] || fail "client lib not installed"
+[[ -f "$TREE/usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py" ]] || fail "mgmt auth helper not installed"
 pass "fresh install writes client-state"
 
 HOOK="$WORKDIR/hook.log"
@@ -168,6 +196,7 @@ PY
 if grep -qx enroll "$HOOK"; then fail "read-only contacted allocator"; fi
 if grep -qx restart "$HOOK"; then fail "read-only restarted frpc"; fi
 grep -q 'Hostname        : dp-example' "$WORKDIR/status.out" || fail "status hostname"
+grep -q 'Management identity : enrolled' "$WORKDIR/status.out" || fail "status identity"
 grep -q 'ssh' "$WORKDIR/status.out" || fail "status ssh"
 grep -q 'FRP Server: 203.0.113.10' "$WORKDIR/info.out" || fail "info server"
 grep -q 'ssh -p 18200 aella@203.0.113.10' "$WORKDIR/info.out" || fail "info ssh connect"
@@ -309,6 +338,10 @@ grep -q 'grafana' "$TREE/etc/frp/frpc.toml" || fail "frpc.toml missing grafana"
 grep -q 'name = "dp-example-aabbccdd-grafana"' "$TREE/etc/frp/frpc.toml" || fail "grafana proxy name"
 grep -q 'remotePort = 18200' "$TREE/etc/frp/frpc.toml" || fail "ssh port in toml"
 grep -q '203.0.113.10:18201' "$TREE/etc/frp/access-info.txt" || fail "access-info grafana"
+if grep -q 'Enrollment Code' "$WORKDIR/add.out"; then
+  fail "post-enroll add asked for Enrollment Code"
+fi
+grep -q 'existing client identity' "$WORKDIR/add.out" || fail "add should use client identity"
 pass "add service preserves ssh port"
 
 # Edit grafana target
@@ -332,7 +365,10 @@ assert d['services']['grafana']['remote_port']==18201
 PY
 grep -q 'localIP = "10.10.20.30"' "$TREE/etc/frp/frpc.toml" || fail "toml local ip"
 grep -q 'Target: 127.0.0.1:3000 -> 10.10.20.30:3000' "$WORKDIR/edit.out" || fail "edit summary missing target"
-grep -q 'An Enrollment Code is required' "$WORKDIR/edit.out" || fail "target change requires enrollment"
+if grep -q 'Enrollment Code' "$WORKDIR/edit.out"; then
+  fail "post-enroll edit asked for Enrollment Code"
+fi
+grep -q 'existing client identity' "$WORKDIR/edit.out" || fail "edit should use client identity"
 pass "edit target preserves remote port"
 
 # Mixed name + target is runtime
@@ -394,6 +430,9 @@ mid=d['machine_id']
 assert reg['clients'][mid]['services']['grafana']['enabled'] is False
 assert reg['clients'][mid]['services']['grafana']['remote_port']==18201
 PY
+if grep -q 'Enrollment Code' "$WORKDIR/disable.out"; then
+  fail "post-enroll disable asked for Enrollment Code"
+fi
 pass "disable keeps reservation and omits proxy"
 
 # Re-enable grafana
@@ -416,6 +455,9 @@ assert d['services']['grafana']['enabled'] is True
 assert d['services']['grafana']['remote_port']==18201
 PY
 grep -q 'grafana' "$TREE/etc/frp/frpc.toml" || fail "re-enabled proxy missing"
+if grep -q 'Enrollment Code' "$WORKDIR/enable.out"; then
+  fail "post-enroll re-enable asked for Enrollment Code"
+fi
 pass "re-enable reuses the same public port"
 
 # Last enabled service cannot be disabled
@@ -441,7 +483,7 @@ assert d['services']['ssh']['enabled'] is True
 PY
 pass "last enabled service cannot be disabled"
 
-# Invalid enrollment
+# Invalid signed/auth path: bad enrollment on a legacy client
 CAND="$WORKDIR/cand-bad.json"
 python3 - "$STATE" "$CAND" <<'PY'
 import json,sys
@@ -453,6 +495,11 @@ PY
 cp "$STATE" "$WORKDIR/state.before"
 cp "$TREE/etc/frp/frpc.toml" "$WORKDIR/toml.before"
 cp "$TREE/etc/frp/access-info.txt" "$WORKDIR/access.before"
+mkdir -p "$WORKDIR/ident.bak"
+cp "$TREE/etc/frp/client-identity.key" "$WORKDIR/ident.bak/"
+cp "$TREE/etc/frp/client-identity.pub" "$WORKDIR/ident.bak/"
+cp "$TREE/etc/frp/client-identity.mac" "$WORKDIR/ident.bak/"
+rm -f "$TREE/etc/frp/client-identity.key" "$TREE/etc/frp/client-identity.pub" "$TREE/etc/frp/client-identity.mac"
 export FRP_CLIENT_CANDIDATE="$CAND"
 export FRP_ENROLLMENT_CODE='deadbeefdeadbeef.0000000000000000000000000000000000000000000000000000000000000000'
 : >"$HOOK"
@@ -463,6 +510,7 @@ cmp -s "$STATE" "$WORKDIR/state.before" || fail "invalid enroll changed state"
 cmp -s "$TREE/etc/frp/frpc.toml" "$WORKDIR/toml.before" || fail "invalid enroll changed toml"
 cmp -s "$TREE/etc/frp/access-info.txt" "$WORKDIR/access.before" || fail "invalid enroll changed access"
 if grep -qx restart "$HOOK"; then fail "invalid enroll restarted"; fi
+cp "$WORKDIR/ident.bak/"* "$TREE/etc/frp/"
 pass "invalid enrollment leaves local config unchanged"
 
 # Allocator unreachable
@@ -581,6 +629,185 @@ fi
 grep -q 'another frp-client management operation is already running' "$WORKDIR/lock.err" || fail "lock error"
 rmdir "$TREE/etc/frp/client-manage.lock" 2>/dev/null || rm -rf "$TREE/etc/frp/client-manage.lock"
 pass "local management lock"
+
+# Reinstall preserves identity
+fp_before="$(python3 "$ROOT/lib/frp_mgmt_auth.py" fingerprint "$TREE/etc/frp/client-identity.pub")"
+cp "$TREE/etc/frp/client-identity.key" "$WORKDIR/key.before"
+export FRP_ENROLLMENT_CODE="${EID}.${SECRET}"
+export FRP_SERVICES_JSON='[{"id":"ssh","name":"SSH","protocol":"tcp","local_ip":"127.0.0.1","local_port":22,"preset":"ssh","ssh_user":"aella"}]'
+frp_client_main >"$WORKDIR/reinstall.out"
+fp_after="$(python3 "$ROOT/lib/frp_mgmt_auth.py" fingerprint "$TREE/etc/frp/client-identity.pub")"
+[[ "$fp_before" == "$fp_after" ]] || fail "reinstall rotated identity"
+cmp -s "$TREE/etc/frp/client-identity.key" "$WORKDIR/key.before" || fail "reinstall replaced key"
+pass "reinstall preserves identity"
+
+# Legacy P2 client: one-time Enrollment Code, then identity
+rm -f "$TREE/etc/frp/client-identity.key" "$TREE/etc/frp/client-identity.pub" "$TREE/etc/frp/client-identity.mac"
+python3 - "$STATE" "$ALLOC_ROOT/registry.json" <<'PY'
+import json,sys
+from pathlib import Path
+reg=json.loads(Path(sys.argv[2]).read_text())
+mid=json.loads(Path(sys.argv[1]).read_text())['machine_id']
+client=reg['clients'][mid]
+for key in ('mgmt_pubkey','mgmt_mac_key','mgmt_fingerprint','mgmt_alg','mgmt_enrolled_at','mgmt_revoked_at'):
+    client.pop(key, None)
+client['mgmt_status']='legacy'
+Path(sys.argv[2]).write_text(json.dumps(reg, indent=2, sort_keys=True)+'\n')
+PY
+CAND="$WORKDIR/cand-legacy.json"
+python3 - "$STATE" "$CAND" <<'PY'
+import json,sys
+from pathlib import Path
+d=json.loads(Path(sys.argv[1]).read_text())
+d['services']['web']={
+  'id':'web','name':'Web','preset':'http','protocol':'tcp',
+  'local_ip':'127.0.0.1','local_port':80,'enabled':True,
+}
+Path(sys.argv[2]).write_text(json.dumps(d, indent=2, sort_keys=True)+'\n')
+PY
+eid_legacy='1122334455667788'
+secret_legacy='enroll-secret-1122334455667788aabbccddeeff0011'
+write_enrollment "$ALLOC_ROOT/enrollments" "$eid_legacy" "$secret_legacy"
+export FRP_CLIENT_CANDIDATE="$CAND"
+export FRP_ENROLLMENT_CODE="${eid_legacy}.${secret_legacy}"
+"$ROOT/tools/frp-client" apply >"$WORKDIR/legacy.out"
+grep -q 'one-time Enrollment Code' "$WORKDIR/legacy.out" || fail "legacy should explain one-time code"
+[[ -f "$TREE/etc/frp/client-identity.key" ]] || fail "legacy did not establish identity"
+python3 - "$STATE" <<'PY' || fail "legacy mutation"
+import json,sys
+from pathlib import Path
+d=json.loads(Path(sys.argv[1]).read_text())
+assert d['services']['web']['remote_port']
+PY
+CAND="$WORKDIR/cand-legacy2.json"
+python3 - "$STATE" "$CAND" <<'PY'
+import json,sys
+from pathlib import Path
+d=json.loads(Path(sys.argv[1]).read_text())
+d['services']['web']['local_port']=8080
+Path(sys.argv[2]).write_text(json.dumps(d, indent=2, sort_keys=True)+'\n')
+PY
+unset FRP_ENROLLMENT_CODE || true
+export FRP_CLIENT_CANDIDATE="$CAND"
+"$ROOT/tools/frp-client" apply >"$WORKDIR/legacy2.out"
+if grep -q 'Enrollment Code' "$WORKDIR/legacy2.out"; then
+  fail "second legacy apply asked for Enrollment Code"
+fi
+grep -q 'existing client identity' "$WORKDIR/legacy2.out" || fail "second apply should use identity"
+pass "legacy client migrates with one Enrollment Code"
+
+# Key without MAC is not treated as enrolled (half-enrollment)
+cp "$TREE/etc/frp/client-identity.key" "$WORKDIR/key.pending"
+rm -f "$TREE/etc/frp/client-identity.mac"
+"$ROOT/tools/frp-client" status >"$WORKDIR/pending.out"
+grep -q 'Management identity : not established' "$WORKDIR/pending.out" || fail "pending identity should not look enrolled"
+CAND="$WORKDIR/cand-pending.json"
+python3 - "$STATE" "$CAND" <<'PY'
+import json,sys
+from pathlib import Path
+d=json.loads(Path(sys.argv[1]).read_text())
+d['services']['web']['local_port']=8081
+Path(sys.argv[2]).write_text(json.dumps(d, indent=2, sort_keys=True)+'\n')
+PY
+eid_pending='aa11bb22cc33dd44'
+secret_pending='enroll-secret-aa11bb22cc33dd44aa11bb22cc33dd44'
+write_enrollment "$ALLOC_ROOT/enrollments" "$eid_pending" "$secret_pending"
+export FRP_CLIENT_CANDIDATE="$CAND"
+export FRP_ENROLLMENT_CODE="${eid_pending}.${secret_pending}"
+"$ROOT/tools/frp-client" apply >"$WORKDIR/pending-apply.out"
+grep -q 'one-time Enrollment Code' "$WORKDIR/pending-apply.out" || fail "pending identity should ask for Enrollment Code"
+[[ -f "$TREE/etc/frp/client-identity.mac" ]] || fail "pending apply did not store response key"
+cmp -s "$TREE/etc/frp/client-identity.key" "$WORKDIR/key.pending" || fail "pending apply rotated key"
+pass "pending identity requires one Enrollment Code"
+
+# Revoked identity: signed apply fails, Enrollment Code recovers, later apply needs no code
+python3 - "$ALLOC_ROOT/registry.json" <<'PY'
+import json,sys
+from pathlib import Path
+p=Path(sys.argv[1])
+reg=json.loads(p.read_text())
+for client in reg['clients'].values():
+    client['mgmt_status']='revoked'
+    client['mgmt_mac_key']=None
+    client['mgmt_revoked_at']='2026-01-01T00:00:00Z'
+p.write_text(json.dumps(reg, indent=2, sort_keys=True)+'\n')
+PY
+CAND="$WORKDIR/cand-revoked.json"
+python3 - "$STATE" "$CAND" <<'PY'
+import json,sys
+from pathlib import Path
+d=json.loads(Path(sys.argv[1]).read_text())
+d['services']['web']['local_port']=8082
+Path(sys.argv[2]).write_text(json.dumps(d, indent=2, sort_keys=True)+'\n')
+PY
+unset FRP_ENROLLMENT_CODE || true
+export FRP_CLIENT_CANDIDATE="$CAND"
+if "$ROOT/tools/frp-client" apply >"$WORKDIR/revoked.out" 2>"$WORKDIR/revoked.err"; then
+  fail "revoked identity should not apply without Enrollment Code"
+fi
+grep -q 'revoked' "$WORKDIR/revoked.err" "$WORKDIR/revoked.out" || fail "revoked error not shown"
+eid_rev='bb22cc33dd44ee55'
+secret_rev='enroll-secret-bb22cc33dd44ee55bb22cc33dd44ee55'
+write_enrollment "$ALLOC_ROOT/enrollments" "$eid_rev" "$secret_rev"
+export FRP_ENROLLMENT_CODE="${eid_rev}.${secret_rev}"
+"$ROOT/tools/frp-client" apply >"$WORKDIR/recovered.out" 2>"$WORKDIR/recovered.err"
+python3 - "$STATE" <<'PY' || fail "re-enroll after revoke"
+import json,sys
+from pathlib import Path
+d=json.loads(Path(sys.argv[1]).read_text())
+assert d['services']['web']['local_port']==8082
+PY
+python3 - "$ALLOC_ROOT/registry.json" <<'PY' || fail "re-enroll status"
+import json,sys
+from pathlib import Path
+reg=json.loads(Path(sys.argv[1]).read_text())
+client=next(iter(reg['clients'].values()))
+assert client.get('mgmt_status')=='enrolled'
+assert client.get('mgmt_mac_key')
+assert client['services']['web']['remote_port']
+PY
+CAND="$WORKDIR/cand-after-revoke.json"
+python3 - "$STATE" "$CAND" <<'PY'
+import json,sys
+from pathlib import Path
+d=json.loads(Path(sys.argv[1]).read_text())
+d['services']['web']['local_port']=8083
+Path(sys.argv[2]).write_text(json.dumps(d, indent=2, sort_keys=True)+'\n')
+PY
+unset FRP_ENROLLMENT_CODE || true
+export FRP_CLIENT_CANDIDATE="$CAND"
+"$ROOT/tools/frp-client" apply >"$WORKDIR/after-revoke.out"
+if grep -q 'Enrollment Code' "$WORKDIR/after-revoke.out"; then
+  fail "apply after re-enroll asked for Enrollment Code"
+fi
+grep -q 'existing client identity' "$WORKDIR/after-revoke.out" || fail "apply after re-enroll should use identity"
+pass "revoked identity recovers with Enrollment Code"
+
+# Interactive recoverable errors
+export FRP_SSH_USER=aella
+frp_reset_test_input
+export FRP_CLIENT_TEST_INPUT=$'1\n1\nSSH\n\n\n\n9\n2\n99\n3\nabc\n2\n1\n\n\n0\n\n8\n'
+if ! "$ROOT/tools/frp-client" >"$WORKDIR/recover.out" 2>"$WORKDIR/recover.err"; then
+  fail "interactive recovery should not terminate frp-client"
+fi
+grep -q 'duplicate service id: ssh' "$WORKDIR/recover.err" "$WORKDIR/recover.out" || fail "duplicate SSH not reported"
+grep -q 'case-insensitive' "$WORKDIR/recover.err" "$WORKDIR/recover.out" || fail "case-insensitive help"
+grep -q 'ERROR: select 1-8' "$WORKDIR/recover.err" "$WORKDIR/recover.out" || fail "invalid menu not recovered"
+grep -q 'invalid service number' "$WORKDIR/recover.err" "$WORKDIR/recover.out" || fail "invalid service number not recovered"
+grep -q 'invalid local_port' "$WORKDIR/recover.err" "$WORKDIR/recover.out" || fail "invalid port not recovered"
+grep -q 'FRP Client Management' "$WORKDIR/recover.out" || fail "menu did not continue"
+python3 - "$STATE" <<'PY' || fail "recovery corrupted state"
+import json,sys
+from pathlib import Path
+d=json.loads(Path(sys.argv[1]).read_text())
+ids=list(d['services'])
+assert 'ssh' in ids
+assert 'SSH' not in ids
+assert 'ssh' == [s.lower() for s in ids if s.lower()=='ssh'][0]
+PY
+unset FRP_CLIENT_TEST_INPUT
+frp_reset_test_input
+pass "interactive input errors are recoverable"
 
 echo
 echo "FRP_CLIENT_MANAGEMENT_TEST=PASS"

@@ -9,6 +9,10 @@ secrets/
 *.pem
 *.p12
 *.pfx
+client-identity.key
+client-identity.pub
+client-identity.mac
+mgmt-nonces.json
 
 # Runtime-generated secrets, configs, and allocator state
 server_token

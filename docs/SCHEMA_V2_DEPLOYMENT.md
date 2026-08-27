@@ -209,6 +209,8 @@ cat /etc/frp/access-info.txt
 
 Confirm SSH/HTTP/HTTPS/custom TCP services received persistent public ports.
 
+Schema v2 may also store an optional per-client management public identity (`mgmt_status`, `mgmt_pubkey`, `mgmt_fingerprint`, `mgmt_alg`, `mgmt_mac_key`). That is a compatible field addition; it does not change `schema_version` and must not rewrite service port reservations. Signed management requests use a separate bounded nonce cache (`mgmt-nonces.json`) next to the registry. Entries expire after 15 minutes. Revoking a management identity does not release ports.
+
 ---
 
 ## If something is still schema v1

@@ -10,6 +10,7 @@ files=[
  'VERSION',
  'install-server.sh',
  'lib/frp-common.sh',
+ 'lib/frp_mgmt_auth.py',
  'server/frp-port-allocator.py',
  'server/migrate_token.py',
  'server/frps.service',
@@ -19,6 +20,7 @@ files=[
  'tools/frp-client-info',
  'tools/frp-release-client',
  'tools/frp-release-service',
+ 'tools/frp-revoke-client',
  'tools/frp-set-client-installer-url',
  'tools/frp-server-status',
  'tools/frp-update',
@@ -42,6 +44,7 @@ lines.append('exec "$TMP/install-server.sh" "$@"')
 client_files=[
  'install-client.sh',
  'lib/frp-client-common.sh',
+ 'lib/frp_mgmt_auth.py',
  'tools/frp-client',
 ]
 client_lines=['#!/usr/bin/env bash','set -euo pipefail','TMP="$(mktemp -d)"','trap \'rm -rf "$TMP"\' EXIT']

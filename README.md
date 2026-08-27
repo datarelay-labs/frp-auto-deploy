@@ -179,7 +179,7 @@ curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main
 
 `FRP_ALLOCATOR_URL` is required. There is no hard-coded allocator address in the installer. If it is missing, the client bootstrap exits with a clear error and does not install FRP.
 
-The installer explains each field as you go. Values in `[brackets]` are defaults; press Enter to accept them. You need a short-lived Enrollment Code from `sudo frp-create-client` on the FRP server. It is entered interactively, is not stored on the client, and is not the FRP token.
+The installer explains each field as you go. Values in `[brackets]` are defaults; press Enter to accept them. You need a short-lived Enrollment Code from `sudo frp-create-client` on the FRP server. It is entered interactively, is not stored on the client, and is not the FRP token. After this first enrollment, the client creates a local management identity so later configuration changes do not require another Enrollment Code.
 
 ```text
 =========================================
@@ -246,6 +246,7 @@ Enrollment Code
 
 Service ID
   Stable unique identifier used to preserve the public port.
+  Lowercase and case-insensitive (SSH, ssh, and Ssh are the same ID).
 
 Target host
   Where the real service runs.
@@ -329,7 +330,8 @@ Server: 203.0.113.10
 → 127.0.0.1:3000
 
 6) Apply pending changes
-Enrollment Code:
+Authentication: existing client identity
+Continue? [Y/n]: Y
 ```
 
 Read-only commands do not require an Enrollment Code and do not contact the allocator:
@@ -339,9 +341,15 @@ sudo frp-client status
 sudo frp-client info
 ```
 
-Applying add/edit/enable/disable changes that update server-side allocations requires a new short-lived Enrollment Code from `sudo frp-create-client` on the FRP server. No permanent client management password is used.
+The Enrollment Code is a short-lived bootstrap/recovery credential. After the first successful enrollment, later add/edit/enable/disable applies are authorized by this client's local management identity. The private identity stays on the client (`/etc/frp/client-identity.key`, mode 600). The FRP server stores only the matching public identity. The FRP tunnel token is separate and is never used as a management password.
 
-Disable a service to stop publishing it. The public port stays reserved. Re-enable to get the same port back. Permanent per-service release is done on the server with `sudo frp-release-service <client> <service-id>`. `frp-release-client` still releases the whole client.
+An Enrollment Code is needed again only to enroll a new client, recover a lost local identity, or re-establish trust after an administrator revokes management access with `sudo frp-revoke-client`.
+
+Existing clients that already have `client-state.json` but no management identity are asked for a one-time Enrollment Code on the first server-affecting Apply. After that, later changes use the local identity.
+
+Display-name and SSH-user metadata changes stay local: they do not contact the allocator, do not require an Enrollment Code or management signature, and do not restart `frpc`.
+
+Disable a service to stop publishing it. The public port stays reserved. Re-enable to get the same port back. Permanent per-service release is done on the server with `sudo frp-release-service <client> <service-id>`. `frp-release-client` still releases the whole client. Revoking a client's management identity (`sudo frp-revoke-client`) does not release ports.
 
 At least one enabled service is required. Clients installed before this management state must be re-enrolled once with the current bootstrap installer.
 
@@ -408,6 +416,7 @@ Binaries and systemd units are removed. Token, configuration, and registry are p
 - automatic FRP server installation
 - automatic FRP client installation with menu-driven TCP service setup
 - post-install `frp-client` service add/edit/disable/re-enable without reinstalling FRP
+- persistent client management identity after one-time enrollment
 - persistent public port assignment for SSH, HTTP, HTTPS, and custom TCP services
 - short-lived enrollment codes
 - HMAC-authenticated enrollment requests and responses
@@ -505,7 +514,11 @@ No FRP token or permanent install secret is stored in this Git repository.
 
 - A new server generates `/etc/frp/server_token` locally.
 - Installing over an existing FRP server preserves the existing authentication token rather than rotating it.
-- Client enrollment uses a short-lived enrollment code.
+- Client enrollment uses a short-lived enrollment code as bootstrap/recovery authorization.
+- After enrollment, each client has a local ECDSA P-256 management identity. The private key never leaves the client.
+- The server stores only the corresponding public key, fingerprint, and revocation status.
+- Management requests are signed and bind protocol version, client identity, operation, timestamp, nonce, and payload digest. Replayed and stale requests are rejected.
+- The FRP token authenticates the FRP tunnel only. It is not a management API credential.
 - The enrollment secret itself is never sent over the enrollment HTTP request.
 - Enrollment requests and responses are HMAC authenticated.
 - The FRP token is encrypted with AES-256-CBC/PBKDF2 using the enrollment secret before crossing the enrollment HTTP path.
@@ -554,6 +567,8 @@ This prevents existing FRP listeners such as `6000`, `6001`, or other active por
 ## Generic registry schema
 
 The server registry stores each client as a map of named TCP services. Identity for a public port is `machine-id + service-id`.
+
+Optional management-identity fields (`mgmt_status`, `mgmt_pubkey`, `mgmt_fingerprint`, `mgmt_alg`, `mgmt_mac_key`) may appear on a client record. They extend schema v2 without changing `schema_version`. Missing fields mean a legacy client that must establish a management identity with a one-time Enrollment Code. Do not dump those fields in ordinary operator output.
 
 A fresh install writes:
 
@@ -615,6 +630,14 @@ sudo frp-release-service customer-dp grafana
 
 This frees only that service's reserved public port. Other services on the same client are left unchanged. If the port still appears active, the command refuses unless `--force` is used.
 
+## Revoke a client's management identity
+
+```bash
+sudo frp-revoke-client customer-dp
+```
+
+This stops the client from making further signed configuration changes. Service port reservations are left in place. The client must re-enroll with a new Enrollment Code to establish trust again. This is not the same as `frp-release-service`.
+
 ## Configure the client installer URL
 
 ```bash
@@ -663,6 +686,7 @@ The update replaces `/usr/local/bin/frps` only. It does not rotate the FRP token
 /etc/frp-auto-deploy/config.json
 /etc/frp-auto-deploy/version
 /var/lib/frp-auto-deploy/registry.json
+/var/lib/frp-auto-deploy/mgmt-nonces.json
 /var/lib/frp-auto-deploy/enrollments/
 /var/lib/frp-auto-deploy/backups/
 /usr/local/lib/frp-auto-deploy/frp-port-allocator.py
@@ -673,15 +697,19 @@ The update replaces `/usr/local/bin/frps` only. It does not rotate the FRP token
 ```text
 /etc/frp/frpc.toml
 /etc/frp/client-state.json
+/etc/frp/client-identity.key
+/etc/frp/client-identity.pub
+/etc/frp/client-identity.mac
 /etc/frp/access-info.txt
 /etc/frp/backups/
 /etc/systemd/system/frpc.service
 /usr/local/bin/frpc
 /usr/local/bin/frp-client
 /usr/local/lib/frp-auto-deploy/frp-client-common.sh
+/usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py
 ```
 
-`client-state.json` is the local desired/current service metadata (schema version 1). `frpc.toml` is generated runtime config. The server `registry.json` is the persistent service/port allocation. Future management UIs should use these structured IDs rather than parsing `frpc.toml`.
+`client-state.json` is the local desired/current service metadata (schema version 1) and must not contain secrets. The management private key is stored only in `client-identity.key`. `frpc.toml` is generated runtime config. The server `registry.json` is the persistent service/port allocation and may include the client's public management identity. Future management UIs should use these structured IDs rather than parsing `frpc.toml`.
 
 ---
 
@@ -712,7 +740,7 @@ The repository should never contain real FRP tokens, enrollment secrets, private
 ./tests/test-server-migration.sh
 ./tests/test-registry-init.sh
 python3 tests/test-allocator.py
-python3 tests/test-enrollment-security.py
+python3 tests/test-mgmt-identity.py
 ./tests/test-client-config.sh
 ./tests/test-client-allocator-url.sh
 ./tests/test-client-platform.sh

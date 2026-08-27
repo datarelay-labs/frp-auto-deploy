@@ -63,6 +63,15 @@ def client_online(services):
     return False
 
 
+def mgmt_status(client):
+    status = client.get('mgmt_status')
+    if status in ('enrolled', 'legacy', 'revoked'):
+        return status
+    if client.get('mgmt_pubkey'):
+        return 'enrolled'
+    return 'legacy'
+
+
 cfg = json.loads(CFG.read_text())
 reg = Path(cfg['registry_file'])
 if ROOT and not str(reg).startswith(ROOT):
@@ -72,8 +81,8 @@ require_v2(state)
 
 print(f'PUBLIC IP: {cfg["public_ip"]}')
 print()
-print(f'{"HOSTNAME":24} {"SERVICES":8} {"STATE":8} LAST ENROLLED')
-print('-' * 72)
+print(f'{"HOSTNAME":24} {"SERVICES":8} {"STATE":8} {"MGMT":12} LAST ENROLLED')
+print('-' * 84)
 
 clients = sorted(
     (state.get('clients') or {}).items(),
@@ -84,7 +93,8 @@ for mid, client in clients:
     hostname = (client.get('hostname') or '')[:24]
     state_txt = 'online' if client_online(services) else 'offline'
     last = client.get('last_enrolled_at') or '-'
-    print(f'{hostname:24} {str(len(services)):8} {state_txt:8} {last}')
+    mgmt = mgmt_status(client)
+    print(f'{hostname:24} {str(len(services)):8} {state_txt:8} {mgmt:12} {last}')
 
 if clients:
     print()

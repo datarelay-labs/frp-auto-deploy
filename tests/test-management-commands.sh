@@ -152,6 +152,24 @@ PY
 grep -q 'service grafana' "$WORKDIR/svc-release.out" || fail "service release output"
 pass "frp-release-service generic"
 
+printf 'REVOKE\n' | python3 "$ROOT/tools/frp-revoke-client" dev-dp-mirror >"$WORKDIR/revoke.out"
+python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY' || fail "revoke"
+import json,sys
+from pathlib import Path
+state=json.loads(Path(sys.argv[1]).read_text())
+client=state['clients']['aabbccdd']
+assert client.get('mgmt_status')=='revoked'
+assert client['services']['ssh']['remote_port']==6002
+assert client['services']['api']['remote_port']==6004
+assert 'grafana' not in client['services']
+PY
+grep -q 'Revoking management identity' "$WORKDIR/revoke.out" || fail "revoke header"
+grep -q 'ssh: 6002' "$WORKDIR/revoke.out" || fail "revoke listed reservation"
+if grep -qi 'private key\|mgmt_mac_key\|BEGIN PUBLIC' "$WORKDIR/revoke.out"; then
+  fail "revoke leaked identity material"
+fi
+pass "frp-revoke-client keeps reservations"
+
 # shellcheck source=../lib/frp-common.sh
 . "$ROOT/lib/frp-common.sh"
 MARKER="$WORKDIR/harness.marker"

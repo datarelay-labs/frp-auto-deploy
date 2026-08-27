@@ -68,6 +68,13 @@ print('======')
 print()
 print(f'Hostname    : {client.get("hostname", "")}')
 print(f'Machine ID  : {mid}')
+status = client.get('mgmt_status')
+if status not in ('enrolled', 'legacy', 'revoked'):
+    status = 'enrolled' if client.get('mgmt_pubkey') else 'legacy'
+print(f'Management  : {status}')
+fp = str(client.get('mgmt_fingerprint') or '')
+if fp:
+    print(f'Fingerprint : sha256:{fp[:16]}')
 print(f'Services    : {len(enabled)}')
 
 for sid, svc in enabled:
