@@ -138,7 +138,7 @@ Non-interactive example (replace the documentation addresses):
 curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-server.sh \
 | sudo env \
     FRP_PUBLIC_HOST=203.0.113.10 \
-    FRP_ALLOCATOR_URL=http://203.0.113.10/enroll \
+    FRP_ALLOCATOR_URL=https://203.0.113.10:6099/enroll \
     bash
 ```
 
@@ -154,7 +154,7 @@ Re-running the installer reuses existing runtime config when present. It preserv
 sudo frp-server-status --check
 sudo systemctl status frps --no-pager
 sudo systemctl status frp-port-allocator --no-pager
-curl -fsS http://127.0.0.1:6099/healthz
+curl -fsS --cacert /etc/frp-auto-deploy/pki/ca.crt https://127.0.0.1:6099/healthz
 ```
 
 Expected:
@@ -186,7 +186,7 @@ On the remote Linux host, run the command printed by `frp-create-client`. Exampl
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh \
-| sudo env FRP_ALLOCATOR_URL='http://203.0.113.10/enroll' bash
+| sudo env FRP_ALLOCATOR_URL='https://203.0.113.10:6099/enroll' FRP_ALLOCATOR_CA_SHA256='<sha256>' bash
 ```
 
 Then enter the enrollment code and add TCP services (SSH is optional).

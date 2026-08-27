@@ -60,6 +60,7 @@ python3 -m py_compile \
   server/frp-port-allocator.py \
   server/migrate_token.py \
   lib/frp_mgmt_auth.py \
+  lib/frp_pki.py \
   scripts/build-bundles.py
 while IFS= read -r -d '' f; do
   bash -n "$f"
@@ -75,6 +76,9 @@ bash -n tools/frp-server-status tools/frp-update tools/frp-client tools/frpctl
 python3 tests/test-allocator.py
 python3 tests/test-mgmt-identity.py
 python3 tests/test-enrollment-security.py
+python3 tests/test-pki-https.py
+./tests/test-port-architecture.sh
+./tests/test-ca-bootstrap.sh
 
 echo
 echo "CONTAINER_PORTABILITY=PASS"

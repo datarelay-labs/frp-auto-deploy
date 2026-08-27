@@ -17,12 +17,26 @@ if declare -p DEFAULT_ALLOCATOR_URL >/dev/null 2>&1; then
   fail "DEFAULT_ALLOCATOR_URL must not exist"
 fi
 
-# CASE A: explicit FRP_ALLOCATOR_URL is accepted.
+# CASE A: explicit HTTPS FRP_ALLOCATOR_URL is accepted.
+unset FRP_ALLOCATOR_URL ALLOCATOR_URL || true
+export FRP_ALLOCATOR_URL='https://203.0.113.10:6099/enroll'
+frp_require_allocator_url
+[[ "$ALLOCATOR_URL" == 'https://203.0.113.10:6099/enroll' ]] || fail "CASE A ALLOCATOR_URL"
+pass "CASE A FRP_ALLOCATOR_URL accepted"
+
+# HTTP is rejected.
 unset FRP_ALLOCATOR_URL ALLOCATOR_URL || true
 export FRP_ALLOCATOR_URL='http://203.0.113.10/enroll'
-frp_require_allocator_url
-[[ "$ALLOCATOR_URL" == 'http://203.0.113.10/enroll' ]] || fail "CASE A ALLOCATOR_URL"
-pass "CASE A FRP_ALLOCATOR_URL accepted"
+if (
+  frp_require_allocator_url
+) >/dev/null 2>"$WORKDIR/http.err"; then
+  fail "HTTP allocator URL should be rejected"
+fi
+grep -qi 'https' "$WORKDIR/http.err" || fail "HTTP rejection message"
+if frp_valid_allocator_url 'http://203.0.113.10/enroll'; then
+  fail "HTTP URL should be invalid"
+fi
+pass "HTTP allocator URL rejected"
 
 # CASE B: missing URL fails before any client files are written.
 unset FRP_ALLOCATOR_URL ALLOCATOR_URL || true
@@ -61,16 +75,16 @@ fi
 pass "CASE C invalid URL rejected"
 
 # Whitespace / control characters are rejected.
-if frp_valid_allocator_url $'http://203.0.113.10/enroll\n'; then
+if frp_valid_allocator_url $'https://203.0.113.10/enroll\n'; then
   fail "newline URL should be invalid"
 fi
-if frp_valid_allocator_url 'http://203.0.113.10/enroll extra'; then
+if frp_valid_allocator_url 'https://203.0.113.10/enroll extra'; then
   fail "whitespace URL should be invalid"
 fi
 pass "invalid whitespace rejected"
 
 # Shell-sensitive characters in a still-valid URL are accepted as data.
-if ! frp_valid_allocator_url 'http://203.0.113.10/enroll;extra'; then
+if ! frp_valid_allocator_url 'https://203.0.113.10/enroll;extra'; then
   fail "semicolon path should remain a valid URL string"
 fi
 pass "shell-sensitive URL accepted as quoted data"

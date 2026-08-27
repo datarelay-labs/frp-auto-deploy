@@ -27,7 +27,7 @@ import json, sys
 from pathlib import Path
 Path(sys.argv[1]).write_text(json.dumps({
     "schema_version": 1,
-    "allocator_url": "http://127.0.0.1:9/enroll",
+    "allocator_url": "https://127.0.0.1:9/enroll",
     "frp_server": "203.0.113.10",
     "frp_server_port": 443,
     "hostname": "ctl-client",
@@ -60,7 +60,7 @@ Path(sys.argv[1]).write_text(json.dumps({
     "port_start": 6000,
     "port_end": 6098,
     "listen_port": 6099,
-    "allocator_public_url": "http://203.0.113.10/enroll",
+    "allocator_public_url": "https://203.0.113.10:6099/enroll",
 }, indent=2, sort_keys=True) + "\n")
 PY
   cat >"$tree/etc/frp-auto-deploy/version" <<'EOF'

@@ -39,7 +39,7 @@ Path(sys.argv[1]).write_text(json.dumps({
   "port_start": 6000,
   "port_end": 6098,
   "listen_port": 6099,
-  "allocator_public_url": "http://203.0.113.10/enroll",
+  "allocator_public_url": "https://203.0.113.10:6099/enroll",
 }, indent=2, sort_keys=True)+"\n")
 PY
 
@@ -82,9 +82,10 @@ grep -q "Installed FRP   : 0.70.0" "$OUT" || fail "installed frp"
 grep -q "Tested FRP      : 0.70.1" "$OUT" || fail "tested frp"
 grep -q "Upstream latest : unavailable" "$OUT" || fail "upstream unavailable"
 grep -q "Update status   : update available" "$OUT" || fail "update available"
-grep -q "FRP control     : TCP/443" "$OUT" || fail "control port"
+grep -q "FRP public      : TCP/443" "$OUT" || fail "control port"
+grep -q "FRP listen      : TCP/443" "$OUT" || fail "listen port"
 grep -q "Service range   : TCP/6000-6098" "$OUT" || fail "service range"
-grep -q "Allocator       : TCP/6099" "$OUT" || fail "allocator port"
+grep -q "Allocator listen: TCP/6099" "$OUT" || fail "allocator port"
 grep -q "Clients         : 3" "$OUT" || fail "client count"
 grep -q "Reserved ports  : 7" "$OUT" || fail "reserved port count"
 grep -q "Registry schema : 2" "$OUT" || fail "registry schema"

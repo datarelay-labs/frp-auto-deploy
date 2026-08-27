@@ -4,6 +4,7 @@ import json
 import os
 import secrets
 import shlex
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,56 @@ def remap(path):
     if ROOT and not str(path).startswith(ROOT):
         return Path(ROOT + str(path))
     return path
+
+
+def coerce_port(value):
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return None
+    if 1 <= port <= 65535:
+        return port
+    return None
+
+
+def cfg_public_host(cfg):
+    for key in ('public_host', 'public_ip'):
+        value = cfg.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ''
+
+
+def cfg_frp_control_public_port(cfg):
+    port = coerce_port(cfg.get('frp_control_public_port'))
+    if port is not None:
+        return port
+    return coerce_port(cfg.get('control_port'))
+
+
+def fingerprint_from_pem(path):
+    import base64
+    import hashlib
+    text = Path(path).read_text(encoding='utf-8')
+    if '-----BEGIN CERTIFICATE-----' not in text:
+        return ''
+    lines = []
+    in_body = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith('-----BEGIN'):
+            in_body = True
+            continue
+        if line.startswith('-----END'):
+            break
+        if in_body:
+            lines.append(line)
+    if not lines:
+        return ''
+    der = base64.b64decode(''.join(lines))
+    return hashlib.sha256(der).hexdigest()
 
 
 p = argparse.ArgumentParser(description='Create a short-lived FRP client enrollment code')
@@ -49,20 +100,37 @@ path = enroll_dir / f'{enrollment_id}.json'
 path.write_text(json.dumps(record, indent=2, sort_keys=True) + '\n')
 path.chmod(0o600)
 
+public_host = cfg_public_host(cfg)
+control_public = cfg_frp_control_public_port(cfg)
+allocator = str(cfg.get('allocator_public_url', '') or '').strip()
+ca_path = remap(str(cfg.get('tls_ca_cert') or '/etc/frp-auto-deploy/pki/ca.crt'))
+ca_fp = fingerprint_from_pem(ca_path) if ca_path.is_file() else ''
+
 print()
 print('Enrollment Code:')
 print(f'{enrollment_id}.{secret}')
 print()
 print(f'Expires: {record["expires_at_iso"]} ({a.ttl} seconds)')
+print()
+if public_host and control_public:
+    print(f'FRP Server: {public_host}:{control_public}')
+elif public_host:
+    print(f'FRP Server: {public_host}')
+if allocator:
+    print(f'Allocator: {allocator}')
+if ca_fp:
+    print(f'CA SHA256: {ca_fp}')
 
 installer = str(cfg.get('client_installer_url', '') or '').strip()
-allocator = str(cfg.get('allocator_public_url', '') or '').strip()
 print()
 if installer and allocator:
+    env_parts = [f'FRP_ALLOCATOR_URL={shlex.quote(allocator)}']
+    if ca_fp:
+        env_parts.append(f'FRP_ALLOCATOR_CA_SHA256={shlex.quote(ca_fp)}')
     print('Client install:')
     print(
         f'curl -fsSL {shlex.quote(installer)} | '
-        f'sudo env FRP_ALLOCATOR_URL={shlex.quote(allocator)} bash'
+        f'sudo env {" ".join(env_parts)} bash'
     )
     print()
     print('The enrollment code is entered interactively. It is not placed on the command line.')

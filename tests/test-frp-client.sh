@@ -31,7 +31,7 @@ start_allocator() {
   ALLOC_PID=$!
   local i
   for i in $(seq 1 50); do
-    if curl -fsS "http://127.0.0.1:${ALLOC_PORT}/healthz" >/dev/null 2>&1; then
+    if curl -fsS --cacert "$ALLOC_ROOT/pki/ca.crt" "https://127.0.0.1:${ALLOC_PORT}/healthz" >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.1
@@ -61,23 +61,33 @@ PY
 ALLOC_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
 ALLOC_ROOT="$WORKDIR/allocator"
 mkdir -p "$ALLOC_ROOT/enrollments"
+python3 "$ROOT/lib/frp_pki.py" ensure --pki-dir "$ALLOC_ROOT/pki" --public-host 127.0.0.1 >/dev/null
+CA_FP="$(python3 "$ROOT/lib/frp_pki.py" fingerprint --cert "$ALLOC_ROOT/pki/ca.crt")"
 python3 - "$ALLOC_ROOT" "$ALLOC_PORT" <<'PY'
 import json, sys
 from pathlib import Path
 root = Path(sys.argv[1])
 port = int(sys.argv[2])
+pki = root / 'pki'
 (root / 'server_token').write_text('test-enroll-token-do-not-use\n')
 (root / 'server_token').chmod(0o600)
 (root / 'registry.json').write_text(json.dumps({
     'schema_version': 2, 'reserved': [], 'clients': {},
 }, indent=2) + '\n')
 (root / 'config.json').write_text(json.dumps({
+    'public_host': '203.0.113.10',
     'public_ip': '203.0.113.10',
-    'control_port': 443,
+    'frp_control_public_port': 8443,
+    'frp_control_listen_port': 443,
     'port_start': 18200,
     'port_end': 18230,
     'listen_host': '127.0.0.1',
     'listen_port': port,
+    'allocator_listen_port': port,
+    'allocator_public_port': port,
+    'tls_ca_cert': str(pki / 'ca.crt'),
+    'tls_server_cert': str(pki / 'server.crt'),
+    'tls_server_key': str(pki / 'server.key'),
     'registry_file': str(root / 'registry.json'),
     'enrollments_dir': str(root / 'enrollments'),
     'token_file': str(root / 'server_token'),
@@ -100,7 +110,8 @@ export FRP_SKIP_SYSTEMD=1
 export FRP_SKIP_CONNECTIVITY_CHECK=1
 export FRP_TEST_HOSTNAME='dp-example'
 export FRP_TEST_MACHINE_ID='aabbccddeeff00112233445566778899'
-export FRP_ALLOCATOR_URL="http://127.0.0.1:${ALLOC_PORT}/enroll"
+export FRP_ALLOCATOR_URL="https://127.0.0.1:${ALLOC_PORT}/enroll"
+export FRP_ALLOCATOR_CA_SHA256="$CA_FP"
 export FRP_ENROLLMENT_CODE="${EID}.${SECRET}"
 export FRP_SERVICES_JSON='[{"id":"ssh","name":"SSH","protocol":"tcp","local_ip":"127.0.0.1","local_port":22,"preset":"ssh","ssh_user":"aella"}]'
 export FRP_CLIENT_SOURCED=1
@@ -121,8 +132,9 @@ import json,sys
 from pathlib import Path
 d=json.loads(Path(sys.argv[1]).read_text())
 assert d['schema_version']==1
-assert d['allocator_url'].startswith('http://127.0.0.1:')
+assert d['allocator_url'].startswith('https://127.0.0.1:')
 assert d['frp_server']=='203.0.113.10'
+assert int(d['frp_server_port'])==8443
 assert d['hostname']=='dp-example'
 assert 'ssh' in d['services']
 assert d['services']['ssh']['remote_port']==18200
@@ -164,8 +176,19 @@ PY
 [[ -f "$TREE/usr/local/lib/frp-auto-deploy/frp-client-common.sh" ]] || fail "client lib not installed"
 [[ -f "$TREE/usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py" ]] || fail "mgmt auth helper not installed"
 [[ -f "$TREE/etc/frp-auto-deploy/version" ]] || fail "client version file missing"
-grep -q 'PROJECT_VERSION=1.5.0' "$TREE/etc/frp-auto-deploy/version" || fail "client project version"
+grep -q 'PROJECT_VERSION=1.6.0' "$TREE/etc/frp-auto-deploy/version" || fail "client project version"
 grep -q 'FRP_VERSION=0.70.1' "$TREE/etc/frp-auto-deploy/version" || fail "client FRP version"
+[[ -f "$TREE/etc/frp-auto-deploy/allocator-ca.crt" ]] || fail "trusted CA missing"
+grep -q 'serverPort = 8443' "$TREE/etc/frp/frpc.toml" || fail "frpc must use public control port"
+if grep -q 'serverPort = 443' "$TREE/etc/frp/frpc.toml"; then
+  fail "frpc used internal listen port"
+fi
+ca_mode="$(python3 - "$TREE/etc/frp-auto-deploy/allocator-ca.crt" <<'PY'
+import os,stat,sys
+print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode)))
+PY
+)"
+[[ "$ca_mode" == "0o644" ]] || fail "trusted CA mode $ca_mode"
 pass "fresh install writes client-state"
 
 HOOK="$WORKDIR/hook.log"
@@ -199,7 +222,7 @@ PY
 [[ "$before" == "$after" ]] || fail "read-only CLI modified files"
 if grep -qx enroll "$HOOK"; then fail "read-only contacted allocator"; fi
 if grep -qx restart "$HOOK"; then fail "read-only restarted frpc"; fi
-grep -q 'Project version : 1.5.0' "$WORKDIR/status.out" || fail "status project version"
+grep -q 'Project version : 1.6.0' "$WORKDIR/status.out" || fail "status project version"
 grep -q 'Hostname        : dp-example' "$WORKDIR/status.out" || fail "status hostname"
 grep -q 'Management identity : enrolled' "$WORKDIR/status.out" || fail "status identity"
 grep -q 'ssh' "$WORKDIR/status.out" || fail "status ssh"

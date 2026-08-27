@@ -81,33 +81,87 @@ frps_state="$(unit_state frps)"
 allocator_state="$(unit_state frp-port-allocator)"
 
 control_port=""
+control_listen_port=""
 port_start=""
 port_end=""
 allocator_port=""
+allocator_public=""
 public_host=""
 allocator_url=""
+ca_fingerprint=""
 if [[ -r "$config_file" ]]; then
   eval "$(python3 - "$config_file" <<'PY'
-import json, shlex, sys
+import json, shlex, sys, base64, hashlib
 from pathlib import Path
+
+def coerce_port(value):
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return None
+    return port if 1 <= port <= 65535 else None
+
+def fingerprint(path):
+    try:
+        text = Path(path).read_text(encoding='utf-8')
+    except OSError:
+        return ''
+    if '-----BEGIN CERTIFICATE-----' not in text:
+        return ''
+    lines = []
+    in_body = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith('-----BEGIN'):
+            in_body = True
+            continue
+        if line.startswith('-----END'):
+            break
+        if in_body:
+            lines.append(line)
+    if not lines:
+        return ''
+    try:
+        der = base64.b64decode(''.join(lines))
+    except Exception:
+        return ''
+    return hashlib.sha256(der).hexdigest()
+
 try:
     cfg = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 except Exception:
     raise SystemExit(0)
 if not isinstance(cfg, dict):
     raise SystemExit(0)
+host = cfg.get('public_host') or cfg.get('public_ip')
+if host:
+    print('public_host=' + shlex.quote(str(host)))
+public_port = coerce_port(cfg.get('frp_control_public_port')) or coerce_port(cfg.get('control_port'))
+listen_port = coerce_port(cfg.get('frp_control_listen_port')) or coerce_port(cfg.get('control_port'))
+if public_port is not None:
+    print('control_port=' + shlex.quote(str(public_port)))
+if listen_port is not None:
+    print('control_listen_port=' + shlex.quote(str(listen_port)))
 for key, envname in (
-    ("control_port", "control_port"),
     ("port_start", "port_start"),
     ("port_end", "port_end"),
-    ("listen_port", "allocator_port"),
-    ("public_ip", "public_host"),
     ("allocator_public_url", "allocator_url"),
 ):
     value = cfg.get(key)
     if value is None or value == "":
         continue
     print(f"{envname}={shlex.quote(str(value))}")
+alloc_listen = coerce_port(cfg.get('allocator_listen_port')) or coerce_port(cfg.get('listen_port'))
+alloc_public = coerce_port(cfg.get('allocator_public_port'))
+if alloc_listen is not None:
+    print('allocator_port=' + shlex.quote(str(alloc_listen)))
+if alloc_public is not None:
+    print('allocator_public=' + shlex.quote(str(alloc_public)))
+root = Path(sys.argv[1]).parent
+ca = cfg.get('tls_ca_cert') or str(root / 'pki' / 'ca.crt')
+fp = fingerprint(ca)
+if fp:
+    print('ca_fingerprint=' + shlex.quote(fp))
 PY
 )" 2>/dev/null || true
 fi
@@ -167,9 +221,21 @@ fi
 
 if [[ -n "${control_port:-}" ]]; then
   echo
-  echo "FRP control     : TCP/${control_port}"
+  echo "Public host     : ${public_host:-unknown}"
+  echo "FRP public      : TCP/${control_port}"
+  if [[ -n "${control_listen_port:-}" && "${control_listen_port}" != "${control_port}" ]]; then
+    echo "FRP listen      : TCP/${control_listen_port}"
+  else
+    echo "FRP listen      : TCP/${control_listen_port:-$control_port}"
+  fi
   echo "Service range   : TCP/${port_start}-${port_end}"
-  echo "Allocator       : TCP/${allocator_port}"
+  if [[ -n "${allocator_url:-}" ]]; then
+    echo "Allocator URL   : ${allocator_url}"
+  fi
+  echo "Allocator listen: TCP/${allocator_port}"
+  if [[ -n "${ca_fingerprint:-}" ]]; then
+    echo "TLS CA SHA256   : ${ca_fingerprint}"
+  fi
 fi
 
 echo

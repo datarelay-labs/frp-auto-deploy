@@ -21,7 +21,7 @@ import json, sys
 from pathlib import Path
 Path(sys.argv[1]).write_text(json.dumps({
     "schema_version": 1,
-    "allocator_url": "http://127.0.0.1:9/enroll",
+    "allocator_url": "https://127.0.0.1:9/enroll",
     "frp_server": "203.0.113.10",
     "hostname": "ctl-client",
     "machine_id": "00112233445566778899aabbccddeeff",
@@ -43,7 +43,7 @@ cfg.write_text(json.dumps({
     "port_start": 6000,
     "port_end": 6098,
     "listen_port": 6099,
-    "allocator_public_url": "http://203.0.113.10/enroll",
+    "allocator_public_url": "https://203.0.113.10:6099/enroll",
     "registry_file": "/var/lib/frp-auto-deploy/registry.json",
 }, indent=2, sort_keys=True) + "\n")
 reg.write_text(json.dumps({

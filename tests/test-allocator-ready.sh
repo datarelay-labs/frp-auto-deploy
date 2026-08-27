@@ -115,7 +115,7 @@ if ! frp_wait_allocator_ready 6099 >"$WORKDIR/delayed.out" 2>"$WORKDIR/delayed.e
 fi
 [[ "$CURL_CALLS" -ge 4 ]] || fail "delayed ready retry count"
 [[ "$SLEEP_COUNT" -ge 3 ]] || fail "delayed ready should retry"
-grep -q 'Waiting for FRP allocator HTTP listener' "$WORKDIR/delayed.out" || fail "delayed ready wait message"
+grep -q 'Waiting for FRP allocator HTTPS listener' "$WORKDIR/delayed.out" || fail "delayed ready wait message"
 pass "SERVER_ALLOCATOR_DELAYED_READY"
 
 # --- Healthz never succeeds: bounded timeout, non-zero exit.

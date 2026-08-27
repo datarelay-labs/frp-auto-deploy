@@ -11,6 +11,7 @@ files=[
  'install-server.sh',
  'lib/frp-common.sh',
  'lib/frp_mgmt_auth.py',
+ 'lib/frp_pki.py',
  'server/frp-port-allocator.py',
  'server/migrate_token.py',
  'server/frps.service',

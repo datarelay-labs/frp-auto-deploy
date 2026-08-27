@@ -127,10 +127,13 @@ grep -q 'python 3.7 or newer is required' "$ROOT/server/frp-port-allocator.py" \
   || fail "allocator min python guard"
 grep -q 'python 3.7 or newer is required' "$ROOT/server/migrate_token.py" \
   || fail "migrate_token min python guard"
+grep -q 'python 3.7 or newer is required' "$ROOT/lib/frp_pki.py" \
+  || fail "pki min python guard"
 python3 -m py_compile \
   "$ROOT/server/frp-port-allocator.py" \
   "$ROOT/server/migrate_token.py" \
   "$ROOT/lib/frp_mgmt_auth.py" \
+  "$ROOT/lib/frp_pki.py" \
   "$ROOT/scripts/build-bundles.py"
 pass "PYTHON_MIN_VERSION"
 

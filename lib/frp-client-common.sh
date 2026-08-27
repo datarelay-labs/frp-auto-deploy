@@ -13,7 +13,7 @@ FRP_CLIENT_UPGRADE_BACKUP_KEEP="${FRP_CLIENT_UPGRADE_BACKUP_KEEP:-5}"
 FRP_CLIENT_UPDATE_URL="${FRP_CLIENT_UPDATE_URL:-https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh}"
 
 # Defaults match VERSION. A sibling VERSION file overrides project/FRP versions.
-PROJECT_VERSION="${PROJECT_VERSION:-1.5.0}"
+PROJECT_VERSION="${PROJECT_VERSION:-1.6.0}"
 FRP_VERSION="${FRP_VERSION:-0.70.1}"
 _FRP_CLIENT_COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${_FRP_CLIENT_COMMON_DIR}/../VERSION" ]]; then
@@ -60,6 +60,236 @@ frp_client_identity_pub_path() {
 
 frp_client_identity_mac_path() {
   frp_client_path /etc/frp/client-identity.mac
+}
+
+frp_allocator_ca_path() {
+  frp_client_path /etc/frp-auto-deploy/allocator-ca.crt
+}
+
+frp_valid_https_allocator_url() {
+  local url="${1:-}"
+  case "$url" in
+    https://?*) ;;
+    *) return 1 ;;
+  esac
+  if [[ "$url" == *$'\n'* || "$url" == *$'\r'* || "$url" == *$'\t'* || "$url" == *' '* ]]; then
+    return 1
+  fi
+  local rest="${url#https://}"
+  local hostport="${rest%%/*}"
+  [[ -n "$hostport" ]]
+}
+
+frp_allocator_origin_url() {
+  local url="${1:-}"
+  python3 - "$url" <<'PY'
+import sys
+url = sys.argv[1].strip()
+if not url.lower().startswith('https://'):
+    raise SystemExit(1)
+rest = url[8:]
+hostport = rest.split('/', 1)[0]
+if not hostport:
+    raise SystemExit(1)
+sys.stdout.write('https://' + hostport)
+PY
+}
+
+frp_ca_fingerprint_file() {
+  python3 - "$1" <<'PY'
+import base64, hashlib, re, sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text(encoding='utf-8')
+if '-----BEGIN CERTIFICATE-----' not in text:
+    raise SystemExit('invalid CA PEM')
+lines = []
+in_body = False
+for raw in text.splitlines():
+    line = raw.strip()
+    if line.startswith('-----BEGIN'):
+        in_body = True
+        continue
+    if line.startswith('-----END'):
+        break
+    if in_body:
+        lines.append(line)
+if not lines:
+    raise SystemExit('invalid CA PEM')
+try:
+    der = base64.b64decode(''.join(lines))
+except Exception:
+    raise SystemExit('invalid CA PEM')
+print(hashlib.sha256(der).hexdigest())
+PY
+}
+
+frp_normalize_ca_fingerprint() {
+  python3 - "$1" <<'PY'
+import re, sys
+text = sys.argv[1]
+cleaned = []
+for ch in text:
+    o = ord(ch)
+    if 48 <= o <= 57:
+        cleaned.append(ch)
+    elif 65 <= o <= 70:
+        cleaned.append(chr(o + 32))
+    elif 97 <= o <= 102:
+        cleaned.append(ch)
+hexstr = ''.join(cleaned)
+if not re.fullmatch(r'[0-9a-f]{64}', hexstr):
+    raise SystemExit(1)
+print(hexstr)
+PY
+}
+
+frp_atomic_install_allocator_ca() {
+  local src="$1" dest expected actual tmp dir
+  dest="$(frp_allocator_ca_path)"
+  expected="${2:-}"
+  actual="$(frp_ca_fingerprint_file "$src")" || {
+    echo "ERROR: invalid CA PEM" >&2
+    return 1
+  }
+  if [[ -n "$expected" ]]; then
+    expected="$(frp_normalize_ca_fingerprint "$expected")" || {
+      echo "ERROR: invalid CA fingerprint" >&2
+      return 1
+    }
+    if [[ "$actual" != "$expected" ]]; then
+      echo "ERROR: CA fingerprint mismatch" >&2
+      return 1
+    fi
+  fi
+  dir="$(dirname "$dest")"
+  mkdir -p "$dir"
+  tmp="$(mktemp "${dir}/allocator-ca.crt.XXXXXX")"
+  cp "$src" "$tmp"
+  chmod 644 "$tmp"
+  if [[ "$(id -u)" == "0" ]]; then
+    chown root:root "$tmp" 2>/dev/null || true
+  fi
+  mv -f "$tmp" "$dest"
+  chmod 644 "$dest"
+}
+
+frp_bootstrap_allocator_ca() {
+  local url="${1:-}" origin ca_url dest tmp expected actual
+  dest="$(frp_allocator_ca_path)"
+  expected="${FRP_ALLOCATOR_CA_SHA256:-}"
+
+  if ! frp_valid_https_allocator_url "$url"; then
+    if [[ "$url" == http://* ]]; then
+      echo "ERROR: plain HTTP allocator URL is not supported; HTTPS is required" >&2
+    else
+      echo "ERROR: FRP allocator URL must be an https:// URL with a host" >&2
+    fi
+    return 1
+  fi
+
+  if [[ -n "${FRP_ALLOCATOR_CA_FILE:-}" ]]; then
+    [[ -f "$FRP_ALLOCATOR_CA_FILE" ]] || {
+      echo "ERROR: pre-provisioned allocator CA file is missing" >&2
+      return 1
+    }
+    frp_atomic_install_allocator_ca "$FRP_ALLOCATOR_CA_FILE" "$expected" || return 1
+    return 0
+  fi
+
+  if [[ -f "$dest" ]]; then
+    if [[ -n "$expected" ]]; then
+      actual="$(frp_ca_fingerprint_file "$dest")" || return 1
+      expected="$(frp_normalize_ca_fingerprint "$expected")" || {
+        echo "ERROR: invalid CA fingerprint" >&2
+        return 1
+      }
+      if [[ "$actual" != "$expected" ]]; then
+        echo "ERROR: CA fingerprint mismatch" >&2
+        return 1
+      fi
+    fi
+    return 0
+  fi
+
+  if [[ -z "$expected" ]]; then
+    echo "ERROR: allocator CA SHA256 fingerprint is required for first enrollment" >&2
+    echo "Set FRP_ALLOCATOR_CA_SHA256 from frp-create-client, or supply FRP_ALLOCATOR_CA_FILE." >&2
+    return 1
+  fi
+  expected="$(frp_normalize_ca_fingerprint "$expected")" || {
+    echo "ERROR: invalid CA fingerprint" >&2
+    return 1
+  }
+
+  origin="$(frp_allocator_origin_url "$url")" || {
+    echo "ERROR: cannot derive allocator origin from URL" >&2
+    return 1
+  }
+  ca_url="${origin}/ca.crt"
+  tmp="$(mktemp)"
+  # Insecure retrieval is limited to the public CA certificate. No code,
+  # identity, or management headers are sent on this request.
+  if ! curl --fail --silent --show-error --max-time 30 \
+    --proto '=https' --insecure \
+    -o "$tmp" \
+    "$ca_url"; then
+    rm -f "$tmp"
+    echo "ERROR: allocator TLS CA certificate could not be downloaded from ${ca_url}" >&2
+    return 1
+  fi
+  if ! actual="$(frp_ca_fingerprint_file "$tmp" 2>/dev/null)"; then
+    rm -f "$tmp"
+    echo "ERROR: invalid CA PEM" >&2
+    return 1
+  fi
+  if [[ "$actual" != "$expected" ]]; then
+    rm -f "$tmp"
+    echo "ERROR: CA fingerprint mismatch" >&2
+    return 1
+  fi
+  if ! frp_atomic_install_allocator_ca "$tmp" "$expected"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  rm -f "$tmp"
+  return 0
+}
+
+frp_explain_allocator_curl_error() {
+  local err_file="${1:-}"
+  local text=""
+  if [[ -n "$err_file" && -f "$err_file" ]]; then
+    text="$(cat "$err_file" 2>/dev/null || true)"
+  fi
+  local lowered
+  lowered="$(printf '%s' "$text" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$lowered" == *'could not get local issuer'* || "$lowered" == *'unable to get local issuer'* || "$lowered" == *'unknown ca'* ]]; then
+    echo "ERROR: allocator TLS verification failed: unknown CA" >&2
+  elif [[ "$lowered" == *'does not match'* || "$lowered" == *'alternative certificate subject'* || "$lowered" == *'hostname'* ]]; then
+    echo "ERROR: allocator TLS verification failed: server certificate hostname mismatch" >&2
+  elif [[ "$lowered" == *'expired'* ]]; then
+    echo "ERROR: allocator TLS verification failed: expired certificate" >&2
+  elif [[ "$lowered" == *'not yet valid'* ]]; then
+    echo "ERROR: allocator TLS verification failed: certificate is not yet valid" >&2
+  elif [[ "$lowered" == *'connection refused'* || "$lowered" == *'failed to connect'* ]]; then
+    echo "ERROR: allocator TLS listener unavailable" >&2
+  else
+    echo "ERROR: allocator request failed" >&2
+  fi
+  if [[ -n "$text" ]]; then
+    printf '%s\n' "$text" >&2
+  fi
+}
+
+frp_allocator_curl() {
+  local ca dest
+  dest="$(frp_allocator_ca_path)"
+  if [[ ! -f "$dest" ]]; then
+    echo "ERROR: trusted allocator CA is missing (${dest})" >&2
+    echo "ERROR: unknown CA; re-run enrollment with FRP_ALLOCATOR_CA_SHA256" >&2
+    return 1
+  fi
+  curl --silent --show-error --cacert "$dest" "$@"
 }
 
 frp_mgmt_auth_py() {
@@ -1519,7 +1749,7 @@ message = mod.signed_message(machine_id, body, ts, nonce)
 sys.stdout.write(mod.sign_message(key, message))
 PY
 )"
-    if ! response="$(curl --silent --show-error \
+    if ! response="$(frp_allocator_curl \
       -X POST \
       -H 'Content-Type: application/json' \
       -H 'X-Mgmt-Auth: 1' \
@@ -1528,8 +1758,7 @@ PY
       -H "X-Mgmt-Signature: ${signature}" \
       --data "$request" \
       "$allocator_url" 2>"$curl_err")"; then
-      echo "ERROR: allocator request failed" >&2
-      cat "$curl_err" >&2 || true
+      frp_explain_allocator_curl_error "$curl_err"
       rm -f "$curl_err"
       return 1
     fi
@@ -1585,7 +1814,7 @@ message=(os.environ['TS']+'\n'+os.environ['BODY']).encode()
 print(hmac.new(secret,message,hashlib.sha256).hexdigest())
 PY
 )"
-  if ! response="$(curl --silent --show-error \
+  if ! response="$(frp_allocator_curl \
     -X POST \
     -H 'Content-Type: application/json' \
     -H "X-Enrollment-ID: ${enroll_id}" \
@@ -1593,8 +1822,7 @@ PY
     -H "X-Signature: ${signature}" \
     --data "$request" \
     "$allocator_url" 2>"$curl_err")"; then
-    echo "ERROR: allocator request failed" >&2
-    cat "$curl_err" >&2 || true
+    frp_explain_allocator_curl_error "$curl_err"
     rm -f "$curl_err"
     return 1
   fi

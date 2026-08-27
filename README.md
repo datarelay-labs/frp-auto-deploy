@@ -8,7 +8,7 @@ It automates FRP server/client installation, persistent public port assignment f
 > The IP addresses `203.0.113.10` and `192.0.2.50` used in this README are documentation-only example addresses (RFC 5737). Replace them with your own public and internal addresses when deploying.
 
 Current pinned FRP version: **v0.70.1**
-Current project version: **1.5.0**
+Current project version: **1.6.0**
 
 ---
 
@@ -29,7 +29,7 @@ FRP Auto Deploy CLI
 ===================
 
 Role            : Server
-Project version : 1.5.0
+Project version : 1.6.0
 FRP version     : 0.70.1
 
 Type 'help' or '?' for available commands.
@@ -53,7 +53,7 @@ FRP Auto Deploy CLI
 ===================
 
 Role            : Client
-Project version : 1.5.0
+Project version : 1.6.0
 FRP version     : 0.70.1
 
 frpctl> status
@@ -90,55 +90,66 @@ frpc   # FRP client
 
 Two common deployment models are supported:
 
-1. **FRP server behind a firewall/NAT device** — public ports are DNATed to an internal FRP server.
-2. **FRP server directly on a public IP** — no external firewall/NAT device is required; the FRP server itself owns the public IP.
+1. **FRP server behind a firewall/NAT device** — public ports may differ from the ports `frps` and the allocator listen on locally.
+2. **FRP server directly on a public IP** — public and listen ports are usually the same.
+
+TCP/443 is **not** required. A site may already use 443 for a web server, VPN, or another HTTPS service.
+
+Management (enrollment and signed client updates) is **HTTPS-only** and uses a project-managed private CA. FRP data/control traffic continues to use FRP native TLS plus the FRP token. There is no mutual TLS: clients authenticate with the existing ECDSA P-256 management identity after the one-time Enrollment Code.
+
+Published service ports use a 1:1 public/internal port-number model (public 6002 forwards to the same remote port 6002 on this FRP server).
 
 ## 1. Choose your network topology
 
-### Option A — FRP server behind firewall / NAT
-
-Example topology:
+### Option A — NAT, existing service already on TCP/443
 
 ```text
-Internet / Remote Linux clients
+Internet
+
+Existing service
+     TCP/443
         |
-        | FRP TLS control :443
         v
-203.0.113.10  (public firewall/NAT)
-        |
-        +-- TCP/443       -> 192.0.2.50:443
-        +-- TCP/6000-6098 -> 192.0.2.50:6000-6098
-        +-- TCP/80        -> 192.0.2.50:6099
-                                |
-                                +-- frps
-                                +-- port allocator
-```
+   other system
 
-Required DNAT example:
 
-```text
-203.0.113.10:443       -> 192.0.2.50:443
-203.0.113.10:6000-6098 -> 192.0.2.50:6000-6098
-203.0.113.10:80        -> 192.0.2.50:6099
+FRP client  --TCP/8443-->  Public/NAT  --8443->443-->  frps listen TCP/443
+
+Management  --HTTPS/9443--> Public/NAT --9443->6099--> allocator HTTPS TCP/6099
+
+Service user --TCP/6002--> Public/NAT --6002->6002--> frps remote port 6002
 ```
 
 Server installer values:
 
 ```text
-Public firewall/NAT IP:      203.0.113.10
-Internal FRP server IP:      192.0.2.50
-FRP control port:            443
+Public hostname or IP:       203.0.113.10
+FRP control public port:     8443
+FRP control listen port:     443
+Allocator public HTTPS port: 9443
+Allocator listen port:       6099
 Service range start:         6000
 Service range end:           6098
-Allocator internal port:     6099
-Allocator public URL:        http://203.0.113.10/enroll
 ```
 
-This model is useful when the FRP server has only a private address and a separate firewall/router owns the public IP.
+Client-facing endpoints:
 
-### Option B — FRP server directly on a public IP (no external firewall/NAT)
+```text
+FRP Server:  203.0.113.10:8443
+Allocator:   https://203.0.113.10:9443/enroll
+```
 
-If the FRP server itself owns the public IP, no DNAT device is required.
+Required DNAT (port numbers for published services stay 1:1):
+
+```text
+203.0.113.10:8443      -> 192.0.2.50:443
+203.0.113.10:9443      -> 192.0.2.50:6099
+203.0.113.10:6000-6098 -> 192.0.2.50:6000-6098
+```
+
+The installer prints this mapping. It does not configure upstream routers, cloud NAT, or load balancers.
+
+### Option B — FRP server directly on a public IP
 
 ```text
 Internet / Remote Linux clients
@@ -146,46 +157,30 @@ Internet / Remote Linux clients
         v
 203.0.113.10  (FRP server public IP)
         |
-        +-- TCP/443        frps control
+        +-- TCP/443        frps control (public = listen)
         +-- TCP/6000-6098  published TCP service ports
-        +-- TCP/6099       enrollment allocator
+        +-- TCP/6099       enrollment allocator HTTPS
 ```
 
 Use values like:
 
 ```text
-Public firewall/NAT IP:      203.0.113.10
-Internal FRP server IP:      203.0.113.10
-FRP control port:            443
-Service range start:         6000
-Service range end:           6098
-Allocator internal port:     6099
-Allocator public URL:        http://203.0.113.10:6099/enroll
+Public hostname or IP:       203.0.113.10
+FRP control public port:     443
+FRP control listen port:     443
+Allocator public HTTPS port: 6099
+Allocator listen port:       6099
 ```
 
-`Internal FRP server IP` is currently used for display/documentation purposes, so when the server directly owns the public address it is fine to enter the same public IP.
-
-Make sure the server or cloud security group allows inbound TCP traffic for:
+Allocator URL (derived when not overridden):
 
 ```text
-443
-6000-6098
-6099
+https://203.0.113.10:6099/enroll
 ```
 
-If you prefer the enrollment URL to use normal HTTP port 80 instead of exposing `6099`, place a reverse proxy or local port-forward in front of the allocator:
+Allow inbound TCP for the ports you actually configured. Defaults are convenience only.
 
-```text
-203.0.113.10:80 -> 127.0.0.1:6099
-```
-
-Then you can use:
-
-```text
-Allocator public URL:        http://203.0.113.10/enroll
-```
-
-This is equivalent to the firewall/NAT deployment from the client's point of view, but the port forwarding happens locally on the FRP server rather than on a separate firewall.
+If you already occupy TCP/443, put FRP control on 8443 (or any free port) instead. Do not assume two raw TCP services can share one public IP:port without an external proxy.
 
 ## 2. Install the FRP server
 
@@ -195,9 +190,22 @@ Run on the FRP server:
 curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-server.sh | sudo bash
 ```
 
-The installer asks for the deployment values shown in the examples above. There is no hard-coded public or internal address; values are stored in `/etc/frp-auto-deploy/config.json`.
+The installer asks for the public hostname/IP and the public vs internal listen ports shown above. There is no hard-coded public address; values are stored in `/etc/frp-auto-deploy/config.json`.
 
-Non-interactive install uses environment variables, for example `FRP_PUBLIC_HOST` and `FRP_ALLOCATOR_URL` (aliases: `FRP_PUBLIC_IP`, `FRP_ALLOCATOR_PUBLIC_URL`). Optional project defaults remain `FRP_CONTROL_PORT=443`, `FRP_PORT_START=6000`, `FRP_PORT_END=6098`, and `FRP_ALLOCATOR_PORT=6099`. Re-running the installer reuses the existing runtime config unless those variables are set.
+Non-interactive install uses environment variables:
+
+```text
+FRP_PUBLIC_HOST
+FRP_CONTROL_PUBLIC_PORT          (alias: FRP_CONTROL_PORT when both public and listen are unset)
+FRP_CONTROL_LISTEN_PORT
+FRP_ALLOCATOR_PUBLIC_PORT
+FRP_ALLOCATOR_LISTEN_PORT        (alias: FRP_ALLOCATOR_PORT)
+FRP_PORT_START
+FRP_PORT_END
+FRP_ALLOCATOR_PUBLIC_URL         (alias: FRP_ALLOCATOR_URL; HTTPS required)
+```
+
+Defaults for a simple directly exposed server are control 443/443, allocator 6099/6099, and services 6000-6098. Re-running the installer reuses the existing runtime config unless those variables are set. An existing private CA is preserved; a public-host change may reissue the server certificate from the same CA. Pre-P2.8 `http://` allocator URLs are not reused.
 
 Verify the server:
 
@@ -217,7 +225,7 @@ You can also inspect systemd directly:
 ```bash
 sudo systemctl status frps --no-pager
 sudo systemctl status frp-port-allocator --no-pager
-curl -fsS http://127.0.0.1:6099/healthz
+curl -fsS --cacert /etc/frp-auto-deploy/pki/ca.crt https://127.0.0.1:6099/healthz
 ```
 
 ## 3. Create a client enrollment code
@@ -236,13 +244,26 @@ Enrollment Code:
 
 Expires: 2026-08-26T11:10:00Z (600 seconds)
 
+FRP Server:
+203.0.113.10:8443
+
+Allocator:
+https://203.0.113.10:9443/enroll
+
+CA SHA256:
+<64 lowercase hex characters>
+
 Client install:
-curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh | sudo env FRP_ALLOCATOR_URL='http://203.0.113.10/enroll' bash
+curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh |
+sudo env \
+  FRP_ALLOCATOR_URL='https://203.0.113.10:9443/enroll' \
+  FRP_ALLOCATOR_CA_SHA256='<sha256>' \
+  bash
 ```
 
-Enrollment codes expire after 10 minutes by default and are bound to the first machine that uses them. The enrollment secret is entered interactively; it is not placed on the command line.
+Enrollment codes expire after 10 minutes by default and are bound to the first machine that uses them. The enrollment secret is entered interactively; it is not placed on the command line. The CA fingerprint is public trust metadata and may appear in the install command.
 
-`sudo env` is required so `FRP_ALLOCATOR_URL` reaches the installer after `sudo` resets the environment.
+`sudo env` is required so `FRP_ALLOCATOR_URL` and `FRP_ALLOCATOR_CA_SHA256` reach the installer after `sudo` resets the environment.
 
 ## 4. Install a remote Linux client
 
@@ -250,10 +271,15 @@ Run the command printed by `frp-create-client` on the remote Linux server. Examp
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh \
-| sudo env FRP_ALLOCATOR_URL='http://203.0.113.10/enroll' bash
+| sudo env \
+    FRP_ALLOCATOR_URL='https://203.0.113.10:9443/enroll' \
+    FRP_ALLOCATOR_CA_SHA256='<sha256>' \
+    bash
 ```
 
-`FRP_ALLOCATOR_URL` is required. There is no hard-coded allocator address in the installer. If it is missing, the client bootstrap exits with a clear error and does not install FRP.
+`FRP_ALLOCATOR_URL` must be HTTPS. First install downloads `/ca.crt` once, checks the SHA256 fingerprint, and stores `/etc/frp-auto-deploy/allocator-ca.crt`. All later allocator calls use verified HTTPS (`curl --cacert`). Software update preserves that CA file and does not require a new Enrollment Code.
+
+If it is missing, the client bootstrap exits with a clear error and does not install FRP.
 
 The installer explains each field as you go. Values in `[brackets]` are defaults; press Enter to accept them. You need a short-lived Enrollment Code from `sudo frp-create-client` on the FRP server. It is entered interactively, is not stored on the client, and is not the FRP token. After this first enrollment, the client creates a local management identity so later configuration changes do not require another Enrollment Code.
 
@@ -471,7 +497,7 @@ curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main
 | sudo bash -s -- --upgrade
 ```
 
-A software update preserves client state, `frpc.toml`, access information, management identity files, service IDs, enabled/disabled state, and public port assignments. It does **not** require an Enrollment Code when trust already exists. It does not regenerate a valid management identity, does not rewrite a working `frpc.toml`, and does not restart `frpc` unless the runtime FRP binary actually changes. Existing clients without `/etc/frp-auto-deploy/version` are treated as legacy/pre-version-tracking installs and are migrated into version tracking.
+A software update preserves client state, `frpc.toml`, access information, management identity files, `/etc/frp-auto-deploy/allocator-ca.crt`, service IDs, enabled/disabled state, and public port assignments. It does **not** require an Enrollment Code when trust already exists. It does not regenerate a valid management identity, does not rewrite a working `frpc.toml`, and does not restart `frpc` unless the runtime FRP binary actually changes. Existing clients without `/etc/frp-auto-deploy/version` are treated as legacy/pre-version-tracking installs and are migrated into version tracking.
 
 If the bootstrap installer is run again on an already-installed client, it refuses to re-enroll and points at `sudo frpctl update`.
 
@@ -586,21 +612,31 @@ The installers detect **commands and package managers**, not marketing names. Th
 
 ### Supported vs tested
 
-| Distribution | Install deps | Upgrade tests | systemd smoke | frpctl | Status |
+Do not read a single `ROCKY_9=PASS` (or similar) as covering both container portability and a real VM. The columns below are separate.
+
+| Distribution | Container | Systemd PID1 (LXD) | Real VM | SELinux | TTY Tab |
 | --- | --- | --- | --- | --- | --- |
-| Ubuntu 22.04 | PASS (container) | PASS (container + unit) | PASS (prior live Ubuntu baseline) | PASS | Tested |
-| Ubuntu 24.04 | PASS (container) | PASS (container + unit) | PASS (prior live Ubuntu baseline) | PASS | Tested |
-| Rocky Linux 9 | PASS (container) | PASS (container + unit) | NOT_TESTED | PASS (container + unit) | Container-tested |
-| AlmaLinux 9 | PASS (container) | PASS (container + unit) | NOT_TESTED | PASS (container + unit) | Container-tested |
-| Amazon Linux 2023 | PASS (container) | PASS (container + unit) | NOT_TESTED | PASS (container + unit) | Container-tested |
-| Amazon Linux 2 | PASS (container) | PASS (container + unit) | NOT_TESTED | PASS (container + unit) | Container-tested |
-| Debian 12 | Best-effort (same apt path as Ubuntu) | Unit tests | NOT_TESTED | Unit tests | Best-effort |
-| Fedora current | Best-effort (dnf) | Unit tests | NOT_TESTED | Unit tests | Best-effort |
-| RHEL 9 / CentOS Stream 9 | Best-effort (dnf, RHEL-compatible) | Unit tests | NOT_TESTED | Unit tests | Best-effort |
+| Ubuntu 22.04 | PASS | N/A | PASS (live baseline) | N/A | PASS (live baseline) |
+| Ubuntu 24.04 | PASS | N/A | PASS (live baseline) | N/A | PASS (live baseline) |
+| Rocky Linux 9 | PASS | PASS | NOT_TESTED | NOT_TESTED | PASS (LXD TTY) |
+| AlmaLinux 9 | PASS | PASS | NOT_TESTED | NOT_TESTED | PASS (LXD TTY) |
+| Amazon Linux 2023 | PASS | PASS | NOT_TESTED | N/A | PASS (LXD TTY) |
+| Amazon Linux 2 | PASS | NOT_TESTED | NOT_TESTED | N/A | NOT_TESTED |
+| Debian 12 | Best-effort (apt path) | NOT_TESTED | NOT_TESTED | N/A | Unit tests |
+| Fedora current | Best-effort (dnf) | NOT_TESTED | NOT_TESTED | N/A | Unit tests |
+| RHEL 9 / CentOS Stream 9 | Best-effort (dnf) | NOT_TESTED | NOT_TESTED | N/A | Unit tests |
 
-**Container-tested** means GitHub Actions (or a local Docker run) installed the mapped packages and ran systemd-free installer/CLI tests inside the vendor image. It does **not** mean `frps` / `frpc` / allocator units were started under that distro's PID 1.
+**Container** means GitHub Actions (or a local Docker run) installed the mapped packages and ran systemd-free installer/CLI tests inside the vendor image. It does **not** mean `frps` / `frpc` / allocator units were started under that distro's PID 1.
 
-**systemd smoke** for Ubuntu refers to a real host with systemd, not a container. Rocky, Alma, and Amazon Linux systemd smoke remains `NOT_TESTED` until a disposable VM is used.
+**Systemd PID1 (LXD)** means a disposable LXD system container whose PID 1 is that distro's systemd. Server/client install, unit enable/start/restart, allocator `/healthz`, `frpctl`, and `lxc restart` boot persistence were exercised for Rocky 9, AlmaLinux 9, and Amazon Linux 2023. That is **not** a real VM: the kernel is the Ubuntu host kernel, and SELinux is `Disabled`.
+
+**Real VM** means a disposable virtual machine with its own kernel and that distro's systemd as PID 1. Ubuntu remains the live baseline. Nested KVM was not available on the P2.7.1 test host; QEMU TCG booted Amazon Linux 2023 to a login prompt but was too slow for SSH/install. Rocky/Alma/Amazon Linux **real VM** rows stay `NOT_TESTED` until a nested-virt or bare-metal disposable VM is used.
+
+**SELinux** for Rocky/Alma remains `NOT_TESTED` until an Enforcing kernel (a real VM or SELinux-enabled host) is used. LXD containers on an AppArmor Ubuntu host reported `getenforce=Disabled`. This project does not run `setenforce 0`.
+
+**Live baseline** means the current known-good Ubuntu server/client pair. Those hosts were not modified during P2.7.1.
+
+A non-destructive collector for an already-installed systemd host is `tests/live-distro-smoke.sh`. It does not create, release, or revoke objects and does not print secrets.
 
 Architecture: `x86_64 → amd64` and `aarch64/arm64 → arm64` are unit-tested. A full ARM64 systemd install is `NOT_TESTED` unless you run one.
 
@@ -626,7 +662,7 @@ On Amazon Linux 2 (systemd 219), the installer writes an allocator unit without 
 
 Enrollment token wrap stays compatible with `openssl enc -pbkdf2` on OpenSSL 1.1.1+, and uses the same Salted__/PBKDF2-SHA256 format via Python's stdlib plus `openssl enc -K/-iv` so OpenSSL 1.0.2 still works.
 
-SELinux: default targeted policy typically allows these custom systemd units. This project does not install custom SELinux policy and does not set SELinux to permissive. If a site policy blocks the allocator HTTP port or FRP binaries, fix that policy explicitly.
+SELinux: default targeted policy typically allows these custom systemd units. This project does not install custom SELinux policy and does not set SELinux to permissive. If a site policy blocks the allocator HTTP port or FRP binaries, fix that policy explicitly. Enforcing-mode validation still requires a real Rocky/Alma VM; it was not closed in LXD containers.
 
 ---
 
@@ -853,6 +889,10 @@ The server FRP update replaces `/usr/local/bin/frps` only. It does not rotate th
 /etc/frp/frps.toml
 /etc/frp-auto-deploy/config.json
 /etc/frp-auto-deploy/version
+/etc/frp-auto-deploy/pki/ca.crt
+/etc/frp-auto-deploy/pki/ca.key
+/etc/frp-auto-deploy/pki/server.crt
+/etc/frp-auto-deploy/pki/server.key
 /var/lib/frp-auto-deploy/registry.json
 /var/lib/frp-auto-deploy/mgmt-nonces.json
 /var/lib/frp-auto-deploy/enrollments/
@@ -872,6 +912,7 @@ The server FRP update replaces `/usr/local/bin/frps` only. It does not rotate th
 /etc/frp/access-info.txt
 /etc/frp/backups/
 /etc/frp-auto-deploy/version
+/etc/frp-auto-deploy/allocator-ca.crt
 /etc/systemd/system/frpc.service
 /usr/local/bin/frpc
 /usr/local/bin/frp-client
@@ -927,6 +968,9 @@ python3 tests/test-mgmt-identity.py
 ./tests/test-frpctl-completion.sh
 ./tests/test-frp-update.sh
 ./tests/test-frp-server-status.sh
+./tests/test-port-architecture.sh
+./tests/test-ca-bootstrap.sh
+python3 tests/test-pki-https.py
 ./scripts/secret-scan.sh
 ```
 
@@ -934,7 +978,7 @@ python3 tests/test-mgmt-identity.py
 
 # Notes
 
-- Behind a firewall/NAT device, FRP service ports must be forwarded to the same ports on the internal FRP server.
+- Behind NAT, configure public vs listen ports separately. Published services keep the same port number on both sides (1:1).
 - On a direct public server, no DNAT is required; allow the required ports on the host firewall or cloud security group.
 - The allocator skips ports already reserved in the registry, ports belonging to any client service, and ports currently bound by another local service.
 - Client port reservations survive client uninstall/reinstall unless explicitly released from the server.

@@ -12,6 +12,7 @@ import json
 import os
 import re
 import socket
+import ssl
 import subprocess
 import tempfile
 import threading
@@ -19,6 +20,7 @@ import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlparse
 
 LOCK = threading.Lock()
 MAX_CLOCK_SKEW = 300
@@ -136,6 +138,41 @@ def port_is_available(port):
 
 def encrypt_token(token, secret):
     return MGMT.encrypt_token_pbkdf2(token, secret)
+
+
+def cfg_public_host(cfg):
+    for key in ('public_host', 'public_ip'):
+        value = cfg.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    raise RuntimeError('public_host is not configured')
+
+
+def cfg_frp_control_public_port(cfg):
+    port = coerce_port(cfg.get('frp_control_public_port'))
+    if port is not None:
+        return port
+    port = coerce_port(cfg.get('control_port'))
+    if port is not None:
+        return port
+    raise RuntimeError('frp_control_public_port is not configured')
+
+
+def cfg_frp_control_listen_port(cfg):
+    port = coerce_port(cfg.get('frp_control_listen_port'))
+    if port is not None:
+        return port
+    port = coerce_port(cfg.get('control_port'))
+    if port is not None:
+        return port
+    return None
+
+
+def cfg_allocator_listen_port(cfg):
+    port = coerce_port(cfg.get('allocator_listen_port'))
+    if port is not None:
+        return port
+    return coerce_port(cfg.get('listen_port'))
 
 
 def coerce_port(value):
@@ -332,8 +369,11 @@ class Allocator:
 
     def protected_ports(self):
         protected = set()
-        for key in ('listen_port', 'control_port'):
-            port = coerce_port(self.cfg.get(key))
+        for port in (
+            cfg_allocator_listen_port(self.cfg),
+            cfg_frp_control_listen_port(self.cfg),
+            coerce_port(self.cfg.get('listen_port')),
+        ):
             if port is not None:
                 protected.add(port)
         return protected
@@ -686,8 +726,8 @@ class Allocator:
             return 500, {'error': str(exc)}
 
         response_payload = {
-            'frp_server': self.cfg['public_ip'],
-            'frp_server_port': int(self.cfg['control_port']),
+            'frp_server': cfg_public_host(self.cfg),
+            'frp_server_port': cfg_frp_control_public_port(self.cfg),
             'services': allocated,
         }
         if identity_auth:
@@ -723,14 +763,31 @@ def make_handler(allocator):
             self.end_headers()
             self.wfile.write(body)
 
+        def _request_path(self):
+            parsed = urlparse(self.path)
+            return parsed.path or '/'
+
         def do_GET(self):
-            if self.path == '/healthz':
+            path = self._request_path()
+            if path == '/healthz':
                 self.send_json(200, {'status': 'ok'})
-            else:
-                self.send_json(404, {'error': 'not found'})
+                return
+            if path == '/ca.crt':
+                ca_path = allocator.cfg.get('tls_ca_cert')
+                if not ca_path or not Path(ca_path).is_file():
+                    self.send_json(500, {'error': 'CA certificate is not available'})
+                    return
+                body = Path(ca_path).read_bytes()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/x-pem-file')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            self.send_json(404, {'error': 'not found'})
 
         def do_POST(self):
-            if self.path != '/enroll':
+            if self._request_path() != '/enroll':
                 self.send_json(404, {'error': 'not found'})
                 return
             try:
@@ -757,6 +814,35 @@ def make_handler(allocator):
     return Handler
 
 
+def allocator_ssl_context(cfg):
+    cert = str(cfg.get('tls_server_cert') or '').strip()
+    key = str(cfg.get('tls_server_key') or '').strip()
+    if not cert or not key:
+        raise SystemExit(
+            'ERROR: allocator TLS certificate or key is missing; refusing to start plain HTTP'
+        )
+    if not Path(cert).is_file() or not Path(key).is_file():
+        raise SystemExit(
+            'ERROR: allocator TLS certificate or key is missing; refusing to start plain HTTP'
+        )
+    try:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    except AttributeError:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS)
+    if hasattr(ssl, 'TLSVersion'):
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+    else:
+        context.options |= getattr(ssl, 'OP_NO_SSLv2', 0)
+        context.options |= getattr(ssl, 'OP_NO_SSLv3', 0)
+        context.options |= getattr(ssl, 'OP_NO_TLSv1', 0)
+        context.options |= getattr(ssl, 'OP_NO_TLSv1_1', 0)
+    try:
+        context.load_cert_chain(certfile=cert, keyfile=key)
+    except Exception as exc:
+        raise SystemExit('ERROR: allocator TLS configuration is invalid: %s' % exc) from exc
+    return context
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
@@ -769,9 +855,13 @@ def main():
         raise SystemExit(f'ERROR: {exc}') from exc
     allocator.cleanup_expired_enrollments()
     host = allocator.cfg.get('listen_host', '0.0.0.0')
-    port = int(allocator.cfg['listen_port'])
+    port = cfg_allocator_listen_port(allocator.cfg)
+    if port is None:
+        raise SystemExit('ERROR: allocator_listen_port is not configured')
+    context = allocator_ssl_context(allocator.cfg)
     server = ThreadingHTTPServer((host, port), make_handler(allocator))
-    print(f'FRP allocator listening on http://{host}:{port}', flush=True)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    print(f'FRP allocator listening on https://{host}:{port}', flush=True)
     server.serve_forever()
 
 
