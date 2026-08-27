@@ -313,8 +313,35 @@ This project does not need to change the FRP protocol or core FRP code. Keeping 
 
 ## Supported operating systems
 
-- Server: Debian/Ubuntu Linux, x86_64 or arm64
-- Client: Debian/Ubuntu Linux, x86_64 or arm64
+### Server
+
+- Debian/Ubuntu Linux, systemd, x86_64 or arm64
+
+### Supported Linux clients
+
+First-class:
+
+- Ubuntu
+- Debian
+- RHEL
+- Rocky Linux
+- AlmaLinux
+- CentOS Stream
+- Fedora
+- Amazon Linux
+
+Requirements:
+
+- systemd
+- x86_64 or arm64
+- network access to the FRP server and GitHub releases
+
+Automatic dependency installation uses `apt`, `dnf`, or `yum`. It is tested with apt, dnf, and yum systems. Other systemd-based Linux distributions can work when required dependencies are already installed.
+
+Internet access is currently required for client bootstrap and the official FRP download. Local/offline package mirrors are not part of this release.
+
+The client installer does not disable SELinux, load custom SELinux policy, or change firewalld, ufw, iptables, or nftables. Opening local inbound ports for published services remains the administrator's responsibility. `frpc` needs outbound connectivity to the FRP server.
+
 - Windows: FRP supports Windows, but automated PowerShell enrollment is not included in v1.0. See `windows/README.md`.
 
 ---
@@ -561,6 +588,7 @@ python3 tests/test-allocator.py
 python3 tests/test-enrollment-security.py
 ./tests/test-client-config.sh
 ./tests/test-client-allocator-url.sh
+./tests/test-client-platform.sh
 ./tests/test-server-install-config.sh
 ./tests/test-create-client.sh
 ./tests/test-management-commands.sh

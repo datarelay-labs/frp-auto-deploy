@@ -42,6 +42,10 @@ sudo_line="$(grep 'sudo env FRP_ALLOCATOR_URL=' "$OUT")"
 if grep -F "$code" <<<"$sudo_line" >/dev/null; then
   fail "enrollment code leaked into sudo command"
 fi
+grep -q 'datarelay-labs/frp-auto-deploy' "$OUT" || fail "canonical repository URL"
+if grep -F 'RickLee-kr' "$OUT" >/dev/null; then
+  fail "stale repository owner in frp-create-client output"
+fi
 pass "CASE D generated client command"
 
 # Shell-sensitive allocator URL is quoted so bash does not execute extra commands.

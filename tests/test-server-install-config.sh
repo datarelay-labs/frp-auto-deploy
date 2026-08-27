@@ -98,5 +98,83 @@ resolve_server_settings
 [[ "$FRP_ALLOCATOR_PUBLIC_URL" == 'https://frp.example.test/enroll' ]] || fail "env should override existing allocator URL"
 pass "explicit env overrides existing config"
 
+legacy_owner='RickLee-kr'
+legacy_repo='frp-auto-deploy'
+LEGACY_INSTALLER_URL="https://raw.githubusercontent.com/${legacy_owner}/${legacy_repo}/main/dist/bootstrap-client.sh"
+CANONICAL_INSTALLER_URL='https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh'
+
+# Known obsolete project installer URL is migrated on a safe installer rerun.
+EXISTING_LEGACY="$WORKDIR/legacy-installer-url.json"
+python3 - "$EXISTING_LEGACY" "$LEGACY_INSTALLER_URL" <<'PY'
+import json, sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps({
+  "public_ip": "203.0.113.10",
+  "control_port": 443,
+  "port_start": 6000,
+  "port_end": 6098,
+  "listen_port": 6099,
+  "allocator_public_url": "http://203.0.113.10/enroll",
+  "client_installer_url": sys.argv[2],
+}, indent=2, sort_keys=True) + "\n")
+PY
+unset FRP_PUBLIC_IP FRP_PUBLIC_HOST FRP_ALLOCATOR_URL FRP_ALLOCATOR_PUBLIC_URL \
+  FRP_CONTROL_PORT FRP_PORT_START FRP_PORT_END FRP_ALLOCATOR_PORT \
+  FRP_CLIENT_INSTALLER_URL FRP_INTERNAL_IP CLIENT_INSTALLER_URL || true
+export FRP_SERVER_CONFIG="$EXISTING_LEGACY"
+load_existing_server_config
+resolve_server_settings
+[[ "$CLIENT_INSTALLER_URL" == "$CANONICAL_INSTALLER_URL" ]] || fail "legacy installer URL not migrated"
+pass "legacy project installer URL migrated"
+
+# Arbitrary custom installer URLs are left unchanged.
+EXISTING_CUSTOM="$WORKDIR/custom-installer-url.json"
+python3 - "$EXISTING_CUSTOM" <<'PY'
+import json, sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps({
+  "public_ip": "203.0.113.10",
+  "control_port": 443,
+  "port_start": 6000,
+  "port_end": 6098,
+  "listen_port": 6099,
+  "allocator_public_url": "http://203.0.113.10/enroll",
+  "client_installer_url": "https://example.org/my-custom-client.sh",
+}, indent=2, sort_keys=True) + "\n")
+PY
+unset FRP_PUBLIC_IP FRP_PUBLIC_HOST FRP_ALLOCATOR_URL FRP_ALLOCATOR_PUBLIC_URL \
+  FRP_CONTROL_PORT FRP_PORT_START FRP_PORT_END FRP_ALLOCATOR_PORT \
+  FRP_CLIENT_INSTALLER_URL FRP_INTERNAL_IP CLIENT_INSTALLER_URL || true
+export FRP_SERVER_CONFIG="$EXISTING_CUSTOM"
+load_existing_server_config
+resolve_server_settings
+[[ "$CLIENT_INSTALLER_URL" == 'https://example.org/my-custom-client.sh' ]] || fail "custom installer URL rewritten"
+pass "custom installer URL preserved"
+
+# Empty installer URL uses the current canonical default.
+EXISTING_EMPTY="$WORKDIR/empty-installer-url.json"
+python3 - "$EXISTING_EMPTY" <<'PY'
+import json, sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps({
+  "public_ip": "203.0.113.10",
+  "control_port": 443,
+  "port_start": 6000,
+  "port_end": 6098,
+  "listen_port": 6099,
+  "allocator_public_url": "http://203.0.113.10/enroll",
+  "client_installer_url": "",
+}, indent=2, sort_keys=True) + "\n")
+PY
+unset FRP_PUBLIC_IP FRP_PUBLIC_HOST FRP_ALLOCATOR_URL FRP_ALLOCATOR_PUBLIC_URL \
+  FRP_CONTROL_PORT FRP_PORT_START FRP_PORT_END FRP_ALLOCATOR_PORT \
+  FRP_CLIENT_INSTALLER_URL FRP_INTERNAL_IP CLIENT_INSTALLER_URL \
+  EXISTING_CLIENT_INSTALLER_URL || true
+export FRP_SERVER_CONFIG="$EXISTING_EMPTY"
+load_existing_server_config
+resolve_server_settings
+[[ "$CLIENT_INSTALLER_URL" == "$CANONICAL_INSTALLER_URL" ]] || fail "empty installer URL did not use canonical default"
+pass "empty installer URL uses canonical default"
+
 echo
 echo "SERVER_INSTALL_CONFIG_TEST=PASS"

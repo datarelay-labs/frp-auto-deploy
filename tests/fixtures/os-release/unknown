@@ -1,0 +1,5 @@
+NAME="Custom Appliance OS"
+VERSION="1.0"
+ID="appliance"
+VERSION_ID="1.0"
+PRETTY_NAME="Custom Appliance OS 1.0"

@@ -1,0 +1,8 @@
+NAME="Amazon Linux"
+VERSION="2023"
+ID="amzn"
+ID_LIKE="fedora"
+VERSION_ID="2023"
+PRETTY_NAME="Amazon Linux 2023.6.20241010"
+ANSI_COLOR="0;33"
+HOME_URL="https://aws.amazon.com/linux/"

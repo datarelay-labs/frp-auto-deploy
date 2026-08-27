@@ -1,0 +1,7 @@
+NAME="AlmaLinux"
+VERSION="9.4 (Seafoam Ocelot)"
+ID="almalinux"
+ID_LIKE="rhel centos fedora"
+VERSION_ID="9.4"
+PRETTY_NAME="AlmaLinux 9.4 (Seafoam Ocelot)"
+ANSI_COLOR="0;34"

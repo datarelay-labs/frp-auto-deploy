@@ -24,6 +24,22 @@ for f in \
 done
 
 DEFAULT_CLIENT_INSTALLER_URL="https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh"
+# Historical owner/repo, concatenated only to recognize the obsolete project URL.
+LEGACY_CLIENT_INSTALLER_OWNER='RickLee-kr'
+LEGACY_CLIENT_INSTALLER_REPO='frp-auto-deploy'
+
+frp_legacy_client_installer_url() {
+  printf 'https://raw.githubusercontent.com/%s/%s/main/dist/bootstrap-client.sh' \
+    "$LEGACY_CLIENT_INSTALLER_OWNER" "$LEGACY_CLIENT_INSTALLER_REPO"
+}
+
+frp_migrate_legacy_client_installer_url() {
+  local legacy
+  legacy="$(frp_legacy_client_installer_url)"
+  if [[ "${CLIENT_INSTALLER_URL:-}" == "$legacy" ]]; then
+    CLIENT_INSTALLER_URL="$DEFAULT_CLIENT_INSTALLER_URL"
+  fi
+}
 
 frp_server_config_path() {
   printf '%s' "${FRP_SERVER_CONFIG:-/etc/frp-auto-deploy/config.json}"
@@ -150,6 +166,7 @@ resolve_server_settings() {
   FRP_ALLOCATOR_PORT="${FRP_ALLOCATOR_PORT:-${EXISTING_ALLOCATOR_PORT:-}}"
   FRP_ALLOCATOR_PUBLIC_URL="${FRP_ALLOCATOR_PUBLIC_URL:-${EXISTING_ALLOCATOR_URL:-}}"
   CLIENT_INSTALLER_URL="${FRP_CLIENT_INSTALLER_URL:-${EXISTING_CLIENT_INSTALLER_URL:-$DEFAULT_CLIENT_INSTALLER_URL}}"
+  frp_migrate_legacy_client_installer_url
 
   local detected_public="${DETECTED_PUBLIC_IP:-}"
   local detected_internal="${DETECTED_INTERNAL_IP:-}"

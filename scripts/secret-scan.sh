@@ -33,5 +33,11 @@ fi
 if git grep -nF 'RickLee-kr/frp-auto-deploy' -- ':!scripts/secret-scan.sh' >/dev/null; then
   fail "stale repository URL RickLee-kr/frp-auto-deploy is tracked"
 fi
+if git grep -nF 'raw.githubusercontent.com/RickLee-kr/frp-auto-deploy' -- ':!scripts/secret-scan.sh' >/dev/null; then
+  fail "stale raw.githubusercontent.com/RickLee-kr/frp-auto-deploy URL is tracked"
+fi
+if git grep -nF 'github.com/RickLee-kr/frp-auto-deploy' -- ':!scripts/secret-scan.sh' >/dev/null; then
+  fail "stale github.com/RickLee-kr/frp-auto-deploy URL is tracked"
+fi
 
 echo "SECRET_SCAN=PASS"
