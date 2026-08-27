@@ -8,7 +8,7 @@ It automates FRP server/client installation, persistent public port assignment f
 > The IP addresses `203.0.113.10` and `192.0.2.50` used in this README are documentation-only example addresses (RFC 5737). Replace them with your own public and internal addresses when deploying.
 
 Current pinned FRP version: **v0.70.1**
-Current project version: **1.3.1**
+Current project version: **1.4.0**
 
 ---
 
@@ -20,7 +20,7 @@ For normal operation, this is the only command you need to remember:
 sudo frpctl
 ```
 
-That starts the persistent interactive management CLI. Then type `help` or `?` for the commands that apply to this host.
+That starts the persistent interactive management CLI. Then type `help` or `?` for the commands that apply to this host. Press Tab to complete commands. On a server, Tab also completes registered client names and service IDs.
 
 ```text
 $ sudo frpctl
@@ -29,10 +29,11 @@ FRP Auto Deploy CLI
 ===================
 
 Role            : Server
-Project version : 1.3.1
+Project version : 1.4.0
 FRP version     : 0.70.1
 
 Type 'help' or '?' for available commands.
+Press Tab to complete commands.
 
 frpctl> clients
 ...
@@ -52,7 +53,7 @@ FRP Auto Deploy CLI
 ===================
 
 Role            : Client
-Project version : 1.3.1
+Project version : 1.4.0
 FRP version     : 0.70.1
 
 frpctl> status
@@ -898,6 +899,7 @@ python3 tests/test-mgmt-identity.py
 ./tests/test-guided-ux.sh
 ./tests/test-client-upgrade.sh
 ./tests/test-frpctl.sh
+./tests/test-frpctl-completion.sh
 ./tests/test-frp-update.sh
 ./tests/test-frp-server-status.sh
 ./scripts/secret-scan.sh

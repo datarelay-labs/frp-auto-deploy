@@ -36,6 +36,7 @@ jobs:
           ./tests/test-guided-ux.sh
           ./tests/test-client-upgrade.sh
           ./tests/test-frpctl.sh
+          ./tests/test-frpctl-completion.sh
       # Live distro containers are not used here: most images lack a working
       # systemd, and privileged Docker would make CI flaky. Package manager and
       # os-release behavior is covered by tests/test-client-platform.sh.

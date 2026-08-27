@@ -155,8 +155,9 @@ this is the only command you need to remember:
     sudo frpctl
 
 With no arguments and a TTY, that starts the persistent management CLI.
-Type 'help' or '?' inside the CLI for role-specific commands, or 'menu'
-for the guided numbered menu.
+Type 'help' or '?' inside the CLI for role-specific commands. Press Tab
+to complete commands (and, on a server, client names and service IDs).
+Type 'menu' for the guided numbered menu.
 
 Direct commands remain available for scripts, automation, and advanced use.
 
@@ -501,6 +502,7 @@ frpctl_help_navigation() {
 Navigation
   menu                  Open guided menu
   help, ?               Show this help
+  Tab                   Complete commands and names
   clear                 Clear the screen
   exit, quit            Exit frpctl
 EOF
@@ -581,6 +583,8 @@ frpctl_repl_help() {
     echo "  server-update         Update the tested FRP binary on this server"
     echo "  version               Show installed versions"
     echo
+    echo "Press Tab to complete commands, client names, and service IDs."
+    echo
     frpctl_help_navigation
   elif [[ "$client" == "1" ]]; then
     echo "FRP Auto Deploy — Client Commands"
@@ -623,6 +627,342 @@ frpctl_known_commands() {
       revoke revoke-client release-service release-client \
       server-status server-update
   fi
+}
+
+frpctl_completable_commands() {
+  local cmd
+  while IFS= read -r cmd; do
+    [[ -n "$cmd" ]] || continue
+    case "$cmd" in
+      q|'?') continue ;;
+    esac
+    printf '%s\n' "$cmd"
+  done < <(frpctl_known_commands)
+}
+
+# Read-only hostname list from the local registry. Never prints secret fields.
+frpctl_registry_client_names() {
+  local cfg root
+  cfg="$(frpctl_path /etc/frp-auto-deploy/config.json)"
+  root="${FRP_CTL_TEST_ROOT:-${FRP_DEPLOY_TEST_ROOT:-}}"
+  python3 - "$cfg" "$root" <<'PY' 2>/dev/null || true
+import json, sys
+from pathlib import Path
+cfg_path = Path(sys.argv[1])
+root = sys.argv[2]
+if not cfg_path.is_file():
+    raise SystemExit(0)
+try:
+    cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+except Exception:
+    raise SystemExit(0)
+if not isinstance(cfg, dict):
+    raise SystemExit(0)
+reg = Path(str(cfg.get('registry_file') or ''))
+if not str(reg):
+    raise SystemExit(0)
+if root and not str(reg).startswith(root):
+    reg = Path(root + str(reg))
+if not reg.is_file():
+    raise SystemExit(0)
+try:
+    state = json.loads(reg.read_text(encoding='utf-8'))
+except Exception:
+    raise SystemExit(0)
+if not isinstance(state, dict):
+    raise SystemExit(0)
+names = []
+for client in (state.get('clients') or {}).values():
+    if not isinstance(client, dict):
+        continue
+    host = str(client.get('hostname') or '').strip()
+    if host and '\n' not in host and '\r' not in host:
+        names.append(host)
+for name in sorted(set(names)):
+    print(name)
+PY
+}
+
+# Read-only service IDs for one client. Never prints secret fields.
+frpctl_registry_service_ids() {
+  local query="$1"
+  local cfg root
+  [[ -n "$query" ]] || return 0
+  cfg="$(frpctl_path /etc/frp-auto-deploy/config.json)"
+  root="${FRP_CTL_TEST_ROOT:-${FRP_DEPLOY_TEST_ROOT:-}}"
+  python3 - "$cfg" "$root" "$query" <<'PY' 2>/dev/null || true
+import json, sys
+from pathlib import Path
+cfg_path = Path(sys.argv[1])
+root = sys.argv[2]
+query = sys.argv[3]
+if not cfg_path.is_file():
+    raise SystemExit(0)
+try:
+    cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+except Exception:
+    raise SystemExit(0)
+if not isinstance(cfg, dict):
+    raise SystemExit(0)
+reg = Path(str(cfg.get('registry_file') or ''))
+if not str(reg):
+    raise SystemExit(0)
+if root and not str(reg).startswith(root):
+    reg = Path(root + str(reg))
+if not reg.is_file():
+    raise SystemExit(0)
+try:
+    state = json.loads(reg.read_text(encoding='utf-8'))
+except Exception:
+    raise SystemExit(0)
+if not isinstance(state, dict):
+    raise SystemExit(0)
+matches = []
+for mid, client in (state.get('clients') or {}).items():
+    if not isinstance(client, dict):
+        continue
+    host = str(client.get('hostname') or '')
+    if host == query or mid == query or str(mid).startswith(query):
+        matches.append(client)
+if len(matches) != 1:
+    raise SystemExit(0)
+services = matches[0].get('services') or {}
+if not isinstance(services, dict):
+    raise SystemExit(0)
+for sid in sorted(services):
+    sid = str(sid)
+    if sid and '\n' not in sid and '\r' not in sid:
+        print(sid)
+PY
+}
+
+frpctl_complete_arg_stage() {
+  local cmd="$1" argn="$2"
+  case "$cmd" in
+    client|client-info|revoke|revoke-client|release-client)
+      if [[ "$argn" == "1" ]]; then
+        printf '%s' "client"
+      else
+        printf '%s' "none"
+      fi
+      ;;
+    release-service)
+      if [[ "$argn" == "1" ]]; then
+        printf '%s' "client"
+      elif [[ "$argn" == "2" ]]; then
+        printf '%s' "service"
+      else
+        printf '%s' "none"
+      fi
+      ;;
+    *)
+      printf '%s' "none"
+      ;;
+  esac
+}
+
+frpctl_complete_context() {
+  local line="$1"
+  local trailing=0 lastc
+  local -a words=()
+  _FRP_CTL_COMP_CMD=""
+  _FRP_CTL_COMP_PREFIX=""
+  _FRP_CTL_COMP_STAGE="command"
+  _FRP_CTL_COMP_CLIENT=""
+  if [[ -n "$line" ]]; then
+    lastc="${line: -1}"
+    if [[ "$lastc" == " " || "$lastc" == $'\t' ]]; then
+      trailing=1
+    fi
+  fi
+  if [[ -n "${line//[[:space:]]/}" ]]; then
+    IFS=$' \t' read -r -a words <<< "$line" || true
+  fi
+  if [[ ${#words[@]} -eq 0 ]]; then
+    return 0
+  fi
+  case "${words[0]}" in
+    '!'*|shell|exec|bash|sh|system)
+      _FRP_CTL_COMP_STAGE="none"
+      _FRP_CTL_COMP_PREFIX="${words[0]}"
+      return 0
+      ;;
+  esac
+  if [[ ${#words[@]} -eq 1 && "$trailing" == "0" ]]; then
+    _FRP_CTL_COMP_PREFIX="${words[0]}"
+    return 0
+  fi
+  _FRP_CTL_COMP_CMD="${words[0]}"
+  if [[ "$trailing" == "1" ]]; then
+    _FRP_CTL_COMP_PREFIX=""
+    _FRP_CTL_COMP_STAGE="$(frpctl_complete_arg_stage "${_FRP_CTL_COMP_CMD}" "${#words[@]}")"
+    if [[ ${#words[@]} -ge 2 ]]; then
+      _FRP_CTL_COMP_CLIENT="${words[1]}"
+    fi
+    return 0
+  fi
+  _FRP_CTL_COMP_PREFIX="${words[$((${#words[@]} - 1))]}"
+  _FRP_CTL_COMP_STAGE="$(frpctl_complete_arg_stage "${_FRP_CTL_COMP_CMD}" "$((${#words[@]} - 1))")"
+  if [[ ${#words[@]} -ge 3 ]]; then
+    _FRP_CTL_COMP_CLIENT="${words[1]}"
+  fi
+}
+
+frpctl_filter_prefix() {
+  local prefix="$1" item
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    if [[ "$item" == "$prefix"* ]]; then
+      printf '%s\n' "$item"
+    fi
+  done
+}
+
+# Print matching completion candidates, one per line, sorted uniquely.
+frpctl_completion_candidates() {
+  local line="$1"
+  frpctl_complete_context "$line"
+  case "${_FRP_CTL_COMP_STAGE}" in
+    command)
+      frpctl_completable_commands | sort -u | frpctl_filter_prefix "${_FRP_CTL_COMP_PREFIX}"
+      ;;
+    client)
+      if ! frpctl_is_server; then
+        return 0
+      fi
+      frpctl_registry_client_names | sort -u | frpctl_filter_prefix "${_FRP_CTL_COMP_PREFIX}"
+      ;;
+    service)
+      if ! frpctl_is_server; then
+        return 0
+      fi
+      frpctl_registry_service_ids "${_FRP_CTL_COMP_CLIENT}" | sort -u | frpctl_filter_prefix "${_FRP_CTL_COMP_PREFIX}"
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
+frpctl_common_prefix() {
+  local prefix="$1"
+  shift || true
+  local s
+  [[ $# -gt 0 ]] || { printf '%s' "$prefix"; return 0; }
+  for s in "$@"; do
+    while [[ -n "$prefix" && "$s" != "$prefix"* ]]; do
+      prefix="${prefix%?}"
+    done
+  done
+  printf '%s' "$prefix"
+}
+
+frpctl_line_with_token() {
+  local line="$1"
+  local token="$2"
+  local add_space="${3:-1}"
+  local trailing=0 lastc i
+  local -a words=()
+  local new=""
+  if [[ -n "$line" ]]; then
+    lastc="${line: -1}"
+    if [[ "$lastc" == " " || "$lastc" == $'\t' ]]; then
+      trailing=1
+    fi
+  fi
+  if [[ -n "${line//[[:space:]]/}" ]]; then
+    IFS=$' \t' read -r -a words <<< "$line" || true
+  fi
+  if [[ ${#words[@]} -eq 0 || ( ${#words[@]} -eq 1 && "$trailing" == "0" ) ]]; then
+    new="$token"
+  elif [[ "$trailing" == "1" ]]; then
+    new="${line%"${line##*[![:space:]]}"}"
+    new="${new} ${token}"
+  else
+    new="${words[0]}"
+    if [[ ${#words[@]} -gt 1 ]]; then
+      for (( i=1; i<${#words[@]}-1; i++ )); do
+        new+=" ${words[i]}"
+      done
+      new+=" ${token}"
+    fi
+  fi
+  if [[ "$add_space" == "1" ]]; then
+    new+=" "
+  fi
+  printf '%s' "$new"
+}
+
+# Apply unique/common-prefix completion. Prints the resulting line.
+frpctl_complete_line() {
+  local line="$1"
+  local -a cands=()
+  local shared
+  mapfile -t cands < <(frpctl_completion_candidates "$line")
+  if [[ ${#cands[@]} -eq 0 ]]; then
+    printf '%s' "$line"
+    return 0
+  fi
+  if [[ ${#cands[@]} -eq 1 ]]; then
+    frpctl_line_with_token "$line" "${cands[0]}" 1
+    return 0
+  fi
+  shared="$(frpctl_common_prefix "${cands[0]}" "${cands[@]}")"
+  frpctl_complete_context "$line"
+  if [[ -n "$shared" && "$shared" != "${_FRP_CTL_COMP_PREFIX}" ]]; then
+    frpctl_line_with_token "$line" "$shared" 0
+    return 0
+  fi
+  printf '%s' "$line"
+}
+
+frpctl_readline_complete() {
+  local line="${READLINE_LINE-}"
+  local point="${READLINE_POINT-0}"
+  local -a cands=()
+  local new=""
+  if [[ "$point" != "${#line}" ]]; then
+    return 0
+  fi
+  mapfile -t cands < <(frpctl_completion_candidates "$line" || true)
+  if [[ ${#cands[@]} -eq 0 ]]; then
+    return 0
+  fi
+  if [[ ${#cands[@]} -eq 1 ]]; then
+    new="$(frpctl_complete_line "$line")"
+    READLINE_LINE="$new"
+    READLINE_POINT=${#READLINE_LINE}
+    return 0
+  fi
+  new="$(frpctl_complete_line "$line")"
+  READLINE_LINE="$new"
+  READLINE_POINT=${#READLINE_LINE}
+  printf '\n' >&2
+  printf '%s' "${cands[0]}" >&2
+  local c
+  for c in "${cands[@]:1}"; do
+    printf '  %s' "$c" >&2
+  done
+  printf '\n' >&2
+  return 0
+}
+
+frpctl_repl_enable_completion() {
+  set +o history 2>/dev/null || true
+  unset HISTFILE
+  if bind -x '"\t": frpctl_readline_complete' 2>/dev/null; then
+    bind 'set disable-completion on' 2>/dev/null || true
+    _FRP_CTL_BOUND_TAB=1
+  else
+    _FRP_CTL_BOUND_TAB=""
+  fi
+}
+
+frpctl_repl_disable_completion() {
+  if [[ "${_FRP_CTL_BOUND_TAB:-}" == "1" ]]; then
+    bind -r '\t' 2>/dev/null || true
+  fi
+  _FRP_CTL_BOUND_TAB=""
 }
 
 frpctl_edit_distance() {
@@ -867,6 +1207,8 @@ frpctl_repl_banner() {
   echo "FRP version     : $(frpctl_frp_version)"
   echo
   echo "Type 'help' or '?' for available commands."
+  echo "Press Tab to complete commands."
+  echo "On a server, Tab also completes client names and service IDs."
   echo "Type 'menu' for the guided menu."
   echo "Type 'exit' to leave."
   echo
@@ -888,9 +1230,15 @@ frpctl_repl_read_line() {
     echo "Use: frpctl <command>" >&2
     return 1
   fi
-  printf 'frpctl> '
-  if ! IFS= read -r _FRP_CTL_LINE; then
-    return 1
+  if [[ "${_FRP_CTL_BOUND_TAB:-}" == "1" ]]; then
+    if ! IFS= read -e -r -p "frpctl> " _FRP_CTL_LINE; then
+      return 1
+    fi
+  else
+    printf 'frpctl> '
+    if ! IFS= read -r _FRP_CTL_LINE; then
+      return 1
+    fi
   fi
   return 0
 }
@@ -906,10 +1254,16 @@ frpctl_repl() {
 
   # In-memory interaction only. Do not persist command history.
   unset HISTFILE
+  set +o history 2>/dev/null || true
   FRP_CTL_REPL=1
   _FRP_CTL_SHOULD_EXIT=0
   _FRP_CTL_SIGINT=0
+  _FRP_CTL_BOUND_TAB=""
   trap 'frpctl_repl_sigint' INT
+
+  if [[ -z "${FRP_CTL_TEST_INPUT:-}" && -t 0 ]]; then
+    frpctl_repl_enable_completion
+  fi
 
   frpctl_repl_banner
 
@@ -951,6 +1305,7 @@ frpctl_repl() {
   done
 
   trap - INT
+  frpctl_repl_disable_completion
   frpctl_input_cleanup
   FRP_CTL_REPL=0
   return 0

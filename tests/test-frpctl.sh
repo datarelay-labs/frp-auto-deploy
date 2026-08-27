@@ -43,7 +43,7 @@ Path(sys.argv[1]).write_text(json.dumps({
 }, indent=2, sort_keys=True) + "\n")
 PY
   cat >"$tree/etc/frp-auto-deploy/version" <<'EOF'
-PROJECT_VERSION=1.3.1
+PROJECT_VERSION=1.4.0
 FRP_VERSION=0.70.1
 EOF
 }
@@ -64,7 +64,7 @@ Path(sys.argv[1]).write_text(json.dumps({
 }, indent=2, sort_keys=True) + "\n")
 PY
   cat >"$tree/etc/frp-auto-deploy/version" <<'EOF'
-PROJECT_VERSION=1.3.1
+PROJECT_VERSION=1.4.0
 FRP_VERSION=0.70.1
 EOF
 }
@@ -194,7 +194,7 @@ export FRP_CTL_TEST_MENU=1
 run_repl "$CLIENT" "$WORKDIR/client-menu.out" menu exit || fail "client menu repl"
 unset FRP_CTL_TEST_MENU
 grep -q 'Role            : Client' "$WORKDIR/client-menu.out" || fail "client role"
-grep -q 'Project version : 1.3.1' "$WORKDIR/client-menu.out" || fail "client menu version"
+grep -q 'Project version : 1.4.0' "$WORKDIR/client-menu.out" || fail "client menu version"
 grep -q '1) Manage services' "$WORKDIR/client-menu.out" || fail "client menu manage"
 grep -q '4) Update FRP Auto Deploy' "$WORKDIR/client-menu.out" || fail "client menu update"
 [[ "$(prompt_count "$WORKDIR/client-menu.out")" -ge 2 ]] || fail "menu returns to prompt"
@@ -225,7 +225,7 @@ export FRP_CLIENT_TEST_ROOT="$CLIENT"
 run_repl "$CLIENT" "$WORKDIR/client-repl.out" status help version exit || fail "client repl"
 grep -q 'FRP Auto Deploy CLI' "$WORKDIR/client-repl.out" || fail "client repl banner"
 grep -q 'Role            : Client' "$WORKDIR/client-repl.out" || fail "client repl role"
-grep -q 'Project version : 1.3.1' "$WORKDIR/client-repl.out" || fail "client repl version"
+grep -q 'Project version : 1.4.0' "$WORKDIR/client-repl.out" || fail "client repl version"
 grep -q 'FRP version     : 0.70.1' "$WORKDIR/client-repl.out" || fail "client repl frp version"
 grep -q "Type 'help' or '?' for available commands." "$WORKDIR/client-repl.out" || fail "client repl hint"
 [[ "$(prompt_count "$WORKDIR/client-repl.out")" -ge 3 ]] || fail "client repl stays after status/help"
