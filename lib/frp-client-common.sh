@@ -13,7 +13,7 @@ FRP_CLIENT_UPGRADE_BACKUP_KEEP="${FRP_CLIENT_UPGRADE_BACKUP_KEEP:-5}"
 FRP_CLIENT_UPDATE_URL="${FRP_CLIENT_UPDATE_URL:-https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh}"
 
 # Defaults match VERSION. A sibling VERSION file overrides project/FRP versions.
-PROJECT_VERSION="${PROJECT_VERSION:-1.4.0}"
+PROJECT_VERSION="${PROJECT_VERSION:-1.5.0}"
 FRP_VERSION="${FRP_VERSION:-0.70.1}"
 _FRP_CLIENT_COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${_FRP_CLIENT_COMMON_DIR}/../VERSION" ]]; then
@@ -1637,10 +1637,9 @@ PY
 
 frp_decrypt_token() {
   local ciphertext="$1" secret="$2"
-  local token
-  token="$(printf '%s' "$ciphertext" | \
-    FRP_ENROLL_SECRET="$secret" openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
-    -md sha256 -a -A -pass env:FRP_ENROLL_SECRET 2>/dev/null || true)"
+  local token py
+  py="$(frp_mgmt_auth_py)"
+  token="$(printf '%s' "$ciphertext" | FRP_ENROLL_SECRET="$secret" python3 "$py" decrypt-token 2>/dev/null || true)"
   if [[ -z "$token" ]]; then
     echo "ERROR: failed to decrypt FRP token" >&2
     return 1

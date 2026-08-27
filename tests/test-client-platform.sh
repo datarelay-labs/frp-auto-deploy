@@ -52,7 +52,8 @@ EOF
 reset_pm_isolation() {
   unset PACKAGE_MANAGER MISSING_COMMANDS PACKAGES FRP_ARCH EXPECTED_SHA || true
   unset FRP_TEST_CMD_PATH FRP_TEST_PM_PATH FRP_TEST_UNAME_M || true
-  unset FRP_TEST_SYSTEMD_RUNTIME_DIR FRP_OS_RELEASE_FILE || true
+  unset FRP_TEST_SYSTEMD_RUNTIME_DIR FRP_OS_RELEASE_FILE FRP_DEPENDENCY_ROLE || true
+  unset FRP_TEST_SYSTEMD_VERSION || true
   PACKAGE_MANAGER=""
 }
 
@@ -140,6 +141,7 @@ expect_distro() {
 }
 
 expect_distro ubuntu ubuntu "Ubuntu 22.04"
+expect_distro ubuntu24 ubuntu "Ubuntu 24.04"
 expect_distro debian debian "Debian GNU/Linux 12"
 expect_distro rocky rocky "Rocky Linux 9"
 expect_distro almalinux almalinux "AlmaLinux 9"
@@ -349,6 +351,15 @@ reset_pm_isolation
 [[ "$(frp_package_for_command ss apt)" == iproute2 ]] || fail "ss apt -> iproute2"
 [[ "$(frp_package_for_command ss dnf)" == iproute ]] || fail "ss dnf -> iproute"
 [[ "$(frp_package_for_command ip yum)" == iproute ]] || fail "ip yum -> iproute"
+reset_pm_isolation
+FRP_DEPENDENCY_ROLE=client
+frp_required_commands | grep -qx curl || fail "client requires curl"
+if frp_required_commands | grep -qx ss; then
+  fail "client should not require ss"
+fi
+FRP_DEPENDENCY_ROLE=server
+frp_required_commands | grep -qx ss || fail "server requires ss"
+frp_required_commands | grep -qx python3 || fail "server requires python3"
 pass "package name mapping"
 
 # Host isolation: tests must not have invoked real apt-get/dnf/yum via the helpers

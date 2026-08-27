@@ -141,6 +141,42 @@ def _run_openssl(args, input_bytes=None, extra_env=None):
     return proc.stdout
 
 
+# OpenSSL `enc -pbkdf2 -iter 200000 -md sha256` compatible wrap. AES is still
+# performed by openssl enc -K/-iv so OpenSSL 1.0.2 (Amazon Linux 2) works.
+OPENSSL_ENC_MAGIC = b'Salted__'
+OPENSSL_PBKDF2_ITER = 200000
+
+
+def _aes256_cbc(data, key, iv, encrypt):
+    args = ['enc', '-aes-256-cbc', '-K', key.hex(), '-iv', iv.hex()]
+    if not encrypt:
+        args.append('-d')
+    return _run_openssl(args, input_bytes=data)
+
+
+def encrypt_token_pbkdf2(token, secret, iterations=OPENSSL_PBKDF2_ITER):
+    if isinstance(token, str):
+        token = token.encode('utf-8')
+    if isinstance(secret, str):
+        secret = secret.encode('utf-8')
+    salt = os.urandom(8)
+    dk = hashlib.pbkdf2_hmac('sha256', secret, salt, iterations, dklen=48)
+    ct = _aes256_cbc(token, dk[:32], dk[32:], True)
+    return base64.b64encode(OPENSSL_ENC_MAGIC + salt + ct).decode('ascii')
+
+
+def decrypt_token_pbkdf2(ciphertext, secret, iterations=OPENSSL_PBKDF2_ITER):
+    if isinstance(secret, str):
+        secret = secret.encode('utf-8')
+    raw = base64.b64decode(str(ciphertext or '').encode('ascii'))
+    if not raw.startswith(OPENSSL_ENC_MAGIC) or len(raw) < 16:
+        raise ValueError('invalid token ciphertext')
+    salt, ct = raw[8:16], raw[16:]
+    dk = hashlib.pbkdf2_hmac('sha256', secret, salt, iterations, dklen=48)
+    pt = _aes256_cbc(ct, dk[:32], dk[32:], False)
+    return pt.decode('utf-8')
+
+
 def generate_keypair(key_path, pub_path):
     """Create an ECDSA P-256 key pair atomically. Never overwrites key_path."""
     key_path = Path(key_path)
@@ -216,7 +252,9 @@ def canonicalize_pubkey_pem(pem):
 def _assert_p256_public(pub_path):
     text = _run_openssl(['ec', '-pubin', '-in', str(pub_path), '-text', '-noout']).decode('utf-8')
     lowered = text.lower()
-    if 'private-key' in lowered or 'priv:' in lowered:
+    # OpenSSL 1.0.2 labels EC key size as "Private-Key: (256 bit)" even for
+    # public-only PEMs. Reject only when the private scalar is present.
+    if '\npriv:' in lowered or lowered.startswith('priv:'):
         raise ValueError('public key rejected')
     if 'nist curve: p-256' not in lowered and 'asn1 oid: prime256v1' not in lowered:
         raise ValueError('management public key must be ECDSA P-256')
@@ -347,6 +385,8 @@ def parse_args(argv=None):
     chk.add_argument('key')
     der = sub.add_parser('derive-mac')
     der.add_argument('machine_id')
+    sub.add_parser('encrypt-token')
+    sub.add_parser('decrypt-token')
     return parser.parse_args(argv)
 
 
@@ -381,6 +421,17 @@ def main(argv=None):
             print('ERROR: MGMT_ENROLL_SECRET is not set', file=sys.stderr)
             return 1
         sys.stdout.write(derive_mac_key(secret, args.machine_id))
+        return 0
+    if args.cmd in ('encrypt-token', 'decrypt-token'):
+        secret = os.environ.get('FRP_ENROLL_SECRET', '')
+        if not secret:
+            print('ERROR: FRP_ENROLL_SECRET is not set', file=sys.stderr)
+            return 1
+        payload = sys.stdin.read()
+        if args.cmd == 'encrypt-token':
+            sys.stdout.write(encrypt_token_pbkdf2(payload, secret))
+        else:
+            sys.stdout.write(decrypt_token_pbkdf2(payload.strip(), secret))
         return 0
     return 2
 

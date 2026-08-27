@@ -10,6 +10,8 @@ Restart=always
 RestartSec=5
 User=root
 Group=root
+# Hardening below requires systemd 232+. The installer strips these lines on
+# older systemd (Amazon Linux 2 is 219) rather than failing unit load.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

@@ -102,6 +102,47 @@ class Env:
 
 
 def main():
+    secret = 'unit-test-enroll-secret'
+    token = 'frp-token-value-do-not-use'
+    wrapped = MOD.MGMT.encrypt_token_pbkdf2(token, secret)
+    if token in wrapped:
+        fail('python wrap leaked token')
+    if MOD.MGMT.decrypt_token_pbkdf2(wrapped, secret) != token:
+        fail('python wrap round-trip')
+    pass_('python PBKDF2 token wrap')
+
+    import subprocess
+    probe = subprocess.run(
+        ['openssl', 'enc', '-aes-256-cbc', '-pbkdf2', '-pass', 'pass:x', '-a'],
+        input=b'x', stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    if probe.returncode == 0:
+        env = dict(**{k: v for k, v in __import__('os').environ.items()}, FRP_ENROLL_SECRET=secret)
+        enc = subprocess.run(
+            [
+                'openssl', 'enc', '-aes-256-cbc', '-pbkdf2', '-iter', '200000',
+                '-md', 'sha256', '-salt', '-a', '-A', '-pass', 'env:FRP_ENROLL_SECRET',
+            ],
+            input=token.encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=env, check=True,
+        )
+        openssl_ct = enc.stdout.decode().strip()
+        if MOD.MGMT.decrypt_token_pbkdf2(openssl_ct, secret) != token:
+            fail('decrypt openssl -pbkdf2 ciphertext')
+        dec = subprocess.run(
+            [
+                'openssl', 'enc', '-d', '-aes-256-cbc', '-pbkdf2', '-iter', '200000',
+                '-md', 'sha256', '-a', '-A', '-pass', 'env:FRP_ENROLL_SECRET',
+            ],
+            input=wrapped.encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=env, check=True,
+        )
+        if dec.stdout.decode() != token:
+            fail('openssl decrypt python ciphertext')
+        pass_('openssl PBKDF2 interop')
+    else:
+        pass_('openssl PBKDF2 interop skipped (unsupported)')
+
     env = Env()
     try:
         code, result = env.enroll(signature='deadbeef')

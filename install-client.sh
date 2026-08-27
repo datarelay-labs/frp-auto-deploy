@@ -2,15 +2,12 @@
 set -euo pipefail
 
 _FRP_INSTALL_CLIENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f "${_FRP_INSTALL_CLIENT_DIR}/VERSION" ]]; then
-  # shellcheck disable=SC1091
-  . "${_FRP_INSTALL_CLIENT_DIR}/VERSION"
-fi
-PROJECT_VERSION="${PROJECT_VERSION:-1.4.0}"
-FRP_VERSION="${FRP_VERSION:-0.70.1}"
-FRP_SHA256_AMD64="333da23d1b9009d7c01638e9ba38cf4600f7d37d393f854e96ee1396adefa9a6"
-FRP_SHA256_ARM64="3990f396a9a490ee7f0e5f355287750ed41520064ed999eab443b5e9a78d773d"
-
+[[ -f "${_FRP_INSTALL_CLIENT_DIR}/lib/frp-common.sh" ]] || {
+  echo "ERROR: missing project file: ${_FRP_INSTALL_CLIENT_DIR}/lib/frp-common.sh" >&2
+  exit 1
+}
+# shellcheck source=lib/frp-common.sh
+. "${_FRP_INSTALL_CLIENT_DIR}/lib/frp-common.sh"
 # shellcheck source=lib/frp-client-common.sh
 . "${_FRP_INSTALL_CLIENT_DIR}/lib/frp-client-common.sh"
 
@@ -40,256 +37,6 @@ frp_require_allocator_url() {
     exit 1
   fi
   ALLOCATOR_URL="$url"
-}
-
-frp_os_release_file() {
-  printf '%s' "${FRP_OS_RELEASE_FILE:-/etc/os-release}"
-}
-
-frp_os_release_value() {
-  local key="$1" file="$2" line value
-  [[ -r "$file" ]] || return 0
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    case "$line" in
-      "${key}="*)
-        value="${line#*=}"
-        if [[ "$value" == \"*\" ]]; then
-          value="${value#\"}"
-          value="${value%\"}"
-        elif [[ "$value" == \'*\' ]]; then
-          value="${value#\'}"
-          value="${value%\'}"
-        fi
-        printf '%s' "$value"
-        return 0
-        ;;
-    esac
-  done <"$file"
-}
-
-frp_detect_platform() {
-  local file pretty name
-  DISTRO_ID="unknown"
-  DISTRO_NAME="Linux"
-  DISTRO_VERSION=""
-  file="$(frp_os_release_file)"
-  if [[ -r "$file" ]]; then
-    DISTRO_ID="$(frp_os_release_value ID "$file")"
-    DISTRO_ID="${DISTRO_ID:-unknown}"
-    pretty="$(frp_os_release_value PRETTY_NAME "$file")"
-    name="$(frp_os_release_value NAME "$file")"
-    DISTRO_NAME="${pretty:-${name:-Linux}}"
-    DISTRO_VERSION="$(frp_os_release_value VERSION_ID "$file")"
-  fi
-}
-
-frp_detect_architecture() {
-  local machine
-  machine="${FRP_TEST_UNAME_M:-$(uname -m)}"
-  case "$machine" in
-    x86_64)
-      FRP_ARCH=amd64
-      EXPECTED_SHA="$FRP_SHA256_AMD64"
-      ;;
-    aarch64|arm64)
-      FRP_ARCH=arm64
-      EXPECTED_SHA="$FRP_SHA256_ARM64"
-      ;;
-    *)
-      echo "ERROR: unsupported architecture: ${machine}" >&2
-      return 1
-      ;;
-  esac
-}
-
-frp_command_exists() {
-  local cmd="$1"
-  if [[ -n "${FRP_TEST_CMD_PATH:-}" ]]; then
-    PATH="${FRP_TEST_CMD_PATH}" command -v "$cmd" >/dev/null 2>&1
-  else
-    command -v "$cmd" >/dev/null 2>&1
-  fi
-}
-
-frp_package_manager_exists() {
-  local cmd="$1"
-  if [[ -n "${FRP_TEST_PM_PATH:-}" ]]; then
-    PATH="${FRP_TEST_PM_PATH}" command -v "$cmd" >/dev/null 2>&1
-  else
-    command -v "$cmd" >/dev/null 2>&1
-  fi
-}
-
-frp_package_manager_bin() {
-  local cmd="$1"
-  if [[ -n "${FRP_TEST_PM_PATH:-}" ]]; then
-    PATH="${FRP_TEST_PM_PATH}" command -v "$cmd"
-  else
-    command -v "$cmd"
-  fi
-}
-
-frp_detect_package_manager() {
-  PACKAGE_MANAGER=""
-  if frp_package_manager_exists dnf; then
-    PACKAGE_MANAGER=dnf
-  elif frp_package_manager_exists yum; then
-    PACKAGE_MANAGER=yum
-  elif frp_package_manager_exists apt-get; then
-    PACKAGE_MANAGER=apt
-  fi
-}
-
-frp_systemd_runtime_dir() {
-  printf '%s' "${FRP_TEST_SYSTEMD_RUNTIME_DIR:-/run/systemd/system}"
-}
-
-frp_systemd_usable() {
-  [[ -d "$(frp_systemd_runtime_dir)" ]]
-}
-
-frp_require_systemd() {
-  if ! frp_command_exists systemctl; then
-    echo "ERROR: this release requires a systemd-based Linux distribution." >&2
-    return 1
-  fi
-  if ! frp_systemd_usable; then
-    echo "ERROR: this release requires a systemd-based Linux distribution." >&2
-    return 1
-  fi
-}
-
-frp_print_detected_linux() {
-  local pm="${PACKAGE_MANAGER:-none}"
-  local init="unknown"
-  if frp_command_exists systemctl && frp_systemd_usable; then
-    init="systemd"
-  fi
-  echo "Detected Linux:"
-  echo "  Distribution : ${DISTRO_NAME}"
-  echo "  Package mgr  : ${pm}"
-  echo "  Architecture : ${FRP_ARCH}"
-  echo "  Init system  : ${init}"
-}
-
-frp_required_commands() {
-  printf '%s\n' curl openssl python3 tar sha256sum timeout hostname install
-}
-
-frp_collect_missing_commands() {
-  local cmd
-  MISSING_COMMANDS=()
-  while IFS= read -r cmd; do
-    [[ -n "$cmd" ]] || continue
-    if ! frp_command_exists "$cmd"; then
-      MISSING_COMMANDS+=("$cmd")
-    fi
-  done < <(frp_required_commands)
-}
-
-frp_package_for_command() {
-  local cmd="$1" pm="$2"
-  case "$cmd" in
-    curl) printf 'curl' ;;
-    openssl) printf 'openssl' ;;
-    python3) printf 'python3' ;;
-    tar) printf 'tar' ;;
-    sha256sum|timeout|install) printf 'coreutils' ;;
-    hostname) printf 'hostname' ;;
-    ss|ip)
-      if [[ "$pm" == apt ]]; then
-        printf 'iproute2'
-      else
-        printf 'iproute'
-      fi
-      ;;
-    *)
-      echo "ERROR: no package mapping for command: ${cmd}" >&2
-      return 1
-      ;;
-  esac
-}
-
-frp_packages_for_missing() {
-  local pm="$1" cmd pkg existing existing_pkg
-  PACKAGES=(ca-certificates)
-  for cmd in "${MISSING_COMMANDS[@]}"; do
-    pkg="$(frp_package_for_command "$cmd" "$pm")"
-    existing=0
-    for existing_pkg in "${PACKAGES[@]}"; do
-      if [[ "$existing_pkg" == "$pkg" ]]; then
-        existing=1
-        break
-      fi
-    done
-    if (( existing == 0 )); then
-      PACKAGES+=("$pkg")
-    fi
-  done
-}
-
-install_dependencies_apt() {
-  local bin
-  bin="$(frp_package_manager_bin apt-get)"
-  export DEBIAN_FRONTEND=noninteractive
-  "$bin" update
-  "$bin" install -y --no-install-recommends "$@"
-}
-
-install_dependencies_dnf() {
-  local bin
-  bin="$(frp_package_manager_bin dnf)"
-  "$bin" install -y "$@"
-}
-
-install_dependencies_yum() {
-  local bin
-  bin="$(frp_package_manager_bin yum)"
-  "$bin" install -y "$@"
-}
-
-frp_print_missing_tools_error() {
-  local cmd
-  echo "ERROR: required tools are missing:" >&2
-  for cmd in "${MISSING_COMMANDS[@]}"; do
-    echo "  ${cmd}" >&2
-  done
-  echo >&2
-  echo "Automatic dependency installation supports apt, dnf, and yum." >&2
-  echo "Install the missing tools manually and run the installer again." >&2
-}
-
-ensure_dependencies() {
-  frp_collect_missing_commands
-  if ((${#MISSING_COMMANDS[@]} == 0)); then
-    return 0
-  fi
-  if [[ -z "${PACKAGE_MANAGER:-}" ]]; then
-    frp_detect_package_manager
-  fi
-  if [[ -z "${PACKAGE_MANAGER:-}" ]]; then
-    frp_print_missing_tools_error
-    return 1
-  fi
-  frp_packages_for_missing "$PACKAGE_MANAGER"
-  case "$PACKAGE_MANAGER" in
-    apt) install_dependencies_apt "${PACKAGES[@]}" ;;
-    dnf) install_dependencies_dnf "${PACKAGES[@]}" ;;
-    yum) install_dependencies_yum "${PACKAGES[@]}" ;;
-    *)
-      echo "ERROR: unsupported package manager: ${PACKAGE_MANAGER}" >&2
-      return 1
-      ;;
-  esac
-  frp_collect_missing_commands
-  if ((${#MISSING_COMMANDS[@]} > 0)); then
-    echo "ERROR: missing required command after dependency installation:" >&2
-    local cmd
-    for cmd in "${MISSING_COMMANDS[@]}"; do
-      echo "  ${cmd}" >&2
-    done
-    return 1
-  fi
 }
 
 menu_add_service() {
@@ -493,12 +240,15 @@ frp_client_main() {
   frp_detect_architecture || exit 1
 
   if [[ -z "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
+    frp_require_bash || exit 1
     frp_detect_platform
     frp_detect_package_manager
     frp_print_detected_linux
     echo
     frp_require_systemd || exit 1
+    FRP_DEPENDENCY_ROLE=client
     ensure_dependencies || exit 1
+    frp_require_python || exit 1
   fi
 
   frp_ux_intro
@@ -535,7 +285,7 @@ frp_client_main() {
     chmod 600 "${etc_frp}/client-id"
   fi
 
-  HOSTNAME_VALUE="${FRP_TEST_HOSTNAME:-$(hostname -s)}"
+  HOSTNAME_VALUE="$(frp_short_hostname)"
 
   if ! frp_identity_ensure; then
     exit 1

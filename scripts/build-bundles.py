@@ -45,6 +45,7 @@ lines.append('exec "$TMP/install-server.sh" "$@"')
 client_files=[
  'VERSION',
  'install-client.sh',
+ 'lib/frp-common.sh',
  'lib/frp-client-common.sh',
  'lib/frp_mgmt_auth.py',
  'tools/frp-client',

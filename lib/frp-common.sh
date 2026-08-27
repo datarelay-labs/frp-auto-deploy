@@ -8,7 +8,7 @@ fi
 FRP_COMMON_LOADED=1
 
 # Defaults match VERSION. A sibling VERSION file overrides project/FRP versions.
-PROJECT_VERSION="${PROJECT_VERSION:-1.4.0}"
+PROJECT_VERSION="${PROJECT_VERSION:-1.5.0}"
 FRP_VERSION="${FRP_VERSION:-0.70.1}"
 FRP_SHA256_AMD64="${FRP_SHA256_AMD64:-333da23d1b9009d7c01638e9ba38cf4600f7d37d393f854e96ee1396adefa9a6}"
 FRP_SHA256_ARM64="${FRP_SHA256_ARM64:-3990f396a9a490ee7f0e5f355287750ed41520064ed999eab443b5e9a78d773d}"
@@ -40,14 +40,26 @@ frp_path() {
 }
 
 frp_detect_arch() {
-  case "$(uname -m)" in
-    x86_64) FRP_ARCH=amd64 ;;
-    aarch64|arm64) FRP_ARCH=arm64 ;;
+  local machine
+  machine="${FRP_TEST_UNAME_M:-$(uname -m)}"
+  case "$machine" in
+    x86_64)
+      FRP_ARCH=amd64
+      EXPECTED_SHA="${FRP_SHA256_AMD64}"
+      ;;
+    aarch64|arm64)
+      FRP_ARCH=arm64
+      EXPECTED_SHA="${FRP_SHA256_ARM64}"
+      ;;
     *)
-      echo "ERROR: unsupported architecture: $(uname -m)" >&2
+      echo "ERROR: unsupported architecture: ${machine}" >&2
       return 1
       ;;
   esac
+}
+
+frp_detect_architecture() {
+  frp_detect_arch
 }
 
 frp_checksum_for() {
@@ -331,4 +343,361 @@ frp_has_disk_kb() {
     return 0
   fi
   [[ "$avail" -ge "$need_kb" ]]
+}
+
+# ---------------------------------------------------------------------------
+# Cross-distro host detection (capability-based; not distro-id switches)
+# ---------------------------------------------------------------------------
+
+FRP_PYTHON_MIN_MAJOR=3
+FRP_PYTHON_MIN_MINOR=7
+FRP_BASH_MIN_MAJOR=4
+FRP_BASH_MIN_MINOR=2
+# systemd 232 introduced ProtectSystem=strict and ReadWritePaths.
+FRP_SYSTEMD_HARDENING_MIN=232
+
+frp_os_release_file() {
+  printf '%s' "${FRP_OS_RELEASE_FILE:-/etc/os-release}"
+}
+
+frp_os_release_value() {
+  local key="$1" file="$2" line value
+  [[ -r "$file" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      "${key}="*)
+        value="${line#*=}"
+        if [[ "$value" == \"*\" ]]; then
+          value="${value#\"}"
+          value="${value%\"}"
+        elif [[ "$value" == \'*\' ]]; then
+          value="${value#\'}"
+          value="${value%\'}"
+        fi
+        printf '%s' "$value"
+        return 0
+        ;;
+    esac
+  done <"$file"
+}
+
+frp_detect_platform() {
+  local file pretty name
+  DISTRO_ID="unknown"
+  DISTRO_NAME="Linux"
+  DISTRO_VERSION=""
+  file="$(frp_os_release_file)"
+  if [[ -r "$file" ]]; then
+    DISTRO_ID="$(frp_os_release_value ID "$file")"
+    DISTRO_ID="${DISTRO_ID:-unknown}"
+    pretty="$(frp_os_release_value PRETTY_NAME "$file")"
+    name="$(frp_os_release_value NAME "$file")"
+    DISTRO_NAME="${pretty:-${name:-Linux}}"
+    DISTRO_VERSION="$(frp_os_release_value VERSION_ID "$file")"
+  fi
+}
+
+frp_command_exists() {
+  local cmd="$1"
+  if [[ -n "${FRP_TEST_CMD_PATH:-}" ]]; then
+    PATH="${FRP_TEST_CMD_PATH}" command -v "$cmd" >/dev/null 2>&1
+  else
+    command -v "$cmd" >/dev/null 2>&1
+  fi
+}
+
+frp_invoke() {
+  local cmd="$1"
+  shift
+  if [[ -n "${FRP_TEST_CMD_PATH:-}" ]]; then
+    PATH="${FRP_TEST_CMD_PATH}${PATH:+:$PATH}" command "$cmd" "$@"
+  else
+    command "$cmd" "$@"
+  fi
+}
+
+frp_package_manager_exists() {
+  local cmd="$1"
+  if [[ -n "${FRP_TEST_PM_PATH:-}" ]]; then
+    PATH="${FRP_TEST_PM_PATH}" command -v "$cmd" >/dev/null 2>&1
+  else
+    command -v "$cmd" >/dev/null 2>&1
+  fi
+}
+
+frp_package_manager_bin() {
+  local cmd="$1"
+  if [[ -n "${FRP_TEST_PM_PATH:-}" ]]; then
+    PATH="${FRP_TEST_PM_PATH}" command -v "$cmd"
+  else
+    command -v "$cmd"
+  fi
+}
+
+frp_detect_package_manager() {
+  PACKAGE_MANAGER=""
+  if frp_package_manager_exists dnf; then
+    PACKAGE_MANAGER=dnf
+  elif frp_package_manager_exists yum; then
+    PACKAGE_MANAGER=yum
+  elif frp_package_manager_exists apt-get; then
+    PACKAGE_MANAGER=apt
+  fi
+}
+
+frp_systemd_runtime_dir() {
+  printf '%s' "${FRP_TEST_SYSTEMD_RUNTIME_DIR:-/run/systemd/system}"
+}
+
+frp_systemd_usable() {
+  [[ -d "$(frp_systemd_runtime_dir)" ]]
+}
+
+frp_require_systemd() {
+  if ! frp_command_exists systemctl; then
+    echo "ERROR: this release requires a systemd-based Linux distribution." >&2
+    return 1
+  fi
+  if ! frp_systemd_usable; then
+    echo "ERROR: this release requires a systemd-based Linux distribution." >&2
+    return 1
+  fi
+}
+
+frp_systemd_version() {
+  local v="${FRP_TEST_SYSTEMD_VERSION:-}"
+  if [[ -n "$v" ]]; then
+    printf '%s' "$v"
+    return 0
+  fi
+  if ! frp_command_exists systemctl; then
+    return 0
+  fi
+  frp_invoke systemctl --version 2>/dev/null | awk 'NR==1 {print $2; exit}'
+}
+
+frp_systemd_supports_service_hardening() {
+  local v
+  v="$(frp_systemd_version)"
+  if [[ ! "$v" =~ ^[0-9]+$ ]]; then
+    return 0
+  fi
+  [[ "$v" -ge "$FRP_SYSTEMD_HARDENING_MIN" ]]
+}
+
+# Strip directives that systemd 219 (Amazon Linux 2) cannot honor.
+# Unknown ProtectSystem=strict values can fail unit load on old systemd.
+frp_write_compatible_systemd_unit() {
+  local src="$1" dest="$2"
+  local tmp
+  if frp_systemd_supports_service_hardening; then
+    install -m 0644 "$src" "$dest"
+    return 0
+  fi
+  tmp="$(mktemp)"
+  grep -vE '^(NoNewPrivileges|ProtectSystem|ReadWritePaths)=' "$src" >"$tmp"
+  install -m 0644 "$tmp" "$dest"
+  rm -f "$tmp"
+}
+
+frp_print_detected_linux() {
+  local pm="${PACKAGE_MANAGER:-none}"
+  local init="unknown"
+  if frp_command_exists systemctl && frp_systemd_usable; then
+    init="systemd"
+  fi
+  echo "Detected Linux:"
+  echo "  Distribution : ${DISTRO_NAME}"
+  echo "  Package mgr  : ${pm}"
+  echo "  Architecture : ${FRP_ARCH:-unknown}"
+  echo "  Init system  : ${init}"
+}
+
+frp_require_bash() {
+  if (( BASH_VERSINFO[0] < FRP_BASH_MIN_MAJOR || \
+        (BASH_VERSINFO[0] == FRP_BASH_MIN_MAJOR && BASH_VERSINFO[1] < FRP_BASH_MIN_MINOR) )); then
+    echo "ERROR: Bash ${FRP_BASH_MIN_MAJOR}.${FRP_BASH_MIN_MINOR} or newer is required (found ${BASH_VERSION})." >&2
+    return 1
+  fi
+}
+
+frp_require_python() {
+  if ! frp_command_exists python3; then
+    echo "ERROR: python3 ${FRP_PYTHON_MIN_MAJOR}.${FRP_PYTHON_MIN_MINOR} or newer is required." >&2
+    return 1
+  fi
+  if ! frp_invoke python3 -c "import sys; raise SystemExit(0 if sys.version_info >= (${FRP_PYTHON_MIN_MAJOR}, ${FRP_PYTHON_MIN_MINOR}) else 1)"; then
+    echo "ERROR: python3 ${FRP_PYTHON_MIN_MAJOR}.${FRP_PYTHON_MIN_MINOR} or newer is required." >&2
+    echo "This host's python3 is too old for frp-auto-deploy." >&2
+    return 1
+  fi
+}
+
+frp_required_commands() {
+  local role="${FRP_DEPENDENCY_ROLE:-client}"
+  printf '%s\n' curl openssl python3 tar sha256sum timeout hostname install
+  if [[ "$role" == server ]]; then
+    printf '%s\n' ss
+  fi
+}
+
+frp_collect_missing_commands() {
+  local cmd
+  MISSING_COMMANDS=()
+  while IFS= read -r cmd; do
+    [[ -n "$cmd" ]] || continue
+    if ! frp_command_exists "$cmd"; then
+      MISSING_COMMANDS+=("$cmd")
+    fi
+  done < <(frp_required_commands)
+}
+
+frp_package_for_command() {
+  local cmd="$1" pm="$2"
+  case "$cmd" in
+    curl) printf 'curl' ;;
+    openssl) printf 'openssl' ;;
+    python3) printf 'python3' ;;
+    tar) printf 'tar' ;;
+    sha256sum|timeout|install) printf 'coreutils' ;;
+    hostname) printf 'hostname' ;;
+    ss|ip)
+      if [[ "$pm" == apt ]]; then
+        printf 'iproute2'
+      else
+        printf 'iproute'
+      fi
+      ;;
+    *)
+      echo "ERROR: no package mapping for command: ${cmd}" >&2
+      return 1
+      ;;
+  esac
+}
+
+frp_packages_for_missing() {
+  local pm="$1" cmd pkg existing existing_pkg
+  PACKAGES=(ca-certificates)
+  for cmd in "${MISSING_COMMANDS[@]}"; do
+    pkg="$(frp_package_for_command "$cmd" "$pm")"
+    existing=0
+    for existing_pkg in "${PACKAGES[@]}"; do
+      if [[ "$existing_pkg" == "$pkg" ]]; then
+        existing=1
+        break
+      fi
+    done
+    if (( existing == 0 )); then
+      PACKAGES+=("$pkg")
+    fi
+  done
+}
+
+install_dependencies_apt() {
+  local bin
+  bin="$(frp_package_manager_bin apt-get)"
+  export DEBIAN_FRONTEND=noninteractive
+  "$bin" update
+  "$bin" install -y --no-install-recommends "$@"
+}
+
+install_dependencies_dnf() {
+  local bin
+  bin="$(frp_package_manager_bin dnf)"
+  "$bin" install -y "$@"
+}
+
+install_dependencies_yum() {
+  local bin
+  bin="$(frp_package_manager_bin yum)"
+  "$bin" install -y "$@"
+}
+
+frp_print_missing_tools_error() {
+  local cmd
+  echo "ERROR: required tools are missing:" >&2
+  for cmd in "${MISSING_COMMANDS[@]}"; do
+    echo "  ${cmd}" >&2
+  done
+  echo >&2
+  echo "Automatic dependency installation supports apt, dnf, and yum." >&2
+  echo "Install the missing tools manually and run the installer again." >&2
+}
+
+ensure_dependencies() {
+  frp_collect_missing_commands
+  if ((${#MISSING_COMMANDS[@]} == 0)); then
+    return 0
+  fi
+  if [[ -z "${PACKAGE_MANAGER:-}" ]]; then
+    frp_detect_package_manager
+  fi
+  if [[ -z "${PACKAGE_MANAGER:-}" ]]; then
+    frp_print_missing_tools_error
+    return 1
+  fi
+  frp_packages_for_missing "$PACKAGE_MANAGER"
+  case "$PACKAGE_MANAGER" in
+    apt) install_dependencies_apt "${PACKAGES[@]}" ;;
+    dnf) install_dependencies_dnf "${PACKAGES[@]}" ;;
+    yum) install_dependencies_yum "${PACKAGES[@]}" ;;
+    *)
+      echo "ERROR: unsupported package manager: ${PACKAGE_MANAGER}" >&2
+      return 1
+      ;;
+  esac
+  frp_collect_missing_commands
+  if ((${#MISSING_COMMANDS[@]} > 0)); then
+    echo "ERROR: missing required command after dependency installation:" >&2
+    local cmd
+    for cmd in "${MISSING_COMMANDS[@]}"; do
+      echo "  ${cmd}" >&2
+    done
+    return 1
+  fi
+}
+
+frp_detect_internal_ip() {
+  local ip=""
+  if frp_command_exists hostname; then
+    ip="$(frp_invoke hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  fi
+  if [[ -z "$ip" ]] && frp_command_exists ip; then
+    ip="$(frp_invoke ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1 || true)"
+  fi
+  printf '%s' "$ip"
+}
+
+frp_short_hostname() {
+  local h=""
+  if [[ -n "${FRP_TEST_HOSTNAME:-}" ]]; then
+    printf '%s' "$FRP_TEST_HOSTNAME"
+    return 0
+  fi
+  if frp_command_exists hostname; then
+    h="$(frp_invoke hostname -s 2>/dev/null || frp_invoke hostname 2>/dev/null || true)"
+  fi
+  if [[ -z "$h" ]]; then
+    h="$(uname -n 2>/dev/null || true)"
+  fi
+  h="${h%%.*}"
+  printf '%s' "$h"
+}
+
+# Parse `ss -lnt` with or without -H (Amazon Linux 2 iproute may lack --no-header).
+frp_listening_tcp_ports_in_range() {
+  local start="$1" end="$2" raw=""
+  if ! frp_command_exists ss; then
+    return 0
+  fi
+  raw="$(frp_invoke ss -H -lnt 2>/dev/null || frp_invoke ss -lnt 2>/dev/null || true)"
+  printf '%s\n' "$raw" | awk -v s="$start" -v e="$end" '
+    $1 ~ /^(State|Netid)$/ { next }
+    {
+      p=$4
+      gsub(/\]$/, "", p)
+      sub(/^.*:/, "", p)
+      if (p ~ /^[0-9]+$/ && p+0>=s && p+0<=e) print p
+    }
+  ' | sort -nu | paste -sd, - 2>/dev/null || true
 }

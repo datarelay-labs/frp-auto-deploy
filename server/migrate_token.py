@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 """Migrate or preserve the FRP server authentication token without printing it."""
+import sys
+if sys.version_info < (3, 7):
+    sys.stderr.write('ERROR: python 3.7 or newer is required\n')
+    raise SystemExit(1)
 import argparse
 import hashlib
 import json

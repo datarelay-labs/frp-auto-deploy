@@ -28,6 +28,7 @@ jobs:
           ./tests/test-client-config.sh
           ./tests/test-client-allocator-url.sh
           ./tests/test-client-platform.sh
+          ./tests/test-portability.sh
           ./tests/test-server-install-config.sh
           ./tests/test-allocator-ready.sh
           ./tests/test-create-client.sh
@@ -37,9 +38,8 @@ jobs:
           ./tests/test-client-upgrade.sh
           ./tests/test-frpctl.sh
           ./tests/test-frpctl-completion.sh
-      # Live distro containers are not used here: most images lack a working
-      # systemd, and privileged Docker would make CI flaky. Package manager and
-      # os-release behavior is covered by tests/test-client-platform.sh.
+      # Live distro containers cannot validate systemd unless PID 1 is systemd.
+      # Package install + Bash/Python/CLI checks run in a separate matrix job.
       - name: FRP update regression tests
         run: |
           ./tests/test-frp-update.sh
@@ -52,3 +52,27 @@ jobs:
           git diff --exit-code dist/
       - name: Whitespace
         run: git diff --check HEAD
+
+  portability-containers:
+    name: distro ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - ubuntu:22.04
+          - ubuntu:24.04
+          - rockylinux:9
+          - almalinux:9
+          - amazonlinux:2023
+          - amazonlinux:2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Container package and CLI portability
+        run: |
+          docker run --rm \
+            -e PYTHONDONTWRITEBYTECODE=1 \
+            -v "$PWD:/src:ro" \
+            ${{ matrix.image }} \
+            bash /src/tests/run-portability-container.sh
+        # Does not start systemd. SYSTEMD_SMOKE remains NOT_TESTED for these images.

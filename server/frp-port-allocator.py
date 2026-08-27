@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+import sys
+if sys.version_info < (3, 7):
+    sys.stderr.write('ERROR: python 3.7 or newer is required\n')
+    raise SystemExit(1)
 import argparse
 import hashlib
 import hmac
@@ -131,20 +135,7 @@ def port_is_available(port):
 
 
 def encrypt_token(token, secret):
-    env = os.environ.copy()
-    env['FRP_ENROLL_SECRET'] = secret
-    proc = subprocess.run(
-        [
-            'openssl', 'enc', '-aes-256-cbc', '-pbkdf2', '-iter', '200000',
-            '-md', 'sha256', '-salt', '-a', '-A', '-pass', 'env:FRP_ENROLL_SECRET'
-        ],
-        input=token.encode(),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=env,
-        check=True,
-    )
-    return proc.stdout.decode().strip()
+    return MGMT.encrypt_token_pbkdf2(token, secret)
 
 
 def coerce_port(value):

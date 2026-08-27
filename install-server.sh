@@ -199,14 +199,17 @@ frp_wait_allocator_ready() {
   done
 }
 
-ensure_deps() {
-  if ! command -v apt-get >/dev/null 2>&1; then
-    echo "ERROR: automatic server installation currently supports Debian/Ubuntu only" >&2
-    exit 1
-  fi
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq
-  apt-get install -y -qq curl openssl python3 ca-certificates tar coreutils iproute2
+frp_server_prepare_host() {
+  frp_require_bash || exit 1
+  frp_detect_architecture || exit 1
+  frp_detect_platform
+  frp_detect_package_manager
+  frp_print_detected_linux
+  echo
+  frp_require_systemd || exit 1
+  FRP_DEPENDENCY_ROLE=server
+  ensure_dependencies || exit 1
+  frp_require_python || exit 1
 }
 
 load_existing_server_config() {
@@ -354,23 +357,21 @@ frp_server_main() {
     exit 1
   fi
 
-  ensure_deps
+  frp_server_prepare_host
 
   DETECTED_PUBLIC_IP="$(curl -4 -fsS --max-time 5 https://ifconfig.me 2>/dev/null || true)"
-  DETECTED_INTERNAL_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  DETECTED_INTERNAL_IP="$(frp_detect_internal_ip)"
 
   load_existing_server_config
   resolve_server_settings
 
-  case "$(uname -m)" in
-    x86_64) FRP_ARCH=amd64; EXPECTED_SHA="$FRP_SHA256_AMD64" ;;
-    aarch64|arm64) FRP_ARCH=arm64; EXPECTED_SHA="$FRP_SHA256_ARM64" ;;
-    *) echo "ERROR: unsupported architecture: $(uname -m)" >&2; exit 1 ;;
-  esac
+  if [[ -z "${FRP_ARCH:-}" ]]; then
+    frp_detect_architecture || exit 1
+  fi
 
   # Capture existing listeners before restarting an existing frps. On first migration,
   # this preserves ports such as 6000/6001 already used by unmanaged clients.
-  ACTIVE_PORTS="$(ss -H -lnt 2>/dev/null | awk -v s="$FRP_PORT_START" -v e="$FRP_PORT_END" '{p=$4; sub(/^.*:/,"",p); if (p ~ /^[0-9]+$/ && p>=s && p<=e) print p}' | sort -nu | paste -sd, - || true)"
+  ACTIVE_PORTS="$(frp_listening_tcp_ports_in_range "$FRP_PORT_START" "$FRP_PORT_END")"
 
   TMPDIR="$(mktemp -d)"
   trap 'rm -rf "$TMPDIR"' EXIT
@@ -441,7 +442,9 @@ EOF2
   install -m 0644 "$BASE_DIR/lib/frp_mgmt_auth.py" /usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py
   install -m 0644 "$BASE_DIR/lib/frp-common.sh" /usr/local/lib/frp-auto-deploy/frp-common.sh
   install -m 0644 "$BASE_DIR/server/frps.service" /etc/systemd/system/frps.service
-  install -m 0644 "$BASE_DIR/server/frp-port-allocator.service" /etc/systemd/system/frp-port-allocator.service
+  frp_write_compatible_systemd_unit \
+    "$BASE_DIR/server/frp-port-allocator.service" \
+    /etc/systemd/system/frp-port-allocator.service
   for tool in frp-create-client frp-clients frp-client-info frp-release-client frp-release-service frp-revoke-client frp-set-client-installer-url frp-server-status frp-update frpctl; do
     install -m 0755 "$BASE_DIR/tools/$tool" "/usr/local/sbin/$tool"
   done

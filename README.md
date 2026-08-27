@@ -8,7 +8,7 @@ It automates FRP server/client installation, persistent public port assignment f
 > The IP addresses `203.0.113.10` and `192.0.2.50` used in this README are documentation-only example addresses (RFC 5737). Replace them with your own public and internal addresses when deploying.
 
 Current pinned FRP version: **v0.70.1**
-Current project version: **1.4.0**
+Current project version: **1.5.0**
 
 ---
 
@@ -20,7 +20,7 @@ For normal operation, this is the only command you need to remember:
 sudo frpctl
 ```
 
-That starts the persistent interactive management CLI. Then type `help` or `?` for the commands that apply to this host. Press Tab to complete commands. On a server, Tab also completes registered client names and service IDs.
+That starts the persistent interactive management CLI. Then type `help` or `?` for the commands that apply to this host. Press Tab to complete commands. On a server, Tab also completes registered client names and service IDs. If this shell cannot bind custom Tab completion, `frpctl` stays usable and does **not** fall back to filesystem completion.
 
 ```text
 $ sudo frpctl
@@ -29,7 +29,7 @@ FRP Auto Deploy CLI
 ===================
 
 Role            : Server
-Project version : 1.4.0
+Project version : 1.5.0
 FRP version     : 0.70.1
 
 Type 'help' or '?' for available commands.
@@ -53,7 +53,7 @@ FRP Auto Deploy CLI
 ===================
 
 Role            : Client
-Project version : 1.4.0
+Project version : 1.5.0
 FRP version     : 0.70.1
 
 frpctl> status
@@ -573,36 +573,60 @@ This project does not need to change the FRP protocol or core FRP code. Keeping 
 
 ## Supported operating systems
 
-### Server
+This release automates **systemd Linux** on **x86_64** and **aarch64/arm64**.
 
-- Debian/Ubuntu Linux, systemd, x86_64 or arm64
+Runtime minimums:
 
-### Supported Linux clients
+- Bash 4.2 or newer (Amazon Linux 2)
+- Python 3.7 or newer (distribution `python3`, no PyPI packages)
+- `systemctl` with a usable systemd runtime (`/run/systemd/system`)
+- `apt-get`, `dnf`, or `yum` for automatic dependency installation
 
-First-class:
+The installers detect **commands and package managers**, not marketing names. They do not disable SELinux and do not change firewalld, ufw, iptables, or nftables.
 
-- Ubuntu
-- Debian
-- RHEL
-- Rocky Linux
-- AlmaLinux
-- CentOS Stream
-- Fedora
-- Amazon Linux
+### Supported vs tested
 
-Requirements:
+| Distribution | Install deps | Upgrade tests | systemd smoke | frpctl | Status |
+| --- | --- | --- | --- | --- | --- |
+| Ubuntu 22.04 | PASS (container) | PASS (container + unit) | PASS (prior live Ubuntu baseline) | PASS | Tested |
+| Ubuntu 24.04 | PASS (container) | PASS (container + unit) | PASS (prior live Ubuntu baseline) | PASS | Tested |
+| Rocky Linux 9 | PASS (container) | PASS (container + unit) | NOT_TESTED | PASS (container + unit) | Container-tested |
+| AlmaLinux 9 | PASS (container) | PASS (container + unit) | NOT_TESTED | PASS (container + unit) | Container-tested |
+| Amazon Linux 2023 | PASS (container) | PASS (container + unit) | NOT_TESTED | PASS (container + unit) | Container-tested |
+| Amazon Linux 2 | PASS (container) | PASS (container + unit) | NOT_TESTED | PASS (container + unit) | Container-tested |
+| Debian 12 | Best-effort (same apt path as Ubuntu) | Unit tests | NOT_TESTED | Unit tests | Best-effort |
+| Fedora current | Best-effort (dnf) | Unit tests | NOT_TESTED | Unit tests | Best-effort |
+| RHEL 9 / CentOS Stream 9 | Best-effort (dnf, RHEL-compatible) | Unit tests | NOT_TESTED | Unit tests | Best-effort |
 
-- systemd
-- x86_64 or arm64
-- network access to the FRP server and GitHub releases
+**Container-tested** means GitHub Actions (or a local Docker run) installed the mapped packages and ran systemd-free installer/CLI tests inside the vendor image. It does **not** mean `frps` / `frpc` / allocator units were started under that distro's PID 1.
 
-Automatic dependency installation uses `apt`, `dnf`, or `yum`. It is tested with apt, dnf, and yum systems. Other systemd-based Linux distributions can work when required dependencies are already installed.
+**systemd smoke** for Ubuntu refers to a real host with systemd, not a container. Rocky, Alma, and Amazon Linux systemd smoke remains `NOT_TESTED` until a disposable VM is used.
 
-Internet access is currently required for client bootstrap and the official FRP download. Local/offline package mirrors are not part of this release.
+Architecture: `x86_64 → amd64` and `aarch64/arm64 → arm64` are unit-tested. A full ARM64 systemd install is `NOT_TESTED` unless you run one.
 
-The client installer does not disable SELinux, load custom SELinux policy, or change firewalld, ufw, iptables, or nftables. Opening local inbound ports for published services remains the administrator's responsibility. `frpc` needs outbound connectivity to the FRP server.
+Windows: FRP supports Windows, but automated PowerShell enrollment is not included. See `windows/README.md`.
 
-- Windows: FRP supports Windows, but automated PowerShell enrollment is not included in v1.0. See `windows/README.md`.
+### Server and client
+
+Both the FRP Auto Deploy server and client use the same dependency installer (`apt` / `dnf` / `yum`). Other systemd Linux distributions can work when the required commands are already installed.
+
+Required inbound ports on the FRP **server** (open them on the host firewall or cloud security group; the installer does not do this):
+
+```text
+TCP control port     (default 443)
+TCP service range    (default 6000-6098)
+TCP allocator port   (default 6099), or TCP/80 if you reverse-proxy enrollment
+```
+
+The client needs outbound connectivity to the FRP server. Opening local inbound ports for published services remains the administrator's responsibility.
+
+Internet access is required for bootstrap and the official FRP download. Local/offline package mirrors are not part of this release.
+
+On Amazon Linux 2 (systemd 219), the installer writes an allocator unit without `ProtectSystem=strict`, `ReadWritePaths`, and `NoNewPrivileges`. Newer systemd keeps those hardening lines. `PrivateTmp` is kept on both.
+
+Enrollment token wrap stays compatible with `openssl enc -pbkdf2` on OpenSSL 1.1.1+, and uses the same Salted__/PBKDF2-SHA256 format via Python's stdlib plus `openssl enc -K/-iv` so OpenSSL 1.0.2 still works.
+
+SELinux: default targeted policy typically allows these custom systemd units. This project does not install custom SELinux policy and does not set SELinux to permissive. If a site policy blocks the allocator HTTP port or FRP binaries, fix that policy explicitly.
 
 ---
 
@@ -891,6 +915,7 @@ python3 tests/test-mgmt-identity.py
 ./tests/test-client-config.sh
 ./tests/test-client-allocator-url.sh
 ./tests/test-client-platform.sh
+./tests/test-portability.sh
 ./tests/test-server-install-config.sh
 ./tests/test-allocator-ready.sh
 ./tests/test-create-client.sh
