@@ -10,7 +10,7 @@ jobs:
       - name: Shell syntax
         run: |
           git ls-files '*.sh' | xargs -r bash -n
-          bash -n tools/frp-server-status tools/frp-update tools/frp-client
+          bash -n tools/frp-server-status tools/frp-update tools/frp-client tools/frpctl
       - name: Python compile
         run: |
           python3 -m py_compile server/frp-port-allocator.py server/migrate_token.py scripts/build-bundles.py lib/frp_mgmt_auth.py
@@ -33,6 +33,8 @@ jobs:
           ./tests/test-management-commands.sh
           ./tests/test-frp-client.sh
           ./tests/test-guided-ux.sh
+          ./tests/test-client-upgrade.sh
+          ./tests/test-frpctl.sh
       # Live distro containers are not used here: most images lack a working
       # systemd, and privileged Docker would make CI flaky. Package manager and
       # os-release behavior is covered by tests/test-client-platform.sh.

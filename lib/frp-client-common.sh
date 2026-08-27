@@ -9,6 +9,17 @@ FRP_CLIENT_COMMON_LOADED=1
 
 FRP_CLIENT_STATE_SCHEMA=1
 FRP_CLIENT_BACKUP_KEEP="${FRP_CLIENT_BACKUP_KEEP:-5}"
+FRP_CLIENT_UPGRADE_BACKUP_KEEP="${FRP_CLIENT_UPGRADE_BACKUP_KEEP:-5}"
+FRP_CLIENT_UPDATE_URL="${FRP_CLIENT_UPDATE_URL:-https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh}"
+
+# Defaults match VERSION. A sibling VERSION file overrides project/FRP versions.
+PROJECT_VERSION="${PROJECT_VERSION:-1.2.0}"
+FRP_VERSION="${FRP_VERSION:-0.70.1}"
+_FRP_CLIENT_COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${_FRP_CLIENT_COMMON_DIR}/../VERSION" ]]; then
+  # shellcheck disable=SC1091
+  . "${_FRP_CLIENT_COMMON_DIR}/../VERSION"
+fi
 
 frp_client_path() {
   local p="$1"
@@ -239,6 +250,63 @@ PY
 
 frp_client_lib_dir() {
   frp_client_path /usr/local/lib/frp-auto-deploy
+}
+
+frp_client_version_file() {
+  frp_client_path /etc/frp-auto-deploy/version
+}
+
+frp_client_upgrade_backup_root() {
+  frp_client_path /var/lib/frp-auto-deploy/client-upgrades
+}
+
+frp_client_write_version_file() {
+  local dest dir tmp
+  dest="$(frp_client_version_file)"
+  dir="$(dirname "$dest")"
+  mkdir -p "$dir"
+  tmp="$(mktemp "${dir}/.version.XXXXXX")"
+  cat >"$tmp" <<EOF
+PROJECT_VERSION=${PROJECT_VERSION}
+FRP_VERSION=${FRP_VERSION}
+EOF
+  chmod 0644 "$tmp"
+  if [[ ${EUID} -eq 0 ]]; then
+    chown root:root "$tmp" 2>/dev/null || true
+  fi
+  mv -f "$tmp" "$dest"
+}
+
+frp_client_read_kv() {
+  local file="$1" key="$2"
+  if [[ ! -f "$file" ]]; then
+    return 0
+  fi
+  awk -F= -v k="$key" '$1==k {print substr($0, index($0,"=")+1); exit}' "$file"
+}
+
+frp_client_installed_project_version() {
+  local pv
+  pv="$(frp_client_read_kv "$(frp_client_version_file)" PROJECT_VERSION)"
+  if [[ -z "$pv" ]]; then
+    printf '%s' "legacy / unknown"
+    return 0
+  fi
+  printf '%s' "$pv"
+}
+
+frp_client_installed_frp_version() {
+  local fv
+  fv="$(frp_client_read_kv "$(frp_client_version_file)" FRP_VERSION)"
+  if [[ -n "$fv" ]]; then
+    printf '%s' "$fv"
+    return 0
+  fi
+  printf '%s' "${FRP_VERSION:-0.70.1}"
+}
+
+frp_client_has_existing_install() {
+  [[ -f "$(frp_client_state_path)" ]]
 }
 
 frp_client_hook_log() {
@@ -1932,4 +2000,437 @@ for sid, item in services.items():
     print(f"   State       : {state}")
     print()
 PY
+}
+
+# --- Project-layer client upgrade (does not re-enroll) --------------------
+
+frp_client_atomic_install() {
+  local src="$1" dest="$2" mode="${3:-0755}"
+  local dir tmp
+  dir="$(dirname "$dest")"
+  mkdir -p "$dir"
+  tmp="$(mktemp "${dir}/.frp-upgrade.XXXXXX")"
+  cp "$src" "$tmp"
+  chmod "$mode" "$tmp"
+  if [[ ${EUID} -eq 0 ]]; then
+    chown root:root "$tmp" 2>/dev/null || true
+  fi
+  mv -f "$tmp" "$dest"
+}
+
+frp_client_digest() {
+  local file="$1"
+  python3 - "$file" <<'PY'
+import hashlib, sys
+from pathlib import Path
+p = Path(sys.argv[1])
+if not p.is_file():
+    sys.stdout.write("")
+else:
+    sys.stdout.write(hashlib.sha256(p.read_bytes()).hexdigest())
+PY
+}
+
+frp_client_upgrade_source_version() {
+  local source="$1"
+  if [[ -f "${source}/VERSION" ]]; then
+    # shellcheck disable=SC1091
+    . "${source}/VERSION"
+  fi
+}
+
+frp_client_install_management_files() {
+  local source="$1"
+  local libdir bindir
+  libdir="$(frp_client_lib_dir)"
+  bindir="$(frp_client_path /usr/local/bin)"
+  mkdir -p "$libdir" "$bindir"
+  [[ -f "${source}/lib/frp-client-common.sh" ]] || {
+    echo "ERROR: missing ${source}/lib/frp-client-common.sh" >&2
+    return 1
+  }
+  [[ -f "${source}/lib/frp_mgmt_auth.py" ]] || {
+    echo "ERROR: missing ${source}/lib/frp_mgmt_auth.py" >&2
+    return 1
+  }
+  [[ -f "${source}/tools/frp-client" ]] || {
+    echo "ERROR: missing ${source}/tools/frp-client" >&2
+    return 1
+  }
+  [[ -f "${source}/tools/frpctl" ]] || {
+    echo "ERROR: missing ${source}/tools/frpctl" >&2
+    return 1
+  }
+  install -m 0644 "${source}/lib/frp-client-common.sh" "${libdir}/frp-client-common.sh"
+  install -m 0644 "${source}/lib/frp_mgmt_auth.py" "${libdir}/frp_mgmt_auth.py"
+  install -m 0755 "${source}/tools/frp-client" "${bindir}/frp-client"
+  install -m 0755 "${source}/tools/frpctl" "${bindir}/frpctl"
+  frp_client_upgrade_source_version "$source"
+  frp_client_write_version_file
+}
+
+frp_client_upgrade_destinations() {
+  # dest_rel:mode:source_rel
+  printf '%s\n' \
+    "usr/local/lib/frp-auto-deploy/frp-client-common.sh:0644:lib/frp-client-common.sh" \
+    "usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py:0644:lib/frp_mgmt_auth.py" \
+    "usr/local/bin/frp-client:0755:tools/frp-client" \
+    "usr/local/bin/frpctl:0755:tools/frpctl"
+}
+
+frp_client_upgrade_validate_existing() {
+  local state toml ident
+  state="$(frp_client_state_path)"
+  toml="$(frp_client_toml_path)"
+  [[ -f "$state" ]] || {
+    echo "ERROR: no existing FRP client installation was found." >&2
+    echo "Use the client bootstrap installer to enroll a new client." >&2
+    return 1
+  }
+  frp_load_client_state "$state" || return 1
+  if [[ -f "$toml" ]]; then
+    frp_client_verify_config "$toml" || return 1
+  fi
+  ident="$(frp_identity_status)"
+  if [[ "$ident" == corrupt ]]; then
+    echo "WARNING: this client's management identity is unusable." >&2
+    echo "Software upgrade will continue without regenerating identity files." >&2
+  fi
+  return 0
+}
+
+frp_client_upgrade_validate_staged() {
+  local staged="$1" rel mode src dest
+  while IFS=: read -r rel mode src; do
+    [[ -n "$rel" ]] || continue
+    dest="${staged}/${rel}"
+    [[ -f "$dest" ]] || {
+      echo "ERROR: staged update is missing ${rel}" >&2
+      return 1
+    }
+  done < <(frp_client_upgrade_destinations)
+  bash -n "${staged}/usr/local/bin/frp-client" || return 1
+  bash -n "${staged}/usr/local/bin/frpctl" || return 1
+  bash -n "${staged}/usr/local/lib/frp-auto-deploy/frp-client-common.sh" || return 1
+  python3 -m py_compile "${staged}/usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py" || return 1
+  rm -rf "${staged}/usr/local/lib/frp-auto-deploy/__pycache__" \
+    "${staged}/usr/local/lib/frp-auto-deploy/"*.pyc 2>/dev/null || true
+  [[ -x "${staged}/usr/local/bin/frp-client" ]] || {
+    echo "ERROR: staged frp-client is not executable" >&2
+    return 1
+  }
+  [[ -x "${staged}/usr/local/bin/frpctl" ]] || {
+    echo "ERROR: staged frpctl is not executable" >&2
+    return 1
+  }
+  if [[ "${FRP_CLIENT_UPGRADE_HOOK_FAIL:-}" == "validate" ]]; then
+    echo "ERROR: simulated staged update validation failure" >&2
+    return 1
+  fi
+  return 0
+}
+
+frp_client_upgrade_backup_tools() {
+  local stamp dest live rel mode src base
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  dest="$(frp_client_upgrade_backup_root)/${stamp}"
+  mkdir -p "$dest"
+  chmod 700 "$(frp_client_upgrade_backup_root)" 2>/dev/null || true
+  chmod 700 "$dest"
+  while IFS=: read -r rel mode src; do
+    [[ -n "$rel" ]] || continue
+    live="$(frp_client_path "/${rel}")"
+    base="$(basename "$rel")"
+    if [[ -f "$live" ]]; then
+      install -m "$mode" "$live" "${dest}/${base}"
+      printf 'present %s\n' "$base" >>"${dest}/manifest"
+    else
+      printf 'absent %s\n' "$base" >>"${dest}/manifest"
+    fi
+  done < <(frp_client_upgrade_destinations)
+  live="$(frp_client_version_file)"
+  if [[ -f "$live" ]]; then
+    install -m 0644 "$live" "${dest}/version"
+    printf 'present version\n' >>"${dest}/manifest"
+  else
+    printf 'absent version\n' >>"${dest}/manifest"
+  fi
+  python3 - "$(frp_client_upgrade_backup_root)" "$FRP_CLIENT_UPGRADE_BACKUP_KEEP" <<'PY'
+import shutil, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+keep = int(sys.argv[2])
+if not root.is_dir():
+    raise SystemExit(0)
+dirs = sorted([p for p in root.iterdir() if p.is_dir()], key=lambda p: p.name)
+for extra in dirs[: max(0, len(dirs) - keep)]:
+    shutil.rmtree(extra, ignore_errors=True)
+PY
+  printf '%s' "$dest"
+}
+
+frp_client_upgrade_restore_tools() {
+  local backup="$1" live rel mode src base
+  [[ -d "$backup" ]] || return 1
+  while IFS=: read -r rel mode src; do
+    [[ -n "$rel" ]] || continue
+    live="$(frp_client_path "/${rel}")"
+    base="$(basename "$rel")"
+    if [[ -f "${backup}/${base}" ]]; then
+      install -m "$mode" "${backup}/${base}" "$live"
+    else
+      rm -f "$live"
+    fi
+  done < <(frp_client_upgrade_destinations)
+  live="$(frp_client_version_file)"
+  if [[ -f "${backup}/version" ]]; then
+    mkdir -p "$(dirname "$live")"
+    install -m 0644 "${backup}/version" "$live"
+  else
+    rm -f "$live"
+  fi
+  return 0
+}
+
+frp_client_upgrade_stage() {
+  local source="$1" staged="$2" rel mode src
+  mkdir -p "$staged"
+  while IFS=: read -r rel mode src; do
+    [[ -n "$rel" ]] || continue
+    [[ -f "${source}/${src}" ]] || {
+      echo "ERROR: update source is missing ${src}" >&2
+      return 1
+    }
+    mkdir -p "$(dirname "${staged}/${rel}")"
+    install -m "$mode" "${source}/${src}" "${staged}/${rel}"
+  done < <(frp_client_upgrade_destinations)
+}
+
+frp_client_upgrade_install_staged() {
+  local staged="$1" live rel mode src
+  local replaced=0
+  while IFS=: read -r rel mode src; do
+    [[ -n "$rel" ]] || continue
+    live="$(frp_client_path "/${rel}")"
+    frp_client_atomic_install "${staged}/${rel}" "$live" "$mode" || return 1
+    replaced=$((replaced + 1))
+    if [[ "$replaced" -eq 1 && "${FRP_CLIENT_UPGRADE_HOOK_FAIL:-}" == "install" ]]; then
+      echo "ERROR: simulated tool install failure" >&2
+      return 1
+    fi
+  done < <(frp_client_upgrade_destinations)
+  return 0
+}
+
+frp_client_upgrade_verify() {
+  local ident_before="$1"
+  local live rel mode src
+  while IFS=: read -r rel mode src; do
+    [[ -n "$rel" ]] || continue
+    live="$(frp_client_path "/${rel}")"
+    [[ -f "$live" ]] || {
+      echo "ERROR: upgraded file missing: ${live}" >&2
+      return 1
+    }
+  done < <(frp_client_upgrade_destinations)
+  [[ -x "$(frp_client_path /usr/local/bin/frp-client)" ]] || return 1
+  [[ -x "$(frp_client_path /usr/local/bin/frpctl)" ]] || return 1
+  frp_load_client_state "$(frp_client_state_path)" || return 1
+  if [[ -f "$(frp_client_toml_path)" ]]; then
+    frp_client_verify_config "$(frp_client_toml_path)" || return 1
+  fi
+  [[ -f "$(frp_client_version_file)" ]] || {
+    echo "ERROR: version file was not written" >&2
+    return 1
+  }
+  if [[ "$ident_before" == enrolled && "$(frp_identity_status)" != enrolled ]]; then
+    echo "ERROR: management identity was not preserved" >&2
+    return 1
+  fi
+  if [[ "${FRP_CLIENT_UPGRADE_HOOK_FAIL:-}" == "verify" ]]; then
+    echo "ERROR: simulated post-upgrade verification failure" >&2
+    return 1
+  fi
+  return 0
+}
+
+frp_client_apply_upgrade() {
+  local source="${1:-}"
+  local check_only="${2:-0}"
+  local previous target staged backup ident_before ident_after
+  local state_before toml_before access_before key_before pub_before mac_before
+  local frp_before frp_after
+
+  if [[ -z "$source" || ! -d "$source" ]]; then
+    echo "ERROR: update source directory is required" >&2
+    return 1
+  fi
+  if [[ ${EUID} -ne 0 && -z "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
+    echo "ERROR: run with sudo" >&2
+    return 1
+  fi
+
+  frp_client_upgrade_validate_existing || return 1
+  frp_client_upgrade_source_version "$source"
+  previous="$(frp_client_installed_project_version)"
+  target="${PROJECT_VERSION}"
+  frp_before="$(frp_client_installed_frp_version)"
+  ident_before="$(frp_identity_status)"
+
+  echo "Installed project version : ${previous}"
+  echo "Target project version    : ${target}"
+  echo "FRP version               : ${FRP_VERSION}"
+  echo
+
+  if [[ "$check_only" == "1" ]]; then
+    if [[ "$previous" == "$target" ]]; then
+      echo "Update                    : not needed"
+    else
+      echo "Update                    : available"
+    fi
+    echo
+    echo "A software update does not require an Enrollment Code."
+    echo "Client state, public ports, and management identity are preserved."
+    return 0
+  fi
+
+  echo "Checking existing client state..."
+  state_before="$(frp_client_digest "$(frp_client_state_path)")"
+  toml_before="$(frp_client_digest "$(frp_client_toml_path)")"
+  access_before="$(frp_client_digest "$(frp_client_access_path)")"
+  key_before="$(frp_client_digest "$(frp_client_identity_key_path)")"
+  pub_before="$(frp_client_digest "$(frp_client_identity_pub_path)")"
+  mac_before="$(frp_client_digest "$(frp_client_identity_mac_path)")"
+
+  staged="$(mktemp -d)"
+  backup=""
+  # shellcheck disable=SC2064
+  trap 'rm -rf "'"$staged"'"' RETURN
+
+  echo "Staging new management files..."
+  frp_client_upgrade_stage "$source" "$staged" || return 1
+
+  echo "Validating staged files..."
+  if ! frp_client_upgrade_validate_staged "$staged"; then
+    echo "ERROR: staged update failed validation; existing installation was not changed." >&2
+    echo "UPGRADE_ROLLBACK=PASS"
+    return 1
+  fi
+
+  echo "Backing up replaceable project files..."
+  backup="$(frp_client_upgrade_backup_tools)" || return 1
+
+  echo "Installing management files..."
+  if ! frp_client_upgrade_install_staged "$staged"; then
+    echo "ERROR: tool install failed; restoring previous management files." >&2
+    frp_client_upgrade_restore_tools "$backup" || true
+    echo "UPGRADE_ROLLBACK=PASS"
+    return 1
+  fi
+
+  echo "Writing project version..."
+  if ! frp_client_write_version_file; then
+    echo "ERROR: failed to write version file; restoring previous management files." >&2
+    frp_client_upgrade_restore_tools "$backup" || true
+    echo "UPGRADE_ROLLBACK=PASS"
+    return 1
+  fi
+
+  echo "Verifying upgrade..."
+  if ! frp_client_upgrade_verify "$ident_before"; then
+    echo "ERROR: post-upgrade verification failed; restoring previous management files." >&2
+    if frp_client_upgrade_restore_tools "$backup"; then
+      echo "UPGRADE_ROLLBACK=PASS"
+    else
+      echo "UPGRADE_ROLLBACK=FAIL"
+    fi
+    return 1
+  fi
+
+  if [[ "$(frp_client_digest "$(frp_client_state_path)")" != "$state_before" ]]; then
+    echo "ERROR: client-state.json changed during software upgrade; restoring tools." >&2
+    frp_client_upgrade_restore_tools "$backup" || true
+    echo "UPGRADE_ROLLBACK=PASS"
+    return 1
+  fi
+  if [[ -n "$toml_before" && "$(frp_client_digest "$(frp_client_toml_path)")" != "$toml_before" ]]; then
+    echo "ERROR: frpc.toml changed during software upgrade; restoring tools." >&2
+    frp_client_upgrade_restore_tools "$backup" || true
+    echo "UPGRADE_ROLLBACK=PASS"
+    return 1
+  fi
+  if [[ -n "$access_before" && "$(frp_client_digest "$(frp_client_access_path)")" != "$access_before" ]]; then
+    echo "ERROR: access-info.txt changed during software upgrade; restoring tools." >&2
+    frp_client_upgrade_restore_tools "$backup" || true
+    echo "UPGRADE_ROLLBACK=PASS"
+    return 1
+  fi
+  if [[ -n "$key_before" && "$(frp_client_digest "$(frp_client_identity_key_path)")" != "$key_before" ]]; then
+    echo "ERROR: management identity changed during software upgrade; restoring tools." >&2
+    frp_client_upgrade_restore_tools "$backup" || true
+    echo "UPGRADE_ROLLBACK=PASS"
+    return 1
+  fi
+  if [[ -n "$pub_before" && "$(frp_client_digest "$(frp_client_identity_pub_path)")" != "$pub_before" ]]; then
+    echo "ERROR: management public identity changed during software upgrade; restoring tools." >&2
+    frp_client_upgrade_restore_tools "$backup" || true
+    echo "UPGRADE_ROLLBACK=PASS"
+    return 1
+  fi
+  if [[ -n "$mac_before" && "$(frp_client_digest "$(frp_client_identity_mac_path)")" != "$mac_before" ]]; then
+    echo "ERROR: management identity MAC changed during software upgrade; restoring tools." >&2
+    frp_client_upgrade_restore_tools "$backup" || true
+    echo "UPGRADE_ROLLBACK=PASS"
+    return 1
+  fi
+
+  ident_after="$(frp_identity_label)"
+  frp_after="${FRP_VERSION}"
+  echo
+  echo "Upgrade complete."
+  echo "Project version : ${previous} -> ${target}"
+  if [[ "$frp_before" == "$frp_after" ]]; then
+    echo "FRP version     : ${frp_after} (unchanged)"
+  else
+    echo "FRP version     : ${frp_before} -> ${frp_after}"
+  fi
+  echo "Client state    : preserved"
+  echo "Management ID   : ${ident_after}"
+  echo "frpc restarted  : NO"
+  echo "Enrollment Code : NOT REQUIRED"
+  return 0
+}
+
+frp_client_fetch_and_upgrade() {
+  local source="${1:-}"
+  local check_only="${2:-0}"
+  local tmp archive
+  if [[ -n "$source" ]]; then
+    frp_client_apply_upgrade "$source" "$check_only"
+    return $?
+  fi
+  if [[ "${FRP_CLIENT_UPGRADE_HOOK_DOWNLOAD_FAIL:-}" == "1" ]]; then
+    echo "ERROR: failed to download the client update bundle" >&2
+    return 1
+  fi
+  if [[ ${EUID} -ne 0 && -z "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
+    echo "ERROR: run with sudo" >&2
+    return 1
+  fi
+  tmp="$(mktemp -d)"
+  archive="${tmp}/bootstrap-client.sh"
+  trap 'rm -rf "'"$tmp"'"' RETURN
+  echo "Downloading frp-auto-deploy client update bundle..."
+  curl -fL --retry 3 --connect-timeout 10 --max-time 120 -o "$archive" "$FRP_CLIENT_UPDATE_URL" || {
+    echo "ERROR: failed to download the client update bundle" >&2
+    return 1
+  }
+  chmod 0755 "$archive"
+  echo "Applying update from downloaded bundle..."
+  # The bundle extracts a source tree and runs install-client.sh --upgrade.
+  if [[ "$check_only" == "1" ]]; then
+    bash "$archive" --upgrade --check
+  else
+    bash "$archive" --upgrade
+  fi
 }

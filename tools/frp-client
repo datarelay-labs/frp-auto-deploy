@@ -89,6 +89,47 @@ frp_require_root() {
   fi
 }
 
+frp_client_update_cmd() {
+  local source="${FRP_CLIENT_UPDATE_SOURCE:-}"
+  local check_only=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --source)
+        source="${2:-}"
+        shift 2
+        ;;
+      --check|--dry-run)
+        check_only=1
+        shift
+        ;;
+      -h|--help)
+        cat <<'EOF'
+Usage: frp-client update [--source DIR] [--check]
+
+Upgrade this client's frp-auto-deploy management tools.
+
+  --source DIR   use a local source tree instead of downloading the bundle
+  --check        report installed/target versions without changing files
+
+This updates project tools only. It does not require an Enrollment Code,
+does not regenerate management identity, and does not rewrite client
+state, frpc.toml, or public port assignments. The official frpc binary
+is left unchanged when it is already the tested version.
+
+The recommended command is: sudo frpctl update
+EOF
+        return 0
+        ;;
+      *)
+        echo "ERROR: unknown option: $1" >&2
+        echo "Usage: frp-client update [--source DIR] [--check]" >&2
+        return 2
+        ;;
+    esac
+  done
+  frp_client_fetch_and_upgrade "$source" "$check_only"
+}
+
 frp_copy_state() {
   python3 - "$1" "$2" <<'PY'
 import json, sys
@@ -103,13 +144,14 @@ frp_client_status() {
   local path
   path="$(frp_client_state_path)"
   frp_load_client_state "$path"
-  python3 - "$path" "${FRP_VERSION:-0.70.1}" "${FRP_CLIENT_TEST_ROOT:-}" "${FRP_SKIP_SYSTEMD:-}" "$(frp_identity_label)" <<'PY'
+  python3 - "$path" "$(frp_client_installed_frp_version)" "${FRP_CLIENT_TEST_ROOT:-}" "${FRP_SKIP_SYSTEMD:-}" "$(frp_identity_label)" "$(frp_client_installed_project_version)" <<'PY'
 import json, subprocess, sys
 from pathlib import Path
 data = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
 tested = sys.argv[2]
 test_root = sys.argv[3]
 skip_systemd = sys.argv[4]
+project_version = sys.argv[6]
 services = data.get('services') or {}
 enabled = sum(1 for s in services.values() if s.get('enabled', True) is not False)
 disabled = len(services) - enabled
@@ -126,6 +168,7 @@ allocator = 'configured' if data.get('allocator_url') else 'missing'
 print('FRP Client')
 print('==========')
 print()
+print(f"Project version : {project_version}")
 print(f"Hostname        : {data.get('hostname', '')}")
 print(f"FRP server      : {data.get('frp_server', '')}:{data.get('frp_server_port', '')}")
 print(f"Allocator       : {allocator}")
@@ -730,24 +773,33 @@ frp_client_cmd_main() {
       trap 'unset FRP_ENROLLMENT_CODE; frp_release_client_lock' EXIT
       frp_apply_candidate
       ;;
+    update)
+      frp_require_root
+      shift
+      frp_client_update_cmd "$@"
+      ;;
     -h|--help|help)
       cat <<'EOF'
-Usage: frp-client [status|info|list]
+Usage: frp-client [status|info|list|update]
 
   (no args)   Interactive service management menu
   status      Show local client and service status
   info        Show connection information
   list        List configured services
+  update      Upgrade frp-auto-deploy management tools without re-enrolling
 
 An Enrollment Code is required only to enroll this client or to
 recover its management identity. Ordinary later changes are
 authorized by the local client identity and do not require a
-new Enrollment Code. Read-only commands do not contact the allocator.
+new Enrollment Code. A software update does not require an
+Enrollment Code. Read-only commands do not contact the allocator.
+
+For everyday use, prefer: sudo frpctl
 EOF
       ;;
     *)
       echo "ERROR: unknown command: $cmd" >&2
-      echo "Usage: frp-client [status|info|list]" >&2
+      echo "Usage: frp-client [status|info|list|update]" >&2
       exit 2
       ;;
   esac

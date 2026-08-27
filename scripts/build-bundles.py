@@ -24,6 +24,7 @@ files=[
  'tools/frp-set-client-installer-url',
  'tools/frp-server-status',
  'tools/frp-update',
+ 'tools/frpctl',
 ]
 
 lines=['#!/usr/bin/env bash','set -euo pipefail','TMP="$(mktemp -d)"','trap \'rm -rf "$TMP"\' EXIT']
@@ -42,10 +43,12 @@ lines.append('exec "$TMP/install-server.sh" "$@"')
 (dist/'bootstrap-server.sh').chmod(0o755)
 
 client_files=[
+ 'VERSION',
  'install-client.sh',
  'lib/frp-client-common.sh',
  'lib/frp_mgmt_auth.py',
  'tools/frp-client',
+ 'tools/frpctl',
 ]
 client_lines=['#!/usr/bin/env bash','set -euo pipefail','TMP="$(mktemp -d)"','trap \'rm -rf "$TMP"\' EXIT']
 for rel in client_files:

@@ -22,7 +22,8 @@ for f in \
   "$BASE_DIR/tools/frp-revoke-client" \
   "$BASE_DIR/tools/frp-set-client-installer-url" \
   "$BASE_DIR/tools/frp-server-status" \
-  "$BASE_DIR/tools/frp-update"; do
+  "$BASE_DIR/tools/frp-update" \
+  "$BASE_DIR/tools/frpctl"; do
   [[ -f "$f" ]] || { echo "ERROR: missing project file: $f" >&2; exit 1; }
 done
 
@@ -347,7 +348,7 @@ EOF2
   install -m 0644 "$BASE_DIR/lib/frp-common.sh" /usr/local/lib/frp-auto-deploy/frp-common.sh
   install -m 0644 "$BASE_DIR/server/frps.service" /etc/systemd/system/frps.service
   install -m 0644 "$BASE_DIR/server/frp-port-allocator.service" /etc/systemd/system/frp-port-allocator.service
-  for tool in frp-create-client frp-clients frp-client-info frp-release-client frp-release-service frp-revoke-client frp-set-client-installer-url frp-server-status frp-update; do
+  for tool in frp-create-client frp-clients frp-client-info frp-release-client frp-release-service frp-revoke-client frp-set-client-installer-url frp-server-status frp-update frpctl; do
     install -m 0755 "$BASE_DIR/tools/$tool" "/usr/local/sbin/$tool"
   done
 
@@ -395,13 +396,19 @@ Firewall / DNAT example:
   ${FRP_PUBLIC_IP}:80 -> ${FRP_INTERNAL_IP}:${FRP_ALLOCATOR_PORT}
 
 Create a client enrollment:
+  sudo frpctl create-client
   sudo frp-create-client
 
+Everyday command (remember this one):
+  sudo frpctl
+
 Check schema v2 deployment readiness:
+  sudo frpctl status
   sudo frp-server-status
   sudo frp-server-status --check
 
 Update FRP to the tested version:
+  sudo frpctl update
   sudo frp-update
 
 List clients:

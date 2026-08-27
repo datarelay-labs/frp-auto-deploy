@@ -8,6 +8,34 @@ It automates FRP server/client installation, persistent public port assignment f
 > The IP addresses `203.0.113.10` and `192.0.2.50` used in this README are documentation-only example addresses (RFC 5737). Replace them with your own public and internal addresses when deploying.
 
 Current pinned FRP version: **v0.70.1**
+Current project version: **1.2.0**
+
+---
+
+# Everyday command
+
+For normal operation, this is the only command you need to remember:
+
+```bash
+sudo frpctl
+```
+
+It detects whether this host is an FRP server, an FRP client, or both, then shows a simple menu. Common shortcuts:
+
+```bash
+sudo frpctl status
+sudo frpctl update
+sudo frpctl help
+```
+
+Official upstream FRP binaries are:
+
+```text
+frps   # FRP server
+frpc   # FRP client
+```
+
+Commands such as `frpctl`, `frp-client`, `frp-clients`, `frp-create-client`, `frp-server-status`, `frp-release-service`, `frp-revoke-client`, and `frp-update` belong to this `frp-auto-deploy` operational layer. This project does **not** fork or modify FRP. Advanced users and automation may continue calling the individual commands directly.
 
 ---
 
@@ -127,14 +155,15 @@ Non-interactive install uses environment variables, for example `FRP_PUBLIC_HOST
 Verify the server:
 
 ```bash
-sudo frp-server-status
+sudo frpctl
+sudo frpctl status
 sudo frp-server-status --check
-sudo frp-update
+sudo frpctl update
 ```
 
-`frp-server-status --check` confirms registry schema v2 and that the public host and allocator URL are configured. It does not change the server.
+`frpctl` is the everyday entry point. `frp-server-status --check` confirms registry schema v2 and that the public host and allocator URL are configured. It does not change the server.
 
-`frp-update` upgrades the FRP server only to the version tested by `frp-auto-deploy` and automatically rolls back if the new server fails its health checks. On a fresh install it is a no-op.
+`frpctl update` on a server host runs `frp-update`, which upgrades the FRP server binary only to the version tested by `frp-auto-deploy` and automatically rolls back if the new server fails its health checks. On a fresh install it is a no-op.
 
 You can also inspect systemd directly:
 
@@ -299,8 +328,15 @@ Connect from another machine with:
 Useful commands
 ---------------
 
-Manage published services:
+For normal operation, this is the only command you need to remember:
+
+  sudo frpctl
+
+Advanced direct commands remain available:
+
   sudo frp-client
+  sudo frp-client status
+  sudo frp-client info
 ```
 
 The assigned ports are persistent. Reinstalling the same service on the same machine reuses the previous public port based on `/etc/machine-id` plus the service ID. Changing a service's local target does not reallocate its public port.
@@ -309,9 +345,16 @@ A successful install writes `/etc/frp/client-state.json` (mode 600, no secrets).
 
 ## 5. Manage an installed client
 
-Need to expose another service later? Do not reinstall FRP.
+Need to expose another service later? Do not reinstall FRP. Do not re-run the bootstrap installer.
 
 ```bash
+sudo frpctl
+```
+
+That opens the client menu. Equivalents:
+
+```bash
+sudo frpctl manage
 sudo frp-client
 ```
 
@@ -337,6 +380,7 @@ Continue? [Y/n]: Y
 Read-only commands do not require an Enrollment Code and do not contact the allocator:
 
 ```bash
+sudo frpctl status
 sudo frp-client status
 sudo frp-client info
 ```
@@ -353,35 +397,74 @@ Disable a service to stop publishing it. The public port stays reserved. Re-enab
 
 At least one enabled service is required. Clients installed before this management state must be re-enrolled once with the current bootstrap installer.
 
+### Update an installed client
+
+Do not re-run the enrollment bootstrap to update software. That installer asks for an Enrollment Code and is for first install or trust recovery only.
+
+```bash
+sudo frpctl update
+```
+
+Equivalent:
+
+```bash
+sudo frp-client update
+```
+
+A host that was installed before `frpctl` existed can upgrade from the current bundle without first installing the new command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh \
+| sudo bash -s -- --upgrade
+```
+
+A software update preserves client state, `frpc.toml`, access information, management identity files, service IDs, enabled/disabled state, and public port assignments. It does **not** require an Enrollment Code when trust already exists. It does not regenerate a valid management identity, does not rewrite a working `frpc.toml`, and does not restart `frpc` unless the runtime FRP binary actually changes. Existing clients without `/etc/frp-auto-deploy/version` are treated as legacy/pre-version-tracking installs and are migrated into version tracking.
+
+If the bootstrap installer is run again on an already-installed client, it refuses to re-enroll and points at `sudo frpctl update`.
+
 ## 6. Manage clients on the server
+
+The everyday command is still `sudo frpctl`. Direct equivalents remain available:
 
 List registered clients:
 
 ```bash
+sudo frpctl clients
 sudo frp-clients
 ```
 
 Show connection information for one client:
 
 ```bash
+sudo frpctl client-info customer-dp
 sudo frp-client-info customer-dp
 ```
 
 Release a client's reserved ports after its remote `frpc` has been stopped or uninstalled:
 
 ```bash
+sudo frpctl release-client customer-dp
 sudo frp-release-client customer-dp
 ```
 
 Release one service reservation while leaving the rest of the client intact:
 
 ```bash
+sudo frpctl release-service customer-dp grafana
 sudo frp-release-service customer-dp grafana
+```
+
+Revoke a client's management identity without releasing ports:
+
+```bash
+sudo frpctl revoke-client customer-dp
+sudo frp-revoke-client customer-dp
 ```
 
 Create a longer-lived enrollment code when needed:
 
 ```bash
+sudo frpctl create-client --ttl 1800 --note customer-dp
 sudo frp-create-client --ttl 1800 --note customer-dp
 ```
 
@@ -415,6 +498,7 @@ Binaries and systemd units are removed. Token, configuration, and registry are p
 
 - automatic FRP server installation
 - automatic FRP client installation with menu-driven TCP service setup
+- unified `frpctl` operator menu on server and client hosts
 - post-install `frp-client` service add/edit/disable/re-enable without reinstalling FRP
 - persistent client management identity after one-time enrollment
 - persistent public port assignment for SSH, HTTP, HTTPS, and custom TCP services
@@ -425,6 +509,7 @@ Binaries and systemd units are removed. Token, configuration, and registry are p
 - migration from an existing manually configured FRP server
 - client list, connection-info, and reservation management commands
 - uninstall helpers and standalone bootstrap bundles
+- safe client project-layer upgrades that preserve identity, state, and ports
 - safe FRP server updates to the tested/pinned FRP version, with automatic rollback
 
 FRP itself remains upstream and is downloaded from the official release during installation.
@@ -648,6 +733,7 @@ sudo frp-set-client-installer-url \
 ## Server status
 
 ```bash
+sudo frpctl status
 sudo frp-server-status
 sudo frp-server-status --check
 ```
@@ -658,7 +744,10 @@ The status command reports the installed FRP binary version, the FRP version tes
 
 ## Update FRP
 
+On a server host:
+
 ```bash
+sudo frpctl update
 sudo frp-update
 ```
 
@@ -668,11 +757,13 @@ Check without changing anything:
 sudo frp-update --check
 ```
 
-`frp-update` upgrades the FRP server only to the version tested by `frp-auto-deploy` and automatically rolls back if the new server fails its health checks.
+`frpctl update` on a server host runs `frp-update`, which upgrades the FRP server binary only to the version tested by `frp-auto-deploy` and automatically rolls back if the new server fails its health checks.
+
+On a client host, `sudo frpctl update` upgrades `frp-auto-deploy` management tools only. It does not require an Enrollment Code, does not rewrite client state or `frpc.toml`, and does not restart `frpc` when the pinned FRP version is already installed.
 
 Upstream latest FRP releases are not installed automatically. `frp-auto-deploy` updates only to its tested/pinned FRP version. Availability of existing remote clients takes priority over installing the newest upstream binary.
 
-The update replaces `/usr/local/bin/frps` only. It does not rotate the FRP token, reinitialize the registry, reallocate ports, or change enrollment state. If health checks fail after activation, the previous `frps` binary is restored and restarted.
+The server FRP update replaces `/usr/local/bin/frps` only. It does not rotate the FRP token, reinitialize the registry, reallocate ports, or change enrollment state. If health checks fail after activation, the previous `frps` binary is restored and restarted.
 
 ---
 
@@ -690,6 +781,7 @@ The update replaces `/usr/local/bin/frps` only. It does not rotate the FRP token
 /var/lib/frp-auto-deploy/enrollments/
 /var/lib/frp-auto-deploy/backups/
 /usr/local/lib/frp-auto-deploy/frp-port-allocator.py
+/usr/local/sbin/frpctl
 ```
 
 ## Client
@@ -702,9 +794,11 @@ The update replaces `/usr/local/bin/frps` only. It does not rotate the FRP token
 /etc/frp/client-identity.mac
 /etc/frp/access-info.txt
 /etc/frp/backups/
+/etc/frp-auto-deploy/version
 /etc/systemd/system/frpc.service
 /usr/local/bin/frpc
 /usr/local/bin/frp-client
+/usr/local/bin/frpctl
 /usr/local/lib/frp-auto-deploy/frp-client-common.sh
 /usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py
 ```
@@ -749,6 +843,8 @@ python3 tests/test-mgmt-identity.py
 ./tests/test-management-commands.sh
 ./tests/test-frp-client.sh
 ./tests/test-guided-ux.sh
+./tests/test-client-upgrade.sh
+./tests/test-frpctl.sh
 ./tests/test-frp-update.sh
 ./tests/test-frp-server-status.sh
 ./scripts/secret-scan.sh
@@ -767,4 +863,5 @@ python3 tests/test-mgmt-identity.py
 - SSH is optional; HTTP/HTTPS presets are TCP passthrough, not FRP virtual-host modes.
 - Existing FRP clients can remain connected after migration because the existing FRP authentication token is preserved.
 - FRP server updates install only the tested/pinned FRP version and roll back automatically if health checks fail.
+- Client software updates do not require an Enrollment Code when management trust already exists.
 - Replace all documentation/example IP addresses with values appropriate for your environment before deployment.

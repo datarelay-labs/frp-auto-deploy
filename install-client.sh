@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_VERSION="1.1.0"
-FRP_VERSION="0.70.1"
+_FRP_INSTALL_CLIENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${_FRP_INSTALL_CLIENT_DIR}/VERSION" ]]; then
+  # shellcheck disable=SC1091
+  . "${_FRP_INSTALL_CLIENT_DIR}/VERSION"
+fi
+PROJECT_VERSION="${PROJECT_VERSION:-1.2.0}"
+FRP_VERSION="${FRP_VERSION:-0.70.1}"
 FRP_SHA256_AMD64="333da23d1b9009d7c01638e9ba38cf4600f7d37d393f854e96ee1396adefa9a6"
 FRP_SHA256_ARM64="3990f396a9a490ee7f0e5f355287750ed41520064ed999eab443b5e9a78d773d"
 
-_FRP_INSTALL_CLIENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/frp-client-common.sh
 . "${_FRP_INSTALL_CLIENT_DIR}/lib/frp-client-common.sh"
 
@@ -423,16 +427,21 @@ for item in services:
         print()
         print(f'  {server}:{remote_port}')
     print()
+print('For normal operation, this is the only command you need to remember:')
+print()
+print('  sudo frpctl')
+print()
 print('Useful commands')
 print('---------------')
 print()
-print('Manage published services:')
+print('Everyday menu / status / update:')
+print('  sudo frpctl')
+print('  sudo frpctl status')
+print('  sudo frpctl update')
+print()
+print('Advanced direct commands (still supported):')
 print('  sudo frp-client')
-print()
-print('Show client status:')
 print('  sudo frp-client status')
-print()
-print('Show connection information:')
 print('  sudo frp-client info')
 print()
 print('Systemd service:')
@@ -442,10 +451,40 @@ print('=========================================')
 PY
 }
 
+frp_client_existing_install_message() {
+  echo "ERROR: this host already has an FRP client installed." >&2
+  echo >&2
+  echo "A software update must not re-enroll the client and does not" >&2
+  echo "require an Enrollment Code." >&2
+  echo >&2
+  echo "Upgrade in place with:" >&2
+  echo "  sudo frpctl update" >&2
+  echo >&2
+  echo "or, from the bootstrap bundle:" >&2
+  echo "  curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh | sudo bash -s -- --upgrade" >&2
+  echo >&2
+  echo "Use sudo frp-client to change published services." >&2
+  echo "An Enrollment Code is only for first install or trust recovery." >&2
+}
+
+frp_client_upgrade_from_this_tree() {
+  local source="${FRP_CLIENT_UPDATE_SOURCE:-${_FRP_INSTALL_CLIENT_DIR}}"
+  local check_only=0
+  if [[ "${FRP_CLIENT_UPDATE_CHECK:-}" == "1" ]]; then
+    check_only=1
+  fi
+  frp_client_apply_upgrade "$source" "$check_only"
+}
+
 frp_client_main() {
   if [[ ${EUID} -ne 0 && -z "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
     echo "ERROR: run as root, e.g. curl ... | sudo env FRP_ALLOCATOR_URL=... bash" >&2
     exit 1
+  fi
+
+  if frp_client_has_existing_install; then
+    frp_client_existing_install_message
+    return 1
   fi
 
   frp_require_allocator_url
@@ -573,23 +612,54 @@ EOF2
     exit 1
   }
 
-  mkdir -p "$(frp_client_lib_dir)" "$(frp_client_path /usr/local/bin)"
-  if [[ -f "${_FRP_INSTALL_CLIENT_DIR}/lib/frp-client-common.sh" ]]; then
-    install -m 0644 "${_FRP_INSTALL_CLIENT_DIR}/lib/frp-client-common.sh" \
-      "$(frp_client_lib_dir)/frp-client-common.sh"
-  fi
-  if [[ -f "${_FRP_INSTALL_CLIENT_DIR}/lib/frp_mgmt_auth.py" ]]; then
-    install -m 0644 "${_FRP_INSTALL_CLIENT_DIR}/lib/frp_mgmt_auth.py" \
-      "$(frp_client_lib_dir)/frp_mgmt_auth.py"
-  fi
-  if [[ -f "${_FRP_INSTALL_CLIENT_DIR}/tools/frp-client" ]]; then
-    install -m 0755 "${_FRP_INSTALL_CLIENT_DIR}/tools/frp-client" \
-      "$(frp_client_path /usr/local/bin/frp-client)"
-  fi
+  frp_client_install_management_files "${_FRP_INSTALL_CLIENT_DIR}"
 
   print_complete "$FRP_SERVER" "$SERVICES_FILE"
 }
 
+frp_client_installer_usage() {
+  cat <<'EOF'
+Usage: install-client.sh [--upgrade] [--source DIR] [--check]
+
+  (default)   First-time client enrollment and FRP install
+  --upgrade   Upgrade management tools on an existing client
+  --source    Source tree for --upgrade (default: this installer tree)
+  --check     With --upgrade, report versions without changing files
+
+An already-installed client is not re-enrolled. Use --upgrade / frpctl update
+for software updates. An Enrollment Code is not required for a software update.
+EOF
+}
+
 if [[ "${FRP_CLIENT_SOURCED:-}" != "1" ]]; then
-  frp_client_main "$@"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --upgrade|upgrade)
+        FRP_CLIENT_UPGRADE=1
+        shift
+        ;;
+      --source)
+        FRP_CLIENT_UPDATE_SOURCE="${2:-}"
+        shift 2
+        ;;
+      --check|--dry-run)
+        FRP_CLIENT_UPDATE_CHECK=1
+        shift
+        ;;
+      -h|--help)
+        frp_client_installer_usage
+        exit 0
+        ;;
+      *)
+        echo "ERROR: unknown option: $1" >&2
+        frp_client_installer_usage >&2
+        exit 2
+        ;;
+    esac
+  done
+  if [[ "${FRP_CLIENT_UPGRADE:-}" == "1" ]]; then
+    frp_client_upgrade_from_this_tree
+    exit $?
+  fi
+  frp_client_main
 fi

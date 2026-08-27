@@ -15,6 +15,7 @@ This procedure is for an existing server that still has a v1 registry, or for a 
 On the FRP server:
 
 ```bash
+sudo frpctl status
 sudo frp-server-status
 sudo frp-server-status --check
 ```

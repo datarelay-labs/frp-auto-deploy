@@ -719,7 +719,7 @@ class Allocator:
 
 def make_handler(allocator):
     class Handler(BaseHTTPRequestHandler):
-        server_version = 'frp-auto-deploy/1.1'
+        server_version = 'frp-auto-deploy/1.2'
 
         def log_message(self, fmt, *args):
             print('%s - %s' % (self.address_string(), fmt % args), flush=True)

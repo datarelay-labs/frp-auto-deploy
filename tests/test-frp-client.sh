@@ -160,8 +160,12 @@ file_mac=Path(sys.argv[3]).read_text().strip()
 assert file_mac==client.get('mgmt_mac_key')
 PY
 [[ -x "$TREE/usr/local/bin/frp-client" ]] || fail "frp-client not installed"
+[[ -x "$TREE/usr/local/bin/frpctl" ]] || fail "frpctl not installed"
 [[ -f "$TREE/usr/local/lib/frp-auto-deploy/frp-client-common.sh" ]] || fail "client lib not installed"
 [[ -f "$TREE/usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py" ]] || fail "mgmt auth helper not installed"
+[[ -f "$TREE/etc/frp-auto-deploy/version" ]] || fail "client version file missing"
+grep -q 'PROJECT_VERSION=1.2.0' "$TREE/etc/frp-auto-deploy/version" || fail "client project version"
+grep -q 'FRP_VERSION=0.70.1' "$TREE/etc/frp-auto-deploy/version" || fail "client FRP version"
 pass "fresh install writes client-state"
 
 HOOK="$WORKDIR/hook.log"
@@ -195,6 +199,7 @@ PY
 [[ "$before" == "$after" ]] || fail "read-only CLI modified files"
 if grep -qx enroll "$HOOK"; then fail "read-only contacted allocator"; fi
 if grep -qx restart "$HOOK"; then fail "read-only restarted frpc"; fi
+grep -q 'Project version : 1.2.0' "$WORKDIR/status.out" || fail "status project version"
 grep -q 'Hostname        : dp-example' "$WORKDIR/status.out" || fail "status hostname"
 grep -q 'Management identity : enrolled' "$WORKDIR/status.out" || fail "status identity"
 grep -q 'ssh' "$WORKDIR/status.out" || fail "status ssh"
@@ -630,16 +635,20 @@ grep -q 'another frp-client management operation is already running' "$WORKDIR/l
 rmdir "$TREE/etc/frp/client-manage.lock" 2>/dev/null || rm -rf "$TREE/etc/frp/client-manage.lock"
 pass "local management lock"
 
-# Reinstall preserves identity
+# Existing install refuses re-enrollment via the installer
 fp_before="$(python3 "$ROOT/lib/frp_mgmt_auth.py" fingerprint "$TREE/etc/frp/client-identity.pub")"
 cp "$TREE/etc/frp/client-identity.key" "$WORKDIR/key.before"
 export FRP_ENROLLMENT_CODE="${EID}.${SECRET}"
 export FRP_SERVICES_JSON='[{"id":"ssh","name":"SSH","protocol":"tcp","local_ip":"127.0.0.1","local_port":22,"preset":"ssh","ssh_user":"aella"}]'
-frp_client_main >"$WORKDIR/reinstall.out"
+if frp_client_main >"$WORKDIR/reinstall.out" 2>"$WORKDIR/reinstall.err"; then
+  fail "installer should refuse an existing client"
+fi
+grep -q 'already has an FRP client installed' "$WORKDIR/reinstall.err" || fail "existing-install refusal message"
+grep -q 'frpctl update' "$WORKDIR/reinstall.err" || fail "existing-install should point at upgrade"
 fp_after="$(python3 "$ROOT/lib/frp_mgmt_auth.py" fingerprint "$TREE/etc/frp/client-identity.pub")"
-[[ "$fp_before" == "$fp_after" ]] || fail "reinstall rotated identity"
-cmp -s "$TREE/etc/frp/client-identity.key" "$WORKDIR/key.before" || fail "reinstall replaced key"
-pass "reinstall preserves identity"
+[[ "$fp_before" == "$fp_after" ]] || fail "refused reinstall rotated identity"
+cmp -s "$TREE/etc/frp/client-identity.key" "$WORKDIR/key.before" || fail "refused reinstall replaced key"
+pass "installer refuses to re-enroll an existing client"
 
 # Legacy P2 client: one-time Enrollment Code, then identity
 rm -f "$TREE/etc/frp/client-identity.key" "$TREE/etc/frp/client-identity.pub" "$TREE/etc/frp/client-identity.mac"
