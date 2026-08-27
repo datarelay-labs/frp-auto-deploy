@@ -288,157 +288,13 @@ ensure_dependencies() {
   fi
 }
 
-prompt_secret() {
-  local prompt="$1" var="$2"
-  if [[ -n "${!var:-}" ]]; then return 0; fi
-  if [[ -r /dev/tty ]]; then
-    read -r -s -p "$prompt" "$var" </dev/tty
-    echo >/dev/tty
-  else
-    echo "ERROR: no TTY and $var is not set" >&2
-    exit 1
-  fi
-}
-
-read_tty() {
-  local prompt="$1" default="${2:-}"
-  local value=""
-  if [[ -r /dev/tty ]]; then
-    read -r -p "$prompt" value </dev/tty || true
-  else
-    echo "ERROR: no TTY for interactive setup; set FRP_SERVICES_JSON" >&2
-    exit 1
-  fi
-  printf '%s' "${value:-$default}"
-}
-
-infer_ssh_user() {
-  local user="${FRP_SSH_USER:-${SUDO_USER:-root}}"
-  if [[ "$user" == "root" && -n "${LOGNAME:-}" && "$LOGNAME" != root ]]; then
-    user="$LOGNAME"
-  fi
-  printf '%s' "$user"
-}
-
-probe_tcp() {
-  local host="$1" port="$2"
-  timeout 3 bash -c "echo >/dev/tcp/${host}/${port}" >/dev/null 2>&1
-}
-
-maybe_warn_connectivity() {
-  local host="$1" port="$2" label="$3"
-  if [[ "${FRP_SKIP_CONNECTIVITY_CHECK:-}" == "1" ]]; then
-    return 0
-  fi
-  if probe_tcp "$host" "$port"; then
-    return 0
-  fi
-  echo "WARNING: cannot connect to ${label} ${host}:${port} (continuing; target may be remote or not yet listening)"
-}
-
-prompt_service_id() {
-  local default="$1"
-  local sid
-  sid="$(read_tty "Service ID [${default}]: " "$default")"
-  printf '%s' "$sid"
-}
-
-prompt_target_host() {
-  local default="${1:-127.0.0.1}"
-  read_tty "Target host [${default}]: " "$default"
-}
-
-prompt_target_port() {
-  local default="$1"
-  read_tty "Target port [${default}]: " "$default"
-}
-
-service_payload() {
-  python3 - "$@" <<'PY'
-import json, sys
-preset = sys.argv[1]
-sid = sys.argv[2]
-name = sys.argv[3]
-host = sys.argv[4]
-port = sys.argv[5]
-payload = {
-  'id': sid,
-  'name': name,
-  'protocol': 'tcp',
-  'local_ip': host,
-  'local_port': port,
-  'preset': preset,
-}
-if preset == 'ssh':
-    payload['ssh_user'] = sys.argv[6] if len(sys.argv) > 6 else 'root'
-print(json.dumps(payload))
-PY
-}
-
-add_preset_ssh() {
-  local sid host port user payload
-  sid="$(prompt_service_id ssh)"
-  host="$(prompt_target_host 127.0.0.1)"
-  port="$(prompt_target_port 22)"
-  user="$(read_tty "SSH user [$(infer_ssh_user)]: " "$(infer_ssh_user)")"
-  maybe_warn_connectivity "$host" "$port" "SSH"
-  payload="$(service_payload ssh "$sid" SSH "$host" "$port" "$user")"
-  services_add_json "$payload"
-}
-
-add_preset_http() {
-  local sid host port payload
-  sid="$(prompt_service_id http)"
-  host="$(prompt_target_host 127.0.0.1)"
-  port="$(prompt_target_port 80)"
-  maybe_warn_connectivity "$host" "$port" "HTTP"
-  payload="$(service_payload http "$sid" HTTP "$host" "$port")"
-  services_add_json "$payload"
-}
-
-add_preset_https() {
-  local sid host port payload
-  sid="$(prompt_service_id https)"
-  host="$(prompt_target_host 127.0.0.1)"
-  port="$(prompt_target_port 443)"
-  maybe_warn_connectivity "$host" "$port" "HTTPS"
-  payload="$(service_payload https "$sid" HTTPS "$host" "$port")"
-  services_add_json "$payload"
-}
-
-add_preset_custom() {
-  local sid name host port payload
-  sid="$(read_tty "Service ID: " "")"
-  name="$(read_tty "Display name [${sid}]: " "$sid")"
-  host="$(prompt_target_host 127.0.0.1)"
-  port="$(read_tty "Target port: " "")"
-  maybe_warn_connectivity "$host" "$port" "TCP"
-  payload="$(service_payload custom "$sid" "$name" "$host" "$port")"
-  services_add_json "$payload"
-}
-
 menu_add_service() {
-  local choice
-  while true; do
-    echo
-    echo "Add service"
-    echo
-    echo "1) SSH"
-    echo "2) HTTP"
-    echo "3) HTTPS"
-    echo "4) Custom TCP"
-    echo "5) Back"
-    echo
-    choice="$(read_tty "Select: " "")"
-    case "$choice" in
-      1) add_preset_ssh; return 0 ;;
-      2) add_preset_http; return 0 ;;
-      3) add_preset_https; return 0 ;;
-      4) add_preset_custom; return 0 ;;
-      5) return 0 ;;
-      *) echo "ERROR: select 1-5" >&2 ;;
-    esac
-  done
+  local payload=""
+  frp_ux_prompt_new_service payload
+  if [[ -z "$payload" ]]; then
+    return 0
+  fi
+  services_add_json "$payload"
 }
 
 menu_remove_service() {
@@ -448,28 +304,42 @@ menu_remove_service() {
     return 0
   fi
   echo
-  echo "Configured services:"
+  echo "Configured services"
+  echo "==================="
   echo
   services_list
+  echo "Remove from this install list only."
+  echo "Nothing has been published yet, so no public port is reserved."
   echo
   choice="$(read_tty "Remove service number: " "")"
   services_remove_index "$choice"
 }
 
 collect_services_interactive() {
-  local choice
+  local choice payload
   while true; do
     echo
-    echo "Configured services:"
-    echo
-    services_list
-    echo
-    echo "1) Add service"
-    echo "2) Remove service"
-    echo "3) Install"
-    echo "4) Cancel"
-    echo
-    choice="$(read_tty "Select: " "")"
+    if [[ "$(services_count)" == "0" ]]; then
+      frp_ux_empty_services_help
+      echo "1) Add service"
+      echo "2) Remove a service"
+      echo "3) Install and connect"
+      echo "4) Cancel"
+      echo
+      choice="$(read_tty "Select an option [1]: " "1")"
+    else
+      echo "Configured services"
+      echo "==================="
+      echo
+      services_list
+      frp_ux_configured_services_help
+      echo "1) Add another service"
+      echo "2) Remove a service"
+      echo "3) Install and connect"
+      echo "4) Cancel"
+      echo
+      choice="$(read_tty "Select: " "")"
+    fi
     case "$choice" in
       1) menu_add_service ;;
       2) menu_remove_service ;;
@@ -478,11 +348,15 @@ collect_services_interactive() {
           echo "ERROR: at least one service must be configured" >&2
           continue
         fi
-        return 0
+        frp_ux_print_install_summary "$SERVICES_FILE" "$FRP_VERSION"
+        if frp_confirm_yes "Continue? [Y/n]: "; then
+          return 0
+        fi
+        echo "Returning to the service configuration menu."
         ;;
       4)
         echo "Cancelled."
-        exit 1
+        return 1
         ;;
       *) echo "ERROR: select 1-4" >&2 ;;
     esac
@@ -499,7 +373,7 @@ collect_services() {
     fi
     return 0
   fi
-  collect_services_interactive
+  collect_services_interactive || exit 1
 }
 
 print_complete() {
@@ -514,32 +388,51 @@ print('=========================================')
 print(' FRP Installation Complete')
 print('=========================================')
 print()
-print('Published services:')
+print('Your FRP client is running successfully.')
+print()
+print('Published services')
+print('------------------')
 print()
 for item in services:
     name = item.get('name') or item['id']
     preset = item.get('preset') or 'custom'
     remote_port = item.get('remote_port')
     print(name)
+    print(f"  Local target : {item.get('local_ip')}:{item.get('local_port')}")
+    print(f"  Public port  : {remote_port}")
+    print()
     if preset == 'ssh':
         user = item.get('ssh_user') or 'root'
+        print('Connect from another machine with:')
+        print()
         print(f'  ssh -p {remote_port} {user}@{server}')
     elif preset == 'http':
+        print('Access:')
+        print()
         print(f'  http://{server}:{remote_port}')
     elif preset == 'https':
+        print('Access:')
+        print()
         print(f'  https://{server}:{remote_port}')
     else:
+        print('Connect:')
+        print()
         print(f'  {server}:{remote_port}')
     print()
-print('Connection information:')
-print('cat /etc/frp/access-info.txt')
+print('Useful commands')
+print('---------------')
 print()
-print('Manage services later without reinstalling:')
-print('sudo frp-client')
+print('Manage published services:')
+print('  sudo frp-client')
 print()
-print('Service status:')
-print('sudo frp-client status')
-print('sudo systemctl status frpc --no-pager')
+print('Show client status:')
+print('  sudo frp-client status')
+print()
+print('Show connection information:')
+print('  sudo frp-client info')
+print()
+print('Systemd service:')
+print('  sudo systemctl status frpc --no-pager')
 print()
 print('=========================================')
 PY
@@ -563,14 +456,8 @@ frp_client_main() {
     ensure_dependencies || exit 1
   fi
 
-  cat <<'EOF'
-
-=========================================
- FRP Client Setup
-=========================================
-
-EOF
-
+  frp_ux_intro
+  frp_ux_enrollment_help
   prompt_secret "Enrollment Code: " FRP_ENROLLMENT_CODE
 
   if [[ "$FRP_ENROLLMENT_CODE" != *.* ]]; then
@@ -605,7 +492,7 @@ EOF
 
   HOSTNAME_VALUE="${FRP_TEST_HOSTNAME:-$(hostname -s)}"
 
-  echo "Requesting persistent FRP ports ..."
+  echo "Validating enrollment and requesting persistent public ports ..."
   frp_enroll_services "$ALLOCATOR_URL" "$ENROLL_ID" "$ENROLL_SECRET" \
     "$MACHINE_ID" "$HOSTNAME_VALUE" "$SERVICES_FILE" "$ALLOCATED_FILE" "$ENROLL_META_FILE" \
     || exit 1
@@ -624,6 +511,7 @@ EOF
     URL="https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/frp_${FRP_VERSION}_linux_${FRP_ARCH}.tar.gz"
     echo "Downloading FRP ${FRP_VERSION} (${FRP_ARCH}) ..."
     curl -fL --retry 3 -o "$ARCHIVE" "$URL"
+    echo "Verifying checksum ..."
     printf '%s  %s\n' "$EXPECTED_SHA" "$ARCHIVE" | sha256sum -c -
     tar xzf "$ARCHIVE" -C "$TMPDIR"
     install -m 0755 "$TMPDIR/frp_${FRP_VERSION}_linux_${FRP_ARCH}/frpc" /usr/local/bin/frpc
@@ -634,10 +522,12 @@ EOF
   FRPC_TOML="$(frp_client_path /etc/frp/frpc.toml)"
   ACCESS_INFO="$(frp_client_path /etc/frp/access-info.txt)"
   mkdir -p "$(dirname "$FRPC_TOML")"
+  echo "Validating configuration ..."
   render_frpc_toml "$FRPC_TOML" "$FRP_SERVER" "$FRP_SERVER_PORT" "$FRP_TOKEN" "$HOST_ID" "$SERVICES_FILE"
   frp_client_verify_config "$FRPC_TOML" || exit 1
 
   if [[ "${FRP_SKIP_SYSTEMD:-}" != "1" && -z "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
+    echo "Installing systemd service ..."
     cat >/etc/systemd/system/frpc.service <<'EOF2'
 [Unit]
 Description=FRP Client
@@ -653,10 +543,12 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF2
+    echo "Starting FRP client ..."
     systemctl daemon-reload
     systemctl enable frpc >/dev/null
     systemctl restart frpc
 
+    echo "Verifying published proxies ..."
     mapfile -t PROXY_NAMES < <(proxy_names_from_services "$HOST_ID")
     if ! wait_for_proxies "${PROXY_NAMES[@]}"; then
       echo "ERROR: frpc did not register every requested proxy successfully" >&2

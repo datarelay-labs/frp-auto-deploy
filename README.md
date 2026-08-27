@@ -179,21 +179,52 @@ curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main
 
 `FRP_ALLOCATOR_URL` is required. There is no hard-coded allocator address in the installer. If it is missing, the client bootstrap exits with a clear error and does not install FRP.
 
-The installer asks for an enrollment code, then lets you add one or more TCP services:
+The installer explains each field as you go. Values in `[brackets]` are defaults; press Enter to accept them. You need a short-lived Enrollment Code from `sudo frp-create-client` on the FRP server. It is entered interactively, is not stored on the client, and is not the FRP token.
 
 ```text
+=========================================
+ FRP Client Setup
+=========================================
+
+This installer publishes services on this Linux system
+through your FRP server.
+
+Before continuing, you need an Enrollment Code.
+
+Generate one on the FRP server with:
+
+  sudo frp-create-client
+
+Tip:
+  Values shown in [brackets] are defaults.
+  Press Enter to accept the default value.
+
 Enrollment Code:
-
-Add service
-
-1) SSH
-2) HTTP
-3) HTTPS
-4) Custom TCP
-5) Finish
 ```
 
-SSH is optional. Any TCP service can be published. Each service receives a persistent public port.
+Then add one or more TCP services. SSH is optional. The FRP server assigns the public port automatically.
+
+```text
+Add a service
+=============
+
+1) SSH
+   Remote shell access.
+   Default target: 127.0.0.1:22
+
+2) HTTP
+   Web application using plain HTTP.
+   Default target: 127.0.0.1:80
+
+3) HTTPS
+   Web application using HTTPS.
+   Default target: 127.0.0.1:443
+
+4) Custom TCP
+   Any other TCP service.
+
+5) Back
+```
 
 Built-in presets:
 
@@ -201,6 +232,35 @@ Built-in presets:
 - HTTP (`127.0.0.1:80` by default)
 - HTTPS (`127.0.0.1:443` by default) — TCP passthrough, no TLS termination
 - Custom TCP (any host:port)
+
+The installer shows a review and asks `Continue? [Y/n]` before changing the system.
+
+### First-time field guide
+
+These fields are also explained in the installer:
+
+```text
+Enrollment Code
+  Generated on the FRP server with:
+  sudo frp-create-client
+
+Service ID
+  Stable unique identifier used to preserve the public port.
+
+Target host
+  Where the real service runs.
+  127.0.0.1 means this client machine.
+
+Target port
+  Port used by the real service.
+
+SSH user
+  Username displayed in the generated SSH command.
+  This does not create an OS account.
+
+Public port
+  Automatically allocated by the FRP server.
+```
 
 Example:
 
@@ -222,19 +282,24 @@ Example completion output:
  FRP Installation Complete
 =========================================
 
-Published services:
+Your FRP client is running successfully.
+
+Published services
+------------------
 
 SSH
+  Local target : 127.0.0.1:22
+  Public port  : 6002
+
+Connect from another machine with:
+
   ssh -p 6002 aella@203.0.113.10
 
-Grafana
-  http://203.0.113.10:6003
+Useful commands
+---------------
 
-Admin Web
-  https://203.0.113.10:6004
-
-Connection information:
-cat /etc/frp/access-info.txt
+Manage published services:
+  sudo frp-client
 ```
 
 The assigned ports are persistent. Reinstalling the same service on the same machine reuses the previous public port based on `/etc/machine-id` plus the service ID. Changing a service's local target does not reallocate its public port.
@@ -655,6 +720,7 @@ python3 tests/test-enrollment-security.py
 ./tests/test-create-client.sh
 ./tests/test-management-commands.sh
 ./tests/test-frp-client.sh
+./tests/test-guided-ux.sh
 ./tests/test-frp-update.sh
 ./tests/test-frp-server-status.sh
 ./scripts/secret-scan.sh

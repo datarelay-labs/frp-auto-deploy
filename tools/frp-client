@@ -26,76 +26,6 @@ frp_client_source_lib() {
 
 frp_client_source_lib
 
-prompt_secret() {
-  local prompt="$1" var="$2"
-  if [[ -n "${!var:-}" ]]; then return 0; fi
-  if [[ -r /dev/tty ]]; then
-    read -r -s -p "$prompt" "$var" </dev/tty
-    echo >/dev/tty
-  else
-    echo "ERROR: no TTY and $var is not set" >&2
-    exit 1
-  fi
-}
-
-read_tty() {
-  local prompt="$1" default="${2:-}"
-  local value=""
-  if [[ -r /dev/tty ]]; then
-    read -r -p "$prompt" value </dev/tty || true
-  else
-    echo "ERROR: no TTY for interactive setup; set non-interactive inputs" >&2
-    exit 1
-  fi
-  printf '%s' "${value:-$default}"
-}
-
-infer_ssh_user() {
-  local user="${FRP_SSH_USER:-${SUDO_USER:-root}}"
-  if [[ "$user" == "root" && -n "${LOGNAME:-}" && "$LOGNAME" != root ]]; then
-    user="$LOGNAME"
-  fi
-  printf '%s' "$user"
-}
-
-probe_tcp() {
-  local host="$1" port="$2"
-  timeout 3 bash -c "echo >/dev/tcp/${host}/${port}" >/dev/null 2>&1
-}
-
-maybe_warn_connectivity() {
-  local host="$1" port="$2" label="$3"
-  if [[ "${FRP_SKIP_CONNECTIVITY_CHECK:-}" == "1" ]]; then
-    return 0
-  fi
-  if probe_tcp "$host" "$port"; then
-    return 0
-  fi
-  echo "WARNING: cannot connect to ${label} ${host}:${port} (continuing; target may be remote or not yet listening)"
-}
-
-service_payload() {
-  python3 - "$@" <<'PY'
-import json, sys
-preset = sys.argv[1]
-sid = sys.argv[2]
-name = sys.argv[3]
-host = sys.argv[4]
-port = sys.argv[5]
-payload = {
-  'id': sid,
-  'name': name,
-  'protocol': 'tcp',
-  'local_ip': host,
-  'local_port': port,
-  'preset': preset,
-}
-if preset == 'ssh':
-    payload['ssh_user'] = sys.argv[6] if len(sys.argv) > 6 else 'root'
-print(json.dumps(payload))
-PY
-}
-
 frp_state_add_payload() {
   python3 - "$CANDIDATE_FILE" "$1" <<'PY'
 import json, re, sys
@@ -285,61 +215,12 @@ PY
 }
 
 menu_add_service() {
-  local choice sid host port user name payload
-  while true; do
-    echo
-    echo "Add service"
-    echo
-    echo "1) SSH"
-    echo "2) HTTP"
-    echo "3) HTTPS"
-    echo "4) Custom TCP"
-    echo "5) Back"
-    echo
-    choice="$(read_tty "Select: " "")"
-    case "$choice" in
-      1)
-        sid="$(read_tty "Service ID [ssh]: " "ssh")"
-        host="$(read_tty "Target host [127.0.0.1]: " "127.0.0.1")"
-        port="$(read_tty "Target port [22]: " "22")"
-        user="$(read_tty "SSH user [$(infer_ssh_user)]: " "$(infer_ssh_user)")"
-        maybe_warn_connectivity "$host" "$port" "SSH"
-        payload="$(service_payload ssh "$sid" SSH "$host" "$port" "$user")"
-        frp_state_add_payload "$payload"
-        return 0
-        ;;
-      2)
-        sid="$(read_tty "Service ID [http]: " "http")"
-        host="$(read_tty "Target host [127.0.0.1]: " "127.0.0.1")"
-        port="$(read_tty "Target port [80]: " "80")"
-        maybe_warn_connectivity "$host" "$port" "HTTP"
-        payload="$(service_payload http "$sid" HTTP "$host" "$port")"
-        frp_state_add_payload "$payload"
-        return 0
-        ;;
-      3)
-        sid="$(read_tty "Service ID [https]: " "https")"
-        host="$(read_tty "Target host [127.0.0.1]: " "127.0.0.1")"
-        port="$(read_tty "Target port [443]: " "443")"
-        maybe_warn_connectivity "$host" "$port" "HTTPS"
-        payload="$(service_payload https "$sid" HTTPS "$host" "$port")"
-        frp_state_add_payload "$payload"
-        return 0
-        ;;
-      4)
-        sid="$(read_tty "Service ID: " "")"
-        name="$(read_tty "Display name [${sid}]: " "$sid")"
-        host="$(read_tty "Target host [127.0.0.1]: " "127.0.0.1")"
-        port="$(read_tty "Target port: " "")"
-        maybe_warn_connectivity "$host" "$port" "TCP"
-        payload="$(service_payload custom "$sid" "$name" "$host" "$port")"
-        frp_state_add_payload "$payload"
-        return 0
-        ;;
-      5) return 0 ;;
-      *) echo "ERROR: select 1-5" >&2 ;;
-    esac
-  done
+  local payload=""
+  frp_ux_prompt_new_service payload
+  if [[ -z "$payload" ]]; then
+    return 0
+  fi
+  frp_state_add_payload "$payload"
 }
 
 menu_edit_service() {
@@ -350,7 +231,10 @@ menu_edit_service() {
   frp_print_state_services "$CANDIDATE_FILE"
   choice="$(read_tty "Edit service number: " "")"
   sid="$(frp_select_service_id "$choice")"
-  echo "Service ID ${sid} cannot be changed. Add a new service to use a different ID."
+  echo "Service ID ${sid} cannot be changed."
+  echo "The Service ID plus this machine's identity keeps the public port stable."
+  echo "To use a different ID, add a new service and disable this one."
+  echo
   local meta old_name old_host old_port old_user preset
   meta="$(python3 - "$CANDIDATE_FILE" "$sid" <<'PY'
 import json,sys
@@ -368,12 +252,17 @@ PY
   old_port="$(printf '%s\n' "$meta" | sed -n '3p')"
   old_user="$(printf '%s\n' "$meta" | sed -n '4p')"
   preset="$(printf '%s\n' "$meta" | sed -n '5p')"
-  echo "Service ID ${sid} cannot be changed. Add a new service to use a different ID."
+  echo "Display name"
+  echo "  Label shown in status and connection information."
+  echo
   name="$(read_tty "Display name [${old_name}]: " "$old_name")"
+  frp_ux_target_host_help
   host="$(read_tty "Target host [${old_host}]: " "$old_host")"
+  frp_ux_target_port_help "$preset"
   port="$(read_tty "Target port [${old_port}]: " "$old_port")"
   user="$old_user"
   if [[ "$preset" == ssh ]]; then
+    frp_ux_ssh_user_help
     user="$(read_tty "SSH user [${old_user}]: " "$old_user")"
   fi
   maybe_warn_connectivity "$host" "$port" "TCP"
@@ -450,8 +339,16 @@ frp_apply_candidate() {
 
   echo
   frp_state_diff "$current" "$candidate" || true
+  frp_ux_print_apply_summary "$current" "$candidate"
+  if [[ -z "${FRP_CLIENT_CANDIDATE:-}" ]]; then
+    if ! frp_confirm_yes "Continue? [Y/n]: "; then
+      echo "Apply cancelled."
+      return 0
+    fi
+  fi
   echo
   echo "An Enrollment Code is required to authorize this change."
+  frp_ux_enrollment_help
   prompt_secret "Enrollment Code: " FRP_ENROLLMENT_CODE
   if [[ "$FRP_ENROLLMENT_CODE" != *.* ]]; then
     echo "ERROR: invalid enrollment code format" >&2
@@ -646,6 +543,9 @@ print('=====================')
 print()
 print(f"Client: {data.get('hostname','')}")
 print(f"Server: {data.get('frp_server','')}")
+print()
+print('Values in [brackets] are defaults. Press Enter to accept.')
+print('An Enrollment Code is needed only when applying server-affecting changes.')
 print()
 print('Current services:')
 print()

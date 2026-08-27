@@ -49,6 +49,580 @@ frp_client_hook_log() {
   fi
 }
 
+_FRP_TEST_INPUT_READY=0
+
+frp_test_input_path() {
+  printf '%s' "${FRP_CLIENT_TEST_INPUT_FILE:-${TMPDIR:-/tmp}/frp-client-test-input.$$}"
+}
+
+frp_reset_test_input() {
+  _FRP_TEST_INPUT_READY=0
+  rm -f "$(frp_test_input_path)"
+}
+
+frp_using_test_input() {
+  [[ -n "${FRP_CLIENT_TEST_INPUT+x}" ]]
+}
+
+frp_open_test_input() {
+  local file
+  file="$(frp_test_input_path)"
+  if [[ -f "$file" ]]; then
+    return 0
+  fi
+  printf '%s' "${FRP_CLIENT_TEST_INPUT}" >"$file"
+  if [[ -n "${FRP_CLIENT_TEST_INPUT:-}" && "${FRP_CLIENT_TEST_INPUT}" != *$'\n' ]]; then
+    printf '\n' >>"$file"
+  fi
+}
+
+frp_read_test_line() {
+  local file first
+  frp_open_test_input
+  file="$(frp_test_input_path)"
+  first="$(python3 - "$file" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+text = path.read_text(encoding='utf-8') if path.is_file() else ''
+if not text:
+    sys.stdout.write('')
+    raise SystemExit(0)
+if text.endswith('\n') and text.count('\n') == 1 and text[:-1] == '':
+    first, rest = '', ''
+elif '\n' in text:
+    first, rest = text.split('\n', 1)
+else:
+    first, rest = text, ''
+path.write_text(rest, encoding='utf-8')
+sys.stdout.write(first)
+PY
+)"
+  printf '%s' "$first"
+}
+
+prompt_secret() {
+  local prompt="$1" var="$2"
+  if [[ -n "${!var:-}" ]]; then return 0; fi
+  if frp_using_test_input; then
+    printf '%s\n' "$prompt" >&2
+    printf -v "$var" '%s' "$(frp_read_test_line)"
+    return 0
+  fi
+  if [[ -r /dev/tty ]]; then
+    read -r -s -p "$prompt" "$var" </dev/tty
+    echo >/dev/tty
+  else
+    echo "ERROR: no TTY and $var is not set" >&2
+    exit 1
+  fi
+}
+
+read_tty() {
+  local prompt="$1" default="${2:-}"
+  local value=""
+  if frp_using_test_input; then
+    printf '%s\n' "$prompt" >&2
+    value="$(frp_read_test_line)"
+    printf '%s' "${value:-$default}"
+    return 0
+  fi
+  if [[ -r /dev/tty ]]; then
+    read -r -p "$prompt" value </dev/tty || true
+  else
+    echo "ERROR: no TTY for interactive setup; set FRP_SERVICES_JSON or FRP_CLIENT_TEST_INPUT" >&2
+    exit 1
+  fi
+  printf '%s' "${value:-$default}"
+}
+
+infer_ssh_user() {
+  local user="${FRP_SSH_USER:-${SUDO_USER:-root}}"
+  if [[ "$user" == "root" && -n "${LOGNAME:-}" && "$LOGNAME" != root ]]; then
+    user="$LOGNAME"
+  fi
+  printf '%s' "$user"
+}
+
+probe_tcp() {
+  local host="$1" port="$2"
+  timeout 3 bash -c "echo >/dev/tcp/${host}/${port}" >/dev/null 2>&1
+}
+
+maybe_warn_connectivity() {
+  local host="$1" port="$2" label="$3"
+  if [[ "${FRP_SKIP_CONNECTIVITY_CHECK:-}" == "1" ]]; then
+    return 0
+  fi
+  if probe_tcp "$host" "$port"; then
+    return 0
+  fi
+  echo "WARNING: cannot connect to ${label} ${host}:${port} (continuing; target may be remote or not yet listening)"
+}
+
+frp_confirm_yes() {
+  local prompt="${1:-Continue? [Y/n]: }"
+  local answer
+  answer="$(read_tty "$prompt" "Y")"
+  case "$answer" in
+    ''|Y|y|yes|YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+frp_preset_type_label() {
+  case "$1" in
+    ssh) printf 'SSH / TCP' ;;
+    http) printf 'HTTP / TCP' ;;
+    https) printf 'HTTPS / TCP' ;;
+    *) printf 'Custom TCP' ;;
+  esac
+}
+
+service_payload() {
+  python3 - "$@" <<'PY'
+import json, sys
+preset = sys.argv[1]
+sid = sys.argv[2]
+name = sys.argv[3]
+host = sys.argv[4]
+port = sys.argv[5]
+payload = {
+  'id': sid,
+  'name': name,
+  'protocol': 'tcp',
+  'local_ip': host,
+  'local_port': port,
+  'preset': preset,
+}
+if preset == 'ssh':
+    payload['ssh_user'] = sys.argv[6] if len(sys.argv) > 6 else 'root'
+print(json.dumps(payload))
+PY
+}
+
+frp_ux_intro() {
+  cat <<'EOF'
+
+=========================================
+ FRP Client Setup
+=========================================
+
+This installer publishes services on this Linux system
+through your FRP server.
+
+Before continuing, you need an Enrollment Code.
+
+Generate one on the FRP server with:
+
+  sudo frp-create-client
+
+The Enrollment Code is short-lived. Enter it only here.
+It authorizes this enrollment. It is not stored on this client
+and it is not the FRP token.
+
+Tip:
+  Values shown in [brackets] are defaults.
+  Press Enter to accept the default value.
+
+EOF
+}
+
+frp_ux_enrollment_help() {
+  cat <<'EOF'
+Enrollment Code
+  Generated on the FRP server with: sudo frp-create-client
+  Short-lived. Entered interactively. Not stored. Not the FRP token.
+  It authorizes enrollment and later configuration changes.
+
+EOF
+}
+
+frp_ux_defaults_help() {
+  cat <<'EOF'
+Tip:
+  Values shown in [brackets] are defaults.
+  Press Enter to accept the default value.
+
+EOF
+}
+
+frp_ux_service_id_help() {
+  local default="${1:-}"
+  cat <<EOF
+Service ID
+  A short unique name for this service.
+
+  The Service ID is used together with this machine's identity
+  to keep the same public port after reinstall or later changes.
+
+  Usually you can keep the default.
+
+  Examples:
+    ssh
+    grafana
+    admin-web
+    api
+EOF
+  if [[ -n "$default" ]]; then
+    echo
+  fi
+}
+
+frp_ux_target_host_help() {
+  cat <<'EOF'
+Target host
+  The IP address or hostname where the actual service runs.
+
+  Use 127.0.0.1 if the service is running on this machine.
+  Enter another reachable internal IP if it runs on another server.
+
+  Examples:
+    127.0.0.1
+    192.168.10.20
+    internal-api.example.local
+
+EOF
+}
+
+frp_ux_target_port_help() {
+  local preset="${1:-custom}"
+  case "$preset" in
+    ssh)
+      cat <<'EOF'
+Target port
+  TCP port used by the SSH service on the target host.
+
+  Standard SSH uses port 22.
+  Press Enter if this is a normal SSH installation.
+
+EOF
+      ;;
+    http)
+      cat <<'EOF'
+Target port
+  TCP port used by the web application.
+
+  Standard HTTP uses port 80.
+  Examples of alternate ports: 8080, 3000.
+
+EOF
+      ;;
+    https)
+      cat <<'EOF'
+Target port
+  TCP port used by the HTTPS application.
+
+  Standard HTTPS uses port 443.
+
+EOF
+      ;;
+    *)
+      cat <<'EOF'
+Target port
+  TCP port used by the application on the target host.
+
+  Examples:
+    Grafana      3000
+    API          8080
+    PostgreSQL   5432
+
+EOF
+      ;;
+  esac
+}
+
+frp_ux_ssh_user_help() {
+  cat <<'EOF'
+SSH user
+  Linux username shown in the generated SSH command.
+
+  This does NOT create an operating-system account,
+  change a password, or configure SSH authentication.
+
+EOF
+}
+
+frp_ux_add_service_menu() {
+  cat <<'EOF'
+Add a service
+=============
+
+Select the type of service you want to publish.
+
+1) SSH
+   Remote shell access.
+   Default target: 127.0.0.1:22
+
+2) HTTP
+   Web application using plain HTTP.
+   Default target: 127.0.0.1:80
+
+3) HTTPS
+   Web application using HTTPS.
+   Default target: 127.0.0.1:443
+   FRP forwards the TCP connection without terminating TLS.
+
+4) Custom TCP
+   Any other TCP service.
+   Examples: Grafana :3000, API :8080, PostgreSQL :5432
+
+5) Back
+
+For normal remote SSH access, choose 1.
+
+You may publish one or more services.
+SSH is optional.
+
+EOF
+}
+
+frp_ux_empty_services_help() {
+  cat <<'EOF'
+No services have been configured yet.
+
+Choose "Add service" to select what you want to access
+through the FRP server.
+
+Examples:
+  SSH        - remote shell access
+  HTTP       - web application using HTTP
+  HTTPS      - web application using HTTPS
+  Custom TCP - any other TCP service such as Grafana,
+               APIs, databases, or appliance management ports
+
+You may publish one or more services.
+SSH is optional.
+
+EOF
+}
+
+frp_ux_configured_services_help() {
+  cat <<'EOF'
+The public port will be assigned automatically by the FRP server.
+
+You can add more services now, or install when finished.
+
+You may publish one or more services.
+SSH is optional.
+
+EOF
+}
+
+frp_ux_print_all_guidance() {
+  frp_ux_intro
+  frp_ux_enrollment_help
+  frp_ux_defaults_help
+  frp_ux_service_id_help ssh
+  echo
+  frp_ux_target_host_help
+  frp_ux_target_port_help ssh
+  frp_ux_target_port_help http
+  frp_ux_target_port_help https
+  frp_ux_target_port_help custom
+  frp_ux_ssh_user_help
+  frp_ux_add_service_menu
+  frp_ux_empty_services_help
+  frp_ux_configured_services_help
+}
+
+frp_prompt_service_id() {
+  local default="$1"
+  local -n _frp_sid_out="$2"
+  frp_ux_service_id_help "$default"
+  echo
+  _frp_sid_out="$(read_tty "Service ID [${default}]: " "$default")"
+}
+
+frp_prompt_target_host() {
+  local default="${1:-127.0.0.1}"
+  local -n _frp_host_out="$2"
+  frp_ux_target_host_help
+  _frp_host_out="$(read_tty "Target host [${default}]: " "$default")"
+}
+
+frp_prompt_target_port() {
+  local preset="$1" default="${2:-}"
+  local -n _frp_port_out="$3"
+  frp_ux_target_port_help "$preset"
+  if [[ -n "$default" ]]; then
+    _frp_port_out="$(read_tty "Target port [${default}]: " "$default")"
+  else
+    _frp_port_out="$(read_tty "Target port: " "")"
+  fi
+}
+
+frp_prompt_ssh_user() {
+  local -n _frp_user_out="$1"
+  local default
+  default="${2:-$(infer_ssh_user)}"
+  frp_ux_ssh_user_help
+  _frp_user_out="$(read_tty "SSH user [${default}]: " "$default")"
+}
+
+frp_ux_prompt_new_service() {
+  local dest="${1:-}"
+  local choice sid host port user name _frp_new_payload
+  while true; do
+    echo
+    frp_ux_add_service_menu
+    choice="$(read_tty "Select: " "")"
+    case "$choice" in
+      1)
+        frp_prompt_service_id ssh sid
+        frp_prompt_target_host 127.0.0.1 host
+        frp_prompt_target_port ssh 22 port
+        frp_prompt_ssh_user user
+        maybe_warn_connectivity "$host" "$port" "SSH"
+        _frp_new_payload="$(service_payload ssh "$sid" SSH "$host" "$port" "$user")"
+        ;;
+      2)
+        frp_prompt_service_id http sid
+        frp_prompt_target_host 127.0.0.1 host
+        frp_prompt_target_port http 80 port
+        maybe_warn_connectivity "$host" "$port" "HTTP"
+        _frp_new_payload="$(service_payload http "$sid" HTTP "$host" "$port")"
+        ;;
+      3)
+        frp_prompt_service_id https sid
+        frp_prompt_target_host 127.0.0.1 host
+        frp_prompt_target_port https 443 port
+        maybe_warn_connectivity "$host" "$port" "HTTPS"
+        _frp_new_payload="$(service_payload https "$sid" HTTPS "$host" "$port")"
+        ;;
+      4)
+        frp_ux_service_id_help
+        echo
+        sid="$(read_tty "Service ID: " "")"
+        name="$(read_tty "Display name [${sid}]: " "$sid")"
+        frp_prompt_target_host 127.0.0.1 host
+        frp_prompt_target_port custom "" port
+        maybe_warn_connectivity "$host" "$port" "TCP"
+        _frp_new_payload="$(service_payload custom "$sid" "$name" "$host" "$port")"
+        ;;
+      5)
+        if [[ -n "$dest" ]]; then
+          local -n _frp_payload_back="$dest"
+          _frp_payload_back=""
+        fi
+        return 0
+        ;;
+      *) echo "ERROR: select 1-5" >&2; continue ;;
+    esac
+    if [[ -n "$dest" ]]; then
+      local -n _frp_payload_out="$dest"
+      _frp_payload_out="$_frp_new_payload"
+    else
+      printf '%s\n' "$_frp_new_payload"
+    fi
+    return 0
+  done
+}
+
+frp_ux_print_install_summary() {
+  local services_file="$1" version="${2:-0.70.1}"
+  python3 - "$services_file" "$version" <<'PY'
+import json, sys
+from pathlib import Path
+services = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+version = sys.argv[2]
+labels = {'ssh': 'SSH / TCP', 'http': 'HTTP / TCP', 'https': 'HTTPS / TCP'}
+print()
+print('Ready to install')
+print('================')
+print()
+print('The following services will be published:')
+print()
+for item in services:
+    name = item.get('name') or item.get('id')
+    preset = item.get('preset') or 'custom'
+    kind = labels.get(preset, 'Custom TCP')
+    print(name)
+    print(f"  Type        : {kind}")
+    print(f"  Target      : {item.get('local_ip')}:{item.get('local_port')}")
+    print('  Public port : assigned automatically')
+    print()
+print('The public port is assigned automatically by the FRP server.')
+print('You do not enter an external/public port here.')
+print()
+print('The installer will:')
+print()
+print(f'  - install FRP v{version}')
+print('  - create /etc/frp/frpc.toml')
+print('  - write /etc/frp/client-state.json')
+print('  - install the frpc systemd service')
+print('  - enable frpc at boot')
+print('  - start the FRP client')
+print()
+PY
+}
+
+frp_ux_print_apply_summary() {
+  local current="$1" candidate="$2"
+  python3 - "$current" "$candidate" <<'PY'
+import json, sys
+from pathlib import Path
+
+def svcs(path):
+    data = json.loads(Path(path).read_text(encoding='utf-8'))
+    services = data.get('services') or {}
+    if isinstance(services, list):
+        return {item['id']: item for item in services}
+    return {sid: dict(item, id=item.get('id') or sid) for sid, item in services.items()}
+
+cur, new = svcs(sys.argv[1]), svcs(sys.argv[2])
+print()
+print('Ready to apply')
+print('==============')
+print()
+print('Current:')
+if not cur:
+    print('  (none)')
+else:
+    for sid, item in cur.items():
+        enabled = 'enabled' if item.get('enabled', True) is not False else 'disabled'
+        remote = item.get('remote_port')
+        extra = f"    public :{remote}" if remote else '    public : assigned automatically'
+        print(f"  {sid}")
+        print(f"    {item.get('local_ip')}:{item.get('local_port')}")
+        print(extra)
+        print(f"    {enabled}")
+print()
+print('Changes:')
+lines = []
+for sid in sorted(set(cur) | set(new)):
+    a, b = cur.get(sid), new.get(sid)
+    if a is None:
+        lines.append(f"  + {sid}")
+        lines.append(f"    {b.get('local_ip')}:{b.get('local_port')}")
+        lines.append('    public port: assigned automatically')
+        continue
+    if b is None:
+        lines.append(f"  - {sid}")
+        lines.append('    removed from local configuration')
+        lines.append('    The public port remains reserved on the FRP server.')
+        continue
+    notes = []
+    if (a.get('enabled', True) is not False) and (b.get('enabled', True) is False):
+        notes.append('disabled (public port remains reserved)')
+    elif (a.get('enabled', True) is False) and (b.get('enabled', True) is not False):
+        notes.append('re-enabled')
+    if a.get('local_ip') != b.get('local_ip') or int(a.get('local_port') or 0) != int(b.get('local_port') or 0):
+        notes.append(f"{a.get('local_ip')}:{a.get('local_port')} -> {b.get('local_ip')}:{b.get('local_port')}")
+    if notes:
+        lines.append(f"  ~ {sid}")
+        for n in notes:
+            lines.append(f"    {n}")
+if not lines:
+    print('  (none)')
+else:
+    print('\n'.join(lines))
+print()
+print('Applying this configuration will restart the FRP client.')
+print()
+PY
+}
+
 frp_atomic_write_text() {
   local dest="$1" mode="$2"
   python3 - "$dest" "$mode" <<'PY'
@@ -424,9 +998,13 @@ data=json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
 if not data:
     print('(none)')
     raise SystemExit(0)
+labels = {'ssh': 'SSH / TCP', 'http': 'HTTP / TCP', 'https': 'HTTPS / TCP'}
 for i, item in enumerate(data, 1):
+    preset = item.get('preset') or 'custom'
     print(f"{i}. {item.get('id')}")
-    print(f"   TCP {item.get('local_ip')}:{item.get('local_port')}")
+    print(f"   Type   : {labels.get(preset, 'Custom TCP')}")
+    print(f"   Target : {item.get('local_ip')}:{item.get('local_port')}")
+    print()
 PY
 }
 
@@ -963,11 +1541,14 @@ for sid, item in services.items():
     enabled = item.get('enabled', True) is not False
     state = 'enabled' if enabled else 'disabled'
     print(f"{n}. {item.get('id') or sid}")
-    print(f"   Target : {item.get('local_ip')}:{item.get('local_port')}")
+    preset = item.get('preset') or 'custom'
+    labels = {'ssh': 'SSH / TCP', 'http': 'HTTP / TCP', 'https': 'HTTPS / TCP'}
+    print(f"   Type        : {labels.get(preset, 'Custom TCP')}")
+    print(f"   Target      : {item.get('local_ip')}:{item.get('local_port')}")
     remote = item.get('remote_port')
     if remote:
-        print(f"   Public : {server}:{remote}")
-    print(f"   State  : {state}")
+        print(f"   Public port : {remote}")
+    print(f"   State       : {state}")
     print()
 PY
 }
