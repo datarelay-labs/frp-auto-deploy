@@ -188,7 +188,7 @@ Common commands:
   status             Show a quick operational summary for this host's role
   doctor             Run read-only health and consistency checks
   version            Show installed versions (no network)
-  update             Upgrade this host's frp-auto-deploy software
+  update             Server: pinned FRP binary. Client: project tools.
   help               Show this help
 
 Client commands:

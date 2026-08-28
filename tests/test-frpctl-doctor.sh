@@ -11,6 +11,8 @@ fail() { echo "FAIL $1" >&2; exit 1; }
 
 chmod +x "$ROOT/tools/frpctl"
 CTL="$ROOT/tools/frpctl"
+# shellcheck disable=SC1091
+. "$ROOT/VERSION"
 export FRP_SKIP_SYSTEMD=1
 export FRP_DOCTOR_SKIP_NETWORK=1
 export FRP_DOCTOR_PY="$ROOT/lib/frp_doctor.py"
@@ -34,9 +36,9 @@ EOF
 write_version() {
   local tree="$1"
   mkdir -p "$tree/etc/frp-auto-deploy"
-  cat >"$tree/etc/frp-auto-deploy/version" <<'EOF'
-PROJECT_VERSION=1.9.1
-FRP_VERSION=0.70.1
+  cat >"$tree/etc/frp-auto-deploy/version" <<EOF
+PROJECT_VERSION=${PROJECT_VERSION}
+FRP_VERSION=${FRP_VERSION}
 EOF
 }
 

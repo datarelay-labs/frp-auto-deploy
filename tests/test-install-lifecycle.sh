@@ -213,7 +213,7 @@ assert_mode "$SRV/var/lib/frp-auto-deploy/registry.json" "0o600"
 assert_mode "$SRV/etc/frp-auto-deploy/pki/ca.key" "0o600"
 assert_mode "$SRV/etc/frp-auto-deploy/pki/server.key" "0o600"
 [[ -f "$SRV/etc/frp-auto-deploy/pki/ca.crt" ]] || fail "CA missing"
-grep -q 'PROJECT_VERSION=1.9.1' "$SRV/etc/frp-auto-deploy/version" || fail "server version"
+grep -q "PROJECT_VERSION=${PROJECT_VERSION}" "$SRV/etc/frp-auto-deploy/version" || fail "server version"
 grep -q 'FRP_VERSION=0.70.1' "$SRV/etc/frp-auto-deploy/version" || fail "server FRP version"
 [[ ! -f "$SRV/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "stale txn marker after success"
 pass "SERVER_FRESH_INSTALL"
@@ -293,7 +293,7 @@ if grep -q 'installation complete' "$WORKDIR/start-fail.out"; then
 fi
 grep -q 'FAILURE_CLASS=SERVICE_START_FAILED' "$WORKDIR/start-fail.out" "$WORKDIR/start-fail.err" || fail "start failure class"
 if [[ -f "$FAILTREE/etc/frp-auto-deploy/version" ]]; then
-  if grep -q 'PROJECT_VERSION=1.9.1' "$FAILTREE/etc/frp-auto-deploy/version"; then
+  if grep -q "PROJECT_VERSION=${PROJECT_VERSION}" "$FAILTREE/etc/frp-auto-deploy/version"; then
     fail "version committed after start failure"
   fi
 fi
@@ -530,7 +530,7 @@ grep -q 'sudo frpctl update' "$WORKDIR/rerun.err" || fail "directs to update"
 pass "CLIENT_REINSTALL_SAFE"
 
 # ---------------------------------------------------------------------------
-# Project update 1.7.0 -> 1.9.1
+# Project update 1.7.0 -> current, 1.9.1 -> current, same-version
 # ---------------------------------------------------------------------------
 UP="$WORKDIR/client-170"
 mkdir -p "$UP/etc/frp" "$UP/etc/frp-auto-deploy" "$UP/usr/local/bin" "$UP/usr/local/lib/frp-auto-deploy"
@@ -582,15 +582,15 @@ export FRP_CLIENT_TEST_ROOT="$UP"
 export FRP_CLIENT_LIB="$ROOT/lib/frp-client-common.sh"
 if ! "$ROOT/tools/frp-client" update --source "$ROOT" >"$WORKDIR/up170.out" 2>"$WORKDIR/up170.err"; then
   cat "$WORKDIR/up170.out" "$WORKDIR/up170.err" >&2
-  fail "1.7.0 to 1.9.1 update"
+  fail "1.7.0 to ${PROJECT_VERSION} update"
 fi
-grep -q '1.7.0 -> 1.9.1' "$WORKDIR/up170.out" || fail "version transition 1.7.0"
+grep -q "1.7.0 -> ${PROJECT_VERSION}" "$WORKDIR/up170.out" || fail "version transition 1.7.0"
 grep -q 'Enrollment Code : NOT REQUIRED' "$WORKDIR/up170.out" || fail "no enrollment"
 grep -q 'frpc restarted  : NO' "$WORKDIR/up170.out" || fail "no frpc restart"
 [[ "$(frp_file_sha256 "$UP/etc/frp/client-state.json")" == "$STATE_BEFORE" ]] || fail "state changed"
 [[ "$(frp_file_sha256 "$UP/etc/frp-auto-deploy/allocator-ca.crt")" == "$CA_BEFORE" ]] || fail "client CA changed"
 [[ "$(frp_file_sha256 "$UP/etc/frp/client-identity.key")" == "$KEY_BEFORE" ]] || fail "identity changed"
-grep -q 'PROJECT_VERSION=1.9.1' "$UP/etc/frp-auto-deploy/version" || fail "version not 1.9.1"
+grep -q "PROJECT_VERSION=${PROJECT_VERSION}" "$UP/etc/frp-auto-deploy/version" || fail "version not ${PROJECT_VERSION}"
 [[ ! -f "$UP/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "txn marker left"
 pass "PROJECT_UPDATE_ATOMIC"
 pass "CLIENT_CA_PRESERVED"
@@ -601,9 +601,45 @@ pass "PORT_ASSIGNMENTS_PRESERVED"
 if ! "$ROOT/tools/frp-client" update --source "$ROOT" >"$WORKDIR/same.out" 2>"$WORKDIR/same.err"; then
   fail "same-version update"
 fi
-grep -q '1.9.1 -> 1.9.1' "$WORKDIR/same.out" || fail "same version line"
+grep -q "${PROJECT_VERSION} -> ${PROJECT_VERSION}" "$WORKDIR/same.out" || fail "same version line"
 [[ "$(frp_file_sha256 "$UP/etc/frp/client-state.json")" == "$STATE_BEFORE" ]] || fail "same-version mutated state"
 pass "SAME_VERSION_UPDATE_IDEMPOTENT"
+
+# 1.9.1 -> current (2.0.0) preserves identity, CA, state, and ports
+UP191="$WORKDIR/client-191"
+mkdir -p "$UP191/etc/frp" "$UP191/etc/frp-auto-deploy" "$UP191/usr/local/bin" "$UP191/usr/local/lib/frp-auto-deploy"
+write_dummy_frpc "$UP191/usr/local/bin/frpc"
+cat >"$UP191/usr/local/bin/frp-client" <<'EOF'
+#!/bin/sh
+echo old-client-191
+EOF
+chmod 0755 "$UP191/usr/local/bin/frp-client"
+echo old191 >"$UP191/usr/local/lib/frp-auto-deploy/frp-client-common.sh"
+cp -a "$UP/etc/frp/client-state.json" "$UP191/etc/frp/client-state.json"
+cp -a "$UP/etc/frp/frpc.toml" "$UP191/etc/frp/frpc.toml"
+cp -a "$UP/etc/frp/access-info.txt" "$UP191/etc/frp/access-info.txt"
+cp -a "$UP/etc/frp-auto-deploy/allocator-ca.crt" "$UP191/etc/frp-auto-deploy/allocator-ca.crt"
+cp -a "$UP/etc/frp/client-identity.key" "$UP191/etc/frp/client-identity.key"
+cp -a "$UP/etc/frp/client-identity.pub" "$UP191/etc/frp/client-identity.pub"
+cp -a "$UP/etc/frp/client-identity.mac" "$UP191/etc/frp/client-identity.mac"
+cat >"$UP191/etc/frp-auto-deploy/version" <<'EOF'
+PROJECT_VERSION=1.9.1
+FRP_VERSION=0.70.1
+EOF
+STATE191="$(frp_file_sha256 "$UP191/etc/frp/client-state.json")"
+CA191="$(frp_file_sha256 "$UP191/etc/frp-auto-deploy/allocator-ca.crt")"
+KEY191="$(frp_file_sha256 "$UP191/etc/frp/client-identity.key")"
+export FRP_CLIENT_TEST_ROOT="$UP191"
+if ! "$ROOT/tools/frp-client" update --source "$ROOT" >"$WORKDIR/up191.out" 2>"$WORKDIR/up191.err"; then
+  cat "$WORKDIR/up191.out" "$WORKDIR/up191.err" >&2
+  fail "1.9.1 to ${PROJECT_VERSION} update"
+fi
+grep -q "1.9.1 -> ${PROJECT_VERSION}" "$WORKDIR/up191.out" || fail "version transition 1.9.1"
+[[ "$(frp_file_sha256 "$UP191/etc/frp/client-state.json")" == "$STATE191" ]] || fail "1.9.1 state changed"
+[[ "$(frp_file_sha256 "$UP191/etc/frp-auto-deploy/allocator-ca.crt")" == "$CA191" ]] || fail "1.9.1 client CA changed"
+[[ "$(frp_file_sha256 "$UP191/etc/frp/client-identity.key")" == "$KEY191" ]] || fail "1.9.1 identity changed"
+grep -q "PROJECT_VERSION=${PROJECT_VERSION}" "$UP191/etc/frp-auto-deploy/version" || fail "1.9.1 version not ${PROJECT_VERSION}"
+pass "PROJECT_UPDATE_1_9_1_TO_CURRENT"
 
 # Downgrade refused
 python3 - "$UP/etc/frp-auto-deploy/version" <<'PY'
@@ -611,12 +647,13 @@ import sys
 from pathlib import Path
 Path(sys.argv[1]).write_text("PROJECT_VERSION=9.9.9\nFRP_VERSION=0.70.1\n")
 PY
+export FRP_CLIENT_TEST_ROOT="$UP"
 if "$ROOT/tools/frp-client" update --source "$ROOT" >"$WORKDIR/down.out" 2>"$WORKDIR/down.err"; then
   fail "downgrade should be refused"
 fi
 grep -q 'FAILURE_CLASS=DOWNGRADE_REFUSED' "$WORKDIR/down.out" "$WORKDIR/down.err" || fail "downgrade class"
-cat >"$UP/etc/frp-auto-deploy/version" <<'EOF'
-PROJECT_VERSION=1.9.1
+cat >"$UP/etc/frp-auto-deploy/version" <<EOF
+PROJECT_VERSION=${PROJECT_VERSION}
 FRP_VERSION=0.70.1
 EOF
 
@@ -640,7 +677,7 @@ setup_update_tree() {
   echo '{"schema_version":2,"reserved":[6000],"clients":{}}' >"$tree/var/lib/frp-auto-deploy/registry.json"
   chmod 600 "$tree/var/lib/frp-auto-deploy/registry.json"
   cat >"$tree/etc/frp-auto-deploy/version" <<EOF
-PROJECT_VERSION=1.9.1
+PROJECT_VERSION=${PROJECT_VERSION}
 FRP_VERSION=0.70.1
 EOF
 }

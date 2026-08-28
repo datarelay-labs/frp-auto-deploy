@@ -268,6 +268,39 @@ print('ok')
 PY
 pass "NO_SHELL_INJECTION"
 
+# ssh_user is restricted to [A-Za-z0-9._@-]{1,32} before the command is printed.
+set +e
+FRP_DEPLOY_TEST_ROOT="$TREE" python3 "$CREATE" --one-line --ssh --ssh-user "ubuntu admin" \
+  >"$WORKDIR/spaceuser.out" 2>"$WORKDIR/spaceuser.err"
+src=$?
+set -e
+[[ "$src" -ne 0 ]] || fail "ssh-user with space should fail"
+grep -qi 'invalid ssh_user' "$WORKDIR/spaceuser.out" "$WORKDIR/spaceuser.err" || fail "space ssh-user error"
+pass "SSH_USER_SPACES_REJECTED"
+
+set +e
+FRP_DEPLOY_TEST_ROOT="$TREE" python3 "$CREATE" --one-line --ssh --ssh-user "o'reilly" \
+  >"$WORKDIR/quoteuser.out" 2>"$WORKDIR/quoteuser.err"
+qrc=$?
+set -e
+[[ "$qrc" -ne 0 ]] || fail "ssh-user with quote should fail"
+grep -qi 'invalid ssh_user' "$WORKDIR/quoteuser.out" "$WORKDIR/quoteuser.err" || fail "quote ssh-user error"
+pass "SSH_USER_QUOTE_REJECTED"
+
+set +e
+FRP_DEPLOY_TEST_ROOT="$TREE" python3 "$CREATE" --one-line --ssh --ssh-user $'bad\nuser' \
+  >"$WORKDIR/nluser.out" 2>"$WORKDIR/nluser.err"
+nrc=$?
+set -e
+[[ "$nrc" -ne 0 ]] || fail "newline ssh-user should fail"
+grep -qi 'control characters' "$WORKDIR/nluser.out" "$WORKDIR/nluser.err" || fail "newline ssh-user error"
+pass "SSH_USER_NEWLINE_REJECTED"
+
+FRP_DEPLOY_TEST_ROOT="$TREE" python3 "$CREATE" --one-line --ssh --ssh-user 'ubuntu.admin@host-01' \
+  >"$WORKDIR/safeuser.out"
+grep -q "FRP_SSH_USER='ubuntu.admin@host-01'" "$WORKDIR/safeuser.out" || fail "safe ssh-user not quoted"
+pass "SSH_USER_SAFE_QUOTED"
+
 # Restore canonical URLs for later tests.
 python3 - "$TREE/etc/frp-auto-deploy/config.json" <<'PY'
 import json, sys

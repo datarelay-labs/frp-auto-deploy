@@ -12,6 +12,9 @@ fail() { echo "FAIL $1" >&2; exit 1; }
 
 chmod +x "$ROOT/tools/frp-client"
 
+# shellcheck disable=SC1091
+. "$ROOT/VERSION"
+
 make_frpc() {
   local dest="$1"
   mkdir -p "$(dirname "$dest")"
@@ -176,7 +179,7 @@ PY
 [[ -f "$TREE/usr/local/lib/frp-auto-deploy/frp-client-common.sh" ]] || fail "client lib not installed"
 [[ -f "$TREE/usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py" ]] || fail "mgmt auth helper not installed"
 [[ -f "$TREE/etc/frp-auto-deploy/version" ]] || fail "client version file missing"
-grep -q 'PROJECT_VERSION=1.9.1' "$TREE/etc/frp-auto-deploy/version" || fail "client project version"
+grep -q "PROJECT_VERSION=${PROJECT_VERSION}" "$TREE/etc/frp-auto-deploy/version" || fail "client project version"
 grep -q 'FRP_VERSION=0.70.1' "$TREE/etc/frp-auto-deploy/version" || fail "client FRP version"
 [[ -f "$TREE/etc/frp-auto-deploy/allocator-ca.crt" ]] || fail "trusted CA missing"
 grep -q 'serverPort = 8443' "$TREE/etc/frp/frpc.toml" || fail "frpc must use public control port"
@@ -222,7 +225,7 @@ PY
 [[ "$before" == "$after" ]] || fail "read-only CLI modified files"
 if grep -qx enroll "$HOOK"; then fail "read-only contacted allocator"; fi
 if grep -qx restart "$HOOK"; then fail "read-only restarted frpc"; fi
-grep -q 'Project version : 1.9.1' "$WORKDIR/status.out" || fail "status project version"
+grep -q "Project version : ${PROJECT_VERSION}" "$WORKDIR/status.out" || fail "status project version"
 grep -q 'Hostname        : dp-example' "$WORKDIR/status.out" || fail "status hostname"
 grep -q 'Management identity : enrolled' "$WORKDIR/status.out" || fail "status identity"
 grep -q 'ssh' "$WORKDIR/status.out" || fail "status ssh"

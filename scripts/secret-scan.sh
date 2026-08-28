@@ -40,4 +40,8 @@ if git grep -nF 'github.com/RickLee-kr/frp-auto-deploy' -- ':!scripts/secret-sca
   fail "stale github.com/RickLee-kr/frp-auto-deploy URL is tracked"
 fi
 
+if git grep -nF '192.168.122.' -- '*.md' >/dev/null; then
+  fail "libvirt-style 192.168.122.0/24 address in documentation"
+fi
+
 echo "SECRET_SCAN=PASS"

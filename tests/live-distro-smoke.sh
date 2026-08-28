@@ -37,6 +37,12 @@ else
 fi
 
 echo "UNAME=$(uname -srm)"
+echo "ARCH=$(uname -m)"
+case "$(uname -m)" in
+  x86_64) echo "FRP_ARCH=amd64" ;;
+  aarch64|arm64) echo "FRP_ARCH=arm64" ;;
+  *) echo "FRP_ARCH=unknown" ;;
+esac
 echo "BASH_VERSION=${BASH_VERSION}"
 if have python3; then
   echo "PYTHON_VERSION=$(python3 -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')"
@@ -45,9 +51,24 @@ else
 fi
 if have openssl; then
   echo "OPENSSL_VERSION=$(openssl version 2>/dev/null | awk '{print $1" "$2}')"
+  if openssl version 2>/dev/null | grep -q '1\.0\.2'; then
+    echo "OPENSSL_1_0_2=yes"
+  else
+    echo "OPENSSL_1_0_2=no"
+  fi
 else
   echo "OPENSSL_VERSION=missing"
+  echo "OPENSSL_1_0_2=no"
 fi
+
+if have systemd-detect-virt; then
+  echo "VIRT=$(systemd-detect-virt 2>/dev/null || echo unknown)"
+elif [[ -f /.dockerenv ]]; then
+  echo "VIRT=docker"
+else
+  echo "VIRT=unknown"
+fi
+echo "NOTE=live-distro-smoke.sh never sets REAL_VM=PASS"
 
 if have systemctl; then
   echo "SYSTEMD_VERSION=$(systemctl --version 2>/dev/null | awk 'NR==1 {print $2; exit}')"
@@ -312,6 +333,21 @@ if have frpctl; then
   else
     fail "frpctl_status"
     redact_status <"$WORKDIR/frpctl.err"
+  fi
+  echo "----- frpctl doctor (read-only) -----"
+  set +e
+  frpctl doctor >"$WORKDIR/doctor.out" 2>"$WORKDIR/doctor.err"
+  doctor_rc=$?
+  set -e
+  redact_status <"$WORKDIR/doctor.out"
+  redact_status <"$WORKDIR/doctor.err"
+  echo "DOCTOR_EXIT=${doctor_rc}"
+  if [[ "$doctor_rc" -eq 0 ]]; then
+    pass "frpctl_doctor"
+  elif [[ "$doctor_rc" -eq 1 ]]; then
+    note "frpctl doctor reported FAIL findings (collector is non-mutating)"
+  else
+    fail "frpctl_doctor (exit ${doctor_rc})"
   fi
 else
   if [[ "$HOST_ROLE" == uninstalled ]]; then

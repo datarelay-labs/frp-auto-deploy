@@ -103,6 +103,14 @@ def shell_quote(value):
     return quoted
 
 
+def reject_control_chars(label, value):
+    if value is None:
+        return
+    text = str(value)
+    if any(ord(c) < 32 for c in text):
+        fail('%s must not contain control characters or newlines' % label)
+
+
 def fail(message, code=2):
     sys.stderr.write('ERROR: %s\n' % message)
     raise SystemExit(code)
@@ -156,7 +164,7 @@ def parse_args(argv=None):
         epilog=(
             'examples:\n'
             '  sudo frp-create-client\n'
-            '  sudo frp-create-client --one-line --ssh --ssh-user ubuntu --note customer-web01\n'
+            '  sudo frp-create-client --one-line --ssh --ssh-user ubuntu --note customer-01\n'
         ),
     )
     p.add_argument('--ttl', type=int, default=600, help='TTL in seconds (default 600)')
@@ -348,6 +356,11 @@ def main(argv=None):
     ca_path = remap(str(cfg.get('tls_ca_cert') or '/etc/frp-auto-deploy/pki/ca.crt'))
     ca_fp = fingerprint_from_cert(ca_path) if ca_path.is_file() else ''
     installer = str(cfg.get('client_installer_url', '') or '').strip()
+
+    reject_control_chars('--note', a.note)
+    reject_control_chars('allocator public URL', allocator)
+    reject_control_chars('client installer URL', installer)
+    reject_control_chars('--ssh-user', a.ssh_user)
 
     if not a.one_line:
         enrollment_id = secrets.token_hex(8)
