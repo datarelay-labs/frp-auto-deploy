@@ -14,10 +14,9 @@ over HTTPS, and provides `frpctl` for day-to-day operations.
 Current project version: **2.1.0**
 Current pinned FRP version: **v0.70.1**
 
-2.1.0 is the **current source version (release candidate)**. Direct mode remains
-the default. Optional Enterprise single-443 mode is included. FRP stays at
-**0.70.1**. The `v2.1.0` git tag is not created until real-environment gates
-pass. See [CHANGELOG.md](CHANGELOG.md),
+2.1.0 is the **current stable release**. Direct mode remains the default.
+Optional Enterprise single-443 mode is included. FRP stays at **0.70.1**.
+See [CHANGELOG.md](CHANGELOG.md),
 [docs/DEPLOYMENT_MODES.md](docs/DEPLOYMENT_MODES.md), and
 [docs/SECURITY.md](docs/SECURITY.md).
 
@@ -615,9 +614,16 @@ Rocky/Alma **SELinux Enforcing** remains `NOT_TESTED`. This project does not
 claim full support on Enforcing until that gate is recorded in
 [docs/RELEASE_VALIDATION.md](docs/RELEASE_VALIDATION.md).
 
+2.1.0 field-validated Enterprise single-443 on **Ubuntu 24.04 x86_64** with a
+direct public-IP server and an enterprise-restricted client: HTTPS/443
+enrollment, WSS/443 control, published SSH, and client/server reboot recovery.
+That evidence does **not** cover firewall DNAT / private FRP-server topology,
+SELinux Enforcing, ARM64 hosts, or OpenSSL 1.0.2 hosts.
+
 Full ARM64 systemd install: `NOT_TESTED` (arch mapping is unit-tested).
 Real OpenSSL 1.0.2 TLS enrollment: `NOT_TESTED` (Amazon Linux 2 container is
 userspace only).
+Firewall DNAT / private FRP-server topology: `NOT_TESTED` in a real environment.
 
 Windows: FRP supports Windows; this package automates systemd Linux only. See
 [windows/README.md](windows/README.md).
@@ -749,4 +755,5 @@ runtime configs, or live infrastructure addresses.
 - Windows client automation is not included
 - Real VM / SELinux Enforcing / ARM64 systemd / real OpenSSL 1.0.2 TLS enrollment
   remain `NOT_TESTED` where the matrix says so
+- Firewall DNAT / private FRP-server topology was not field-validated in 2.1.0
 - Installer bundles are checksummed, not signed by this project

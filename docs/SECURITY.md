@@ -1,8 +1,6 @@
 # Security architecture
 
-This document describes the security model of `frp-auto-deploy` **2.1.0**
-(current source version / release candidate; `v2.1.0` is not tagged until
-real-environment gates pass).
+This document describes the security model of `frp-auto-deploy` **2.1.0**.
 It is not a certification, audit report, or guarantee against a compromised
 root account.
 

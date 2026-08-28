@@ -13,6 +13,7 @@ mutate firewall/SELinux.
 | Item | Classification | Current support claim |
 | --- | --- | --- |
 | Ubuntu 22.04 / 24.04 real VM | REQUIRED_FOR_STABLE (live baseline) | documented PASS |
+| Ubuntu 24.04 x86_64 single-443 (direct public-IP, enterprise-restricted client) | REQUIRED_FOR_STABLE (2.1.0) | PASS (2026-08-29) |
 | Rocky 9 container | REQUIRED_FOR_STABLE (automated) | container PASS |
 | AlmaLinux 9 container | REQUIRED_FOR_STABLE (automated) | container PASS |
 | Amazon Linux 2023 container | REQUIRED_FOR_STABLE (automated) | container PASS |
@@ -107,3 +108,66 @@ ticket redemption, and Enrollment on an actual OpenSSL 1.0.2 client. The
 Amazon Linux 2 container only proves userspace parsing compatibility.
 
 Until then: `REAL_OPENSSL_1_0_2_TLS_ENROLLMENT=NOT_TESTED`.
+
+## 2.1.0 real-environment acceptance (2026-08-29)
+
+Field-validated topology only. Do **not** treat this block as covering DNAT,
+SELinux Enforcing, ARM64, or OpenSSL 1.0.2.
+
+```text
+REAL_SERVER_OS=Ubuntu 24.04.4 LTS x86_64
+REAL_SERVER_FRP=0.70.1
+REAL_SERVER_TOPOLOGY=direct public-IP
+REAL_CLIENT_OS=Ubuntu 24.04.3 LTS x86_64
+REAL_CLIENT_NETWORK=enterprise restricted
+
+OBSERVED_BEFORE_SINGLE443=TLS on non-443 ports was reset
+OBSERVED_AFTER_SINGLE443=HTTPS enrollment and FRP WSS control succeeded over TCP/443; published SSH TCP/6000 reachable end-to-end
+
+REAL_SERVER_MIGRATION_1_9_1_TO_2_1_0=PASS
+REAL_SINGLE443_SERVER_CUTOVER=PASS
+REAL_ENTERPRISE_TLS_443_PATH=PASS
+REAL_CA_BOOTSTRAP_443=PASS
+REAL_VERIFIED_HTTPS_443=PASS
+REAL_ZERO_TOUCH_BOOTSTRAP=PASS
+REAL_ENROLLMENT_443=PASS
+REAL_CLIENT_CA_PINNING=PASS
+REAL_WSS_E2E=PASS
+REAL_FRPC_LOGIN=PASS
+REAL_PROXY_REGISTRATION=PASS
+REAL_SSH_SERVICE_E2E=PASS
+REAL_ENTERPRISE_RESTRICTED_NETWORK_E2E=PASS
+REAL_CLIENT_REBOOT_RECONNECT=PASS
+REAL_SERVER_REBOOT_RECONNECT=PASS
+REAL_END_TO_END_REBOOT_RECOVERY=PASS
+PUBLIC_6099_NOT_EXPOSED=PASS
+PUBLIC_7000_NOT_EXPOSED=PASS
+PUBLIC_80_NOT_EXPOSED=PASS
+SERVER_DOCTOR_AFTER_REBOOT=PASS
+```
+
+Real tested:
+
+- Ubuntu x86_64
+- Direct public-IP server
+- Enterprise restricted client network
+- HTTPS/443 enrollment
+- WSS/443 control
+- SSH published service
+- Client reboot recovery
+- Server reboot recovery
+
+Not real-environment tested (remain `NOT_TESTED`; do not advertise as
+field-validated):
+
+- Firewall DNAT / private FRP-server topology
+- SELinux Enforcing
+- ARM64 host
+- OpenSSL 1.0.2 host
+
+```text
+FIREWALL_DNAT_PRIVATE_FRP_SERVER=NOT_TESTED
+ROCKY_9_SELINUX_ENFORCING=NOT_TESTED
+REAL_ARM_SYSTEMD=NOT_TESTED
+REAL_OPENSSL_1_0_2_TLS_ENROLLMENT=NOT_TESTED
+```

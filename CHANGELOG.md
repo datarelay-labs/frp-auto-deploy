@@ -1,14 +1,11 @@
 # Changelog
 
-## 2.1.0 — 2026-08-28 (release candidate / current source version)
+## 2.1.0 — 2026-08-29
 
-This is the current source version. It is **not** a tagged stable release until
-`v2.1.0` exists after real-environment gates.
-
-Optional **Enterprise single-443** mode: public TCP/443 carries allocator HTTPS
-and FRP control over WSS (nginx frontend, project CA). Direct mode (443 frps +
-6099 allocator HTTPS) remains the default. Published services stay TCP/6000-6098.
-FRP remains pinned at **0.70.1**.
+Stable release. Optional **Enterprise single-443** mode: public TCP/443 carries
+allocator HTTPS and FRP control over WSS (nginx frontend, project CA). Direct
+mode (443 frps + 6099 allocator HTTPS) remains the default. Published services
+stay TCP/6000-6098. FRP remains pinned at **0.70.1**.
 
 - Installer: `FRP_DEPLOYMENT_MODE=direct|single443` and TTY mode prompt
 - Enrollment returns `frp_transport` (`tcp` or `wss`); clients pin the stored CA for WSS
@@ -23,6 +20,18 @@ FRP remains pinned at **0.70.1**.
   the allocator backend
 
 See [docs/DEPLOYMENT_MODES.md](docs/DEPLOYMENT_MODES.md).
+
+### Real-environment acceptance
+
+Field-validated on Ubuntu 24.04 x86_64 (direct public-IP server, enterprise-restricted
+client, FRP 0.70.1): 1.9.1→2.1.0 server migration, single-443 cutover, HTTPS/443
+enrollment, WSS/443 control, published SSH TCP/6000, and client/server reboot
+recovery. Before single-443, TLS on non-443 ports was reset; after cutover,
+HTTPS and WSS succeeded on TCP/443.
+
+Not field-validated: firewall DNAT / private FRP-server topology, SELinux
+Enforcing, ARM64 hosts, OpenSSL 1.0.2 hosts. Details:
+[docs/RELEASE_VALIDATION.md](docs/RELEASE_VALIDATION.md).
 
 ## 2.0.0 — 2026-08-28
 

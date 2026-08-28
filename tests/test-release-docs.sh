@@ -95,11 +95,23 @@ fi
 pass "NO_TLS_VERIFY_DISABLE"
 pass "NO_CURL_K_PRODUCTION_FLOW"
 
-grep -q 'release candidate' CHANGELOG.md || fail "CHANGELOG missing RC wording"
-grep -q 'release candidate' README.md || fail "README missing RC wording"
-if grep -nE 'v2\.1\.0 is (a |the )?(stable|tagged)' README.md CHANGELOG.md docs/*.md; then
-  fail "docs claim v2.1.0 is already tagged stable"
+if grep -nE 'release candidate' README.md CHANGELOG.md docs/SECURITY.md docs/DEPLOYMENT_MODES.md; then
+  fail "docs still describe 2.1.0 as a release candidate"
 fi
-pass "VERSION_RC_WORDING"
+if grep -nE 'v2\.1\.0 is not tagged|not a tagged stable release until|not created until real-environment' README.md CHANGELOG.md docs/*.md; then
+  fail "docs still say v2.1.0 is untagged"
+fi
+grep -qF 'current stable release' README.md || fail "README missing stable wording"
+grep -qE '^## 2\.1\.0 — ' CHANGELOG.md || fail "CHANGELOG missing 2.1.0 heading"
+pass "VERSION_STABLE_WORDING"
+
+grep -q 'REAL_WSS_E2E=PASS' docs/RELEASE_VALIDATION.md || fail "missing REAL_WSS_E2E evidence"
+grep -q 'REAL_ENTERPRISE_RESTRICTED_NETWORK_E2E=PASS' docs/RELEASE_VALIDATION.md || fail "missing enterprise-network evidence"
+grep -q 'REAL_SSH_SERVICE_E2E=PASS' docs/RELEASE_VALIDATION.md || fail "missing SSH E2E evidence"
+grep -q 'REAL_END_TO_END_REBOOT_RECOVERY=PASS' docs/RELEASE_VALIDATION.md || fail "missing reboot-recovery evidence"
+grep -q 'FIREWALL_DNAT_PRIVATE_FRP_SERVER=NOT_TESTED' docs/RELEASE_VALIDATION.md || fail "DNAT limitation missing"
+grep -q 'REAL_ARM_SYSTEMD=NOT_TESTED' docs/RELEASE_VALIDATION.md || fail "ARM64 limitation missing"
+grep -q 'REAL_OPENSSL_1_0_2_TLS_ENROLLMENT=NOT_TESTED' docs/RELEASE_VALIDATION.md || fail "OpenSSL 1.0.2 limitation missing"
+pass "REAL_ACCEPTANCE_RECORDED"
 
 echo "RELEASE_DOCS_TEST=PASS"

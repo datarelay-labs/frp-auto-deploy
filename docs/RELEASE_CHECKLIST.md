@@ -1,7 +1,7 @@
 # Release checklist
 
-Use this list before tagging a release. Automated items are required for a
-release candidate. Real-environment items are recorded in
+Use this list before tagging a release. Automated items are required before a
+release candidate or stable tag. Real-environment items are recorded in
 `docs/RELEASE_VALIDATION.md` and are **not** implied by Docker PASS.
 
 ## Automated gate
@@ -21,7 +21,8 @@ release candidate. Real-environment items are recorded in
 ## Real-environment gate
 
 Record results in `docs/RELEASE_VALIDATION.md`. Do not convert Docker, LXD, or
-QEMU TCG into `REAL_VM=PASS`.
+QEMU TCG into `REAL_VM=PASS`. Do not advertise untested topologies as
+field-validated.
 
 - [ ] Rocky Linux 9 real VM
 - [ ] Rocky Linux 9 SELinux Enforcing
@@ -31,19 +32,15 @@ QEMU TCG into `REAL_VM=PASS`.
 - [ ] Amazon Linux 2 real VM / systemd 219 / TTY
 - [ ] Native ARM64 systemd
 - [ ] Real OpenSSL 1.0.2 TLS enrollment
+- [ ] Firewall DNAT / private FRP-server topology (when claiming that layout)
 
 ## Tag policy
 
 - [ ] `RELEASE_CANDIDATE_READY=YES` only if the automated gate PASS
 - [ ] `STABLE_TAG_READY=YES` only if the chosen required real gates PASS
-- [ ] Do **not** create `v2.1.0` automatically while required real gates are `NOT_TESTED`
+- [ ] Do **not** create a stable tag while required real gates are `NOT_TESTED`
 
-For 2.1.0, automated gates can make a **release candidate**. Remaining real
-gates are **required** before a stable tag. Until those gates pass:
-
-```text
-RELEASE_CANDIDATE_READY=YES   # only if the automated gate PASS
-STABLE_TAG_READY=NO
-```
-
-Do not create `v2.1.0` in the same task that only lands the RC commit.
+For **2.1.0**, the required real gates that were chosen for this tag (Ubuntu
+24.04 x86_64, direct public-IP server, enterprise-restricted client, single-443
+HTTPS/WSS/SSH, reboot recovery) are recorded PASS in
+`docs/RELEASE_VALIDATION.md`. Remaining recommended gates stay `NOT_TESTED`.

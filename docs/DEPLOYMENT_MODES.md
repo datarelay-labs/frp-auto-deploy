@@ -2,8 +2,7 @@
 
 `frp-auto-deploy` supports two server deployment modes. Direct mode is the
 default and matches 2.0.0. Enterprise single-443 is optional. Project version
-**2.1.0** is the current source version (release candidate) until `v2.1.0` is
-tagged.
+**2.1.0** is the current stable release.
 
 Published service ports stay **TCP/6000-6098** (1:1) in both modes.
 
