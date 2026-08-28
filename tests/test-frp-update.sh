@@ -427,7 +427,7 @@ pass "CASE G rollback safety"
 # --- CASE J: installer rerun / source regression ---
 grep -q 'migrate_token.py" ensure' "$ROOT/install-server.sh" || fail "CASE J missing token ensure"
 grep -q 'init-registry' "$ROOT/install-server.sh" || fail "CASE J missing registry init"
-grep -q 'frp_write_version_file /etc/frp-auto-deploy/version' "$ROOT/install-server.sh" || fail "CASE J missing version metadata"
+grep -q 'frp_write_version_file "$(frp_server_fs /etc/frp-auto-deploy/version)"' "$ROOT/install-server.sh" || fail "CASE J missing version metadata"
 grep -q 'frp-update' "$ROOT/install-server.sh" || fail "CASE J missing frp-update install"
 grep -q 'lib/frp-common.sh' "$ROOT/install-server.sh" || fail "CASE J missing common lib"
 grep -q 'TOKEN_PRESERVED' "$ROOT/install-server.sh" || fail "CASE J missing token preservation reporting"
@@ -438,7 +438,7 @@ if grep -qE 'sudo frp-release-client|/usr/local/sbin/frp-release-client[[:space:
   fail "CASE J installer must not release client reservations"
 fi
 grep -q 'sha256sum -c' "$ROOT/install-server.sh" || fail "CASE J installer checksum verify missing"
-grep -q 'frps verify -c' "$ROOT/install-server.sh" || fail "CASE J installer config verify missing"
+grep -q 'verify -c' "$ROOT/install-server.sh" || fail "CASE J installer config verify missing"
 pass "CASE J installer rerun source regression"
 
 # --check dry run does not replace

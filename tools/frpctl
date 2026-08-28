@@ -15,11 +15,23 @@ frpctl_path() {
 }
 
 frpctl_is_client() {
-  [[ -f "$(frpctl_path /etc/frp/client-state.json)" ]]
+  if [[ -f "$(frpctl_path /etc/frp/client-state.json)" ]]; then
+    return 0
+  fi
+  if [[ -f "$(frpctl_path /etc/frp/frpc.toml)" && -f "$(frpctl_path /etc/frp/client-identity.key)" ]]; then
+    return 0
+  fi
+  return 1
 }
 
 frpctl_is_server() {
-  [[ -f "$(frpctl_path /etc/frp-auto-deploy/config.json)" ]]
+  if [[ -f "$(frpctl_path /etc/frp-auto-deploy/config.json)" ]]; then
+    return 0
+  fi
+  if [[ -f "$(frpctl_path /etc/frp/server_token)" && -f "$(frpctl_path /var/lib/frp-auto-deploy/registry.json)" ]]; then
+    return 0
+  fi
+  return 1
 }
 
 frpctl_read_kv() {

@@ -37,6 +37,7 @@ jobs:
           ./tests/test-lifecycle.sh
           ./tests/test-guided-ux.sh
           ./tests/test-client-upgrade.sh
+          ./tests/test-install-lifecycle.sh
           ./tests/test-frpctl.sh
           ./tests/test-frpctl-completion.sh
           ./tests/test-port-architecture.sh

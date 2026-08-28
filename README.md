@@ -8,7 +8,7 @@ It automates FRP server/client installation, persistent public port assignment f
 > The IP addresses `203.0.113.10` and `192.0.2.50` used in this README are documentation-only example addresses (RFC 5737). Replace them with your own public and internal addresses when deploying.
 
 Current pinned FRP version: **v0.70.1**
-Current project version: **1.7.0**
+Current project version: **1.8.0**
 
 ---
 
@@ -29,7 +29,7 @@ FRP Auto Deploy CLI
 ===================
 
 Role            : Server
-Project version : 1.7.0
+Project version : 1.8.0
 FRP version     : 0.70.1
 
 Type 'help' or '?' for available commands.
@@ -53,7 +53,7 @@ FRP Auto Deploy CLI
 ===================
 
 Role            : Client
-Project version : 1.7.0
+Project version : 1.8.0
 FRP version     : 0.70.1
 
 frpctl> status
@@ -559,13 +559,25 @@ sudo frp-create-client --ttl 1800 --note customer-dp
 
 # Uninstall
 
+Install, reinstall, update, uninstall, and purge are separate operations.
+
+- **Install** creates software and runtime on a host that does not already have this role.
+- **Reinstall** (running the server installer again) refreshes project files and does **not** rotate the FRP token, private CA, or registry.
+- **Update** (`sudo frpctl update`) upgrades project tooling and, on a server, the pinned FRP binary. A failed FRP binary update restores the previous binary automatically.
+- **Uninstall** removes software/runtime. It is not purge.
+- **Purge** (`uninstall-server.sh --purge --yes`) permanently deletes preserved server state. It is never inferred from uninstall, reinstall, update, or a failed install.
+
 ## Client
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/uninstall-client.sh | sudo bash
 ```
 
-The local FRP client, `frp-client`, generated config, and local client-state are removed, but the central port reservation is intentionally preserved. Release it on the FRP server only when you want those ports reused.
+Local software will be removed (the `frpc` binary, systemd unit, project tools, generated config, client-state, local identity, trusted allocator CA, and version metadata).
+
+Server-side reservations remain. This command does **not** contact the allocator and does **not** release ports. Use an explicit server release command if those ports should be freed.
+
+After a client uninstall, a later install is a new enrollment (or authorized recovery) because local identity/state are gone. The server may still hold the old reservation until it is released.
 
 ## Server
 
@@ -573,9 +585,15 @@ The local FRP client, `frp-client`, generated config, and local client-state are
 curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/uninstall-server.sh | sudo bash
 ```
 
-Binaries and systemd units are removed. Token, configuration, and registry are preserved unless `--purge` is used.
+Binaries and systemd units are removed. Token, private CA, configuration, and registry (including client reservations) are preserved so a later reinstall can recover the same trust and port assignments.
 
----
+```bash
+curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/uninstall-server.sh | sudo bash -s -- --purge --yes
+```
+
+`--purge` is destructive. Noninteractive use requires `--yes`. It deletes the FRP token, private CA, server certificate/key, registry, enrollment state, and configuration.
+
+If a purge fails part-way, the command exits non-zero and lists remaining paths without printing secret contents.
 
 # Project Details
 
@@ -932,9 +950,9 @@ Check without changing anything:
 sudo frp-update --check
 ```
 
-`frpctl update` on a server host runs `frp-update`, which upgrades the FRP server binary only to the version tested by `frp-auto-deploy` and automatically rolls back if the new server fails its health checks.
+`frpctl update` on a server host runs `frp-update`, which upgrades the FRP server binary only to the version tested by `frp-auto-deploy` and automatically rolls back if the new server fails its health checks. Project-layer tooling updates do not rotate the CA or token, rewrite the registry, or restart `frps` unless a changed runtime file requires it.
 
-On a client host, `sudo frpctl update` upgrades `frp-auto-deploy` management tools only. It does not require an Enrollment Code, does not rewrite client state or `frpc.toml`, and does not restart `frpc` when the pinned FRP version is already installed.
+On a client host, `sudo frpctl update` upgrades `frp-auto-deploy` management tools only. It does not require an Enrollment Code, does not rewrite client state or `frpc.toml`, and does not restart `frpc` when the pinned FRP version is already installed. Running the first-install client bootstrap on an already installed client is refused; use `sudo frpctl update` instead.
 
 Upstream latest FRP releases are not installed automatically. `frp-auto-deploy` updates only to its tested/pinned FRP version. Availability of existing remote clients takes priority over installing the newest upstream binary.
 
@@ -1038,6 +1056,7 @@ python3 tests/test-mgmt-identity.py
 ./tests/test-lifecycle.sh
 ./tests/test-guided-ux.sh
 ./tests/test-client-upgrade.sh
+./tests/test-install-lifecycle.sh
 ./tests/test-frpctl.sh
 ./tests/test-frpctl-completion.sh
 ./tests/test-frp-update.sh

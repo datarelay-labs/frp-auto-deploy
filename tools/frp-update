@@ -49,7 +49,10 @@ if ! frp_test_harness_enabled; then
 fi
 
 FRPS_BIN="$(frp_path /usr/local/bin/frps)"
+FRPC_BIN="$(frp_path /usr/local/bin/frpc)"
 FRPS_CONFIG="$(frp_path /etc/frp/frps.toml)"
+FRPC_CONFIG="$(frp_path /etc/frp/frpc.toml)"
+CLIENT_STATE="$(frp_path /etc/frp/client-state.json)"
 TOKEN_FILE="$(frp_path /etc/frp/server_token)"
 REGISTRY_FILE="$(frp_path /var/lib/frp-auto-deploy/registry.json)"
 BACKUP_ROOT="$(frp_path /var/lib/frp-auto-deploy/backups)"
@@ -113,14 +116,22 @@ restart_frps() {
       echo "ERROR: simulated restart failure" >&2
       return 1
     fi
+    if frp_test_harness_enabled && [[ "${FRP_UPDATE_HOOK_ROLLBACK_RESTART_FAIL:-}" == "1" && "${FRP_UPDATE_IN_ROLLBACK:-}" == "1" ]]; then
+      echo "ERROR: simulated rollback restart failure" >&2
+      return 1
+    fi
     return 0
   fi
   systemctl restart frps
 }
 
 health_check() {
-  local ver port
-  ver="$(frp_parse_binary_version "$FRPS_BIN")"
+  local ver port bin
+  bin="$FRPS_BIN"
+  if [[ "${UPDATE_ROLE:-server}" == "client" ]]; then
+    bin="$FRPC_BIN"
+  fi
+  ver="$(frp_parse_binary_version "$bin")"
   if frp_test_harness_enabled && [[ -n "${FRP_UPDATE_HOOK_HEALTH_FAIL_VERSION:-}" && "$ver" == "${FRP_UPDATE_HOOK_HEALTH_FAIL_VERSION}" ]]; then
     echo "ERROR: health check failed for FRP ${ver}" >&2
     return 1
@@ -130,6 +141,13 @@ health_check() {
       echo "ERROR: control port is not listening" >&2
       return 1
     fi
+    return 0
+  fi
+  if [[ "${UPDATE_ROLE:-server}" == "client" ]]; then
+    systemctl is-active --quiet frpc || {
+      echo "ERROR: frpc is not active" >&2
+      return 1
+    }
     return 0
   fi
   systemctl is-active --quiet frps || {
@@ -152,34 +170,57 @@ health_check() {
 }
 
 create_backup() {
-  local ts
+  local ts bin name cfg
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
   BACKUP_DIR="${BACKUP_ROOT}/${ts}-${PREVIOUS_VERSION}"
   mkdir -p "$BACKUP_DIR"
   chmod 700 "$BACKUP_ROOT" 2>/dev/null || true
   chmod 700 "$BACKUP_DIR"
-  cp "$FRPS_BIN" "${BACKUP_DIR}/frps"
-  chmod 0755 "${BACKUP_DIR}/frps"
-  if [[ -f "$FRPS_CONFIG" ]]; then
-    cp "$FRPS_CONFIG" "${BACKUP_DIR}/frps.toml"
-    chmod 600 "${BACKUP_DIR}/frps.toml"
+  if [[ "${UPDATE_ROLE:-server}" == "client" ]]; then
+    bin="$FRPC_BIN"
+    name=frpc
+    cfg="$FRPC_CONFIG"
+  else
+    bin="$FRPS_BIN"
+    name=frps
+    cfg="$FRPS_CONFIG"
+  fi
+  cp "$bin" "${BACKUP_DIR}/${name}"
+  chmod 0755 "${BACKUP_DIR}/${name}"
+  if [[ -f "$cfg" ]]; then
+    cp "$cfg" "${BACKUP_DIR}/$(basename "$cfg")"
+    chmod 600 "${BACKUP_DIR}/$(basename "$cfg")"
   fi
   cat >"${BACKUP_DIR}/metadata" <<EOF
 PREVIOUS_FRP_VERSION=${PREVIOUS_VERSION}
 TARGET_FRP_VERSION=${TARGET_VERSION}
 BACKUP_UTC=${ts}
+ROLE=${UPDATE_ROLE:-server}
 EOF
   chmod 644 "${BACKUP_DIR}/metadata"
+  frp_prune_backup_dirs "$BACKUP_ROOT" "$FRP_BACKUP_KEEP"
 }
 
 do_rollback() {
+  local name dest
+  FRP_UPDATE_IN_ROLLBACK=1
   echo "Rolling back to FRP ${PREVIOUS_VERSION} ..."
-  if [[ -z "$BACKUP_DIR" || ! -x "${BACKUP_DIR}/frps" ]]; then
+  if [[ "${UPDATE_ROLE:-server}" == "client" ]]; then
+    name=frpc
+    dest="$FRPC_BIN"
+  else
+    name=frps
+    dest="$FRPS_BIN"
+  fi
+  if [[ -z "$BACKUP_DIR" || ! -x "${BACKUP_DIR}/${name}" ]]; then
     echo "ERROR: rollback backup is missing" >&2
     return 1
   fi
-  frp_atomic_install "${BACKUP_DIR}/frps" "$FRPS_BIN" 0755
-  if ! restart_frps; then
+  if ! frp_atomic_install "${BACKUP_DIR}/${name}" "$dest" 0755; then
+    echo "ERROR: rollback restore failed" >&2
+    return 1
+  fi
+  if ! restart_frp_unit; then
     echo "ERROR: rollback restart failed" >&2
     return 1
   fi
@@ -191,8 +232,10 @@ do_rollback() {
 }
 
 fail_update() {
+  local class="${1:-STAGING_FAILED}"
   echo >&2
   echo "FRP update failed." >&2
+  frp_emit_failure_class "$class"
   if [[ "$INSTALLED_NEW" == "1" ]]; then
     if do_rollback; then
       echo
@@ -203,12 +246,17 @@ fail_update() {
       echo
       echo "The previous FRP version is running."
       report_preservation
+      frp_txn_clear
       exit 1
     fi
     echo "CRITICAL: FRP update failed and automatic rollback did not recover frps." >&2
+    frp_emit_failure_class UPDATE_ROLLBACK_FAILED
+    echo "RECOVERY_REQUIRED" >&2
+    echo "FAILURE_CLASS=UPDATE_ROLLBACK_FAILED" >&2
     report_preservation
     exit 2
   fi
+  frp_txn_clear
   exit 1
 }
 
@@ -219,15 +267,22 @@ precheck() {
     echo "ERROR: invalid target FRP version: ${TARGET_VERSION}" >&2
     return 1
   }
-  [[ -x "$FRPS_BIN" ]] || {
-    echo "ERROR: current frps binary not found at ${FRPS_BIN}" >&2
-    echo "Install the FRP server with install-server.sh before using frp-update." >&2
+  UPDATE_ROLE=server
+  if [[ ! -x "$FRPS_BIN" || ! -f "$FRPS_CONFIG" ]]; then
+    if [[ -x "$FRPC_BIN" && -f "$CLIENT_STATE" ]]; then
+      UPDATE_ROLE=client
+    else
+      echo "ERROR: current frps binary not found at ${FRPS_BIN}" >&2
+      echo "Install the FRP server with install-server.sh before using frp-update." >&2
+      frp_emit_failure_class INSTALL_PRECHECK_FAILED
+      return 1
+    fi
+  fi
+  if [[ "$UPDATE_ROLE" == "client" && ! -f "$FRPC_CONFIG" ]]; then
+    echo "ERROR: missing FRP client config: ${FRPC_CONFIG}" >&2
+    frp_emit_failure_class INSTALL_PRECHECK_FAILED
     return 1
-  }
-  [[ -f "$FRPS_CONFIG" ]] || {
-    echo "ERROR: missing FRP config: ${FRPS_CONFIG}" >&2
-    return 1
-  }
+  fi
   if [[ "$SKIP_SYSTEMD" != "1" ]]; then
     require_cmd systemctl || return 1
   fi
@@ -242,21 +297,35 @@ precheck() {
 }
 
 prepare_new_binary() {
-  local archive extracted expected url
-  EXTRACTED_FRPS="${TMPDIR}/frps.new"
+  local archive extracted expected url member dest
+  member=frps
+  dest="${TMPDIR}/frps.new"
+  if [[ "${UPDATE_ROLE:-server}" == "client" ]]; then
+    member=frpc
+    dest="${TMPDIR}/frpc.new"
+  fi
+  EXTRACTED_FRPS="$dest"
   if frp_test_harness_enabled && [[ "${FRP_UPDATE_HOOK_DOWNLOAD_FAIL:-}" == "1" ]]; then
     echo "ERROR: failed to download FRP archive" >&2
+    UPDATE_FAIL_CLASS=DOWNLOAD_FAILED
     return 1
   fi
   if frp_test_harness_enabled && [[ -n "${FRP_UPDATE_HOOK_NEW_BINARY:-}" ]]; then
     [[ -x "${FRP_UPDATE_HOOK_NEW_BINARY}" ]] || {
       echo "ERROR: fixture binary is missing" >&2
+      UPDATE_FAIL_CLASS=STAGING_FAILED
       return 1
     }
     cp "${FRP_UPDATE_HOOK_NEW_BINARY}" "$EXTRACTED_FRPS"
     chmod 0755 "$EXTRACTED_FRPS"
     if [[ "${FRP_UPDATE_HOOK_CHECKSUM_FAIL:-}" == "1" ]]; then
       echo "ERROR: SHA256 checksum mismatch" >&2
+      UPDATE_FAIL_CLASS=INTEGRITY_FAILED
+      return 1
+    fi
+    if [[ "${FRP_UPDATE_HOOK_ARCH_FAIL:-}" == "1" ]]; then
+      echo "ERROR: candidate architecture (other) does not match this host (${FRP_ARCH})" >&2
+      UPDATE_FAIL_CLASS=INTEGRITY_FAILED
       return 1
     fi
     return 0
@@ -267,13 +336,15 @@ prepare_new_binary() {
   expected="$(frp_checksum_for "$TARGET_VERSION" "$FRP_ARCH")"
   curl -fL --retry 3 --connect-timeout 10 --max-time 120 -o "$archive" "$url" || {
     echo "ERROR: failed to download FRP archive" >&2
+    UPDATE_FAIL_CLASS=DOWNLOAD_FAILED
     return 1
   }
-  frp_verify_sha256 "$expected" "$archive" || return 1
-  tar xzf "$archive" -C "$TMPDIR"
-  extracted="${TMPDIR}/frp_${TARGET_VERSION}_linux_${FRP_ARCH}/frps"
-  [[ -f "$extracted" ]] || {
-    echo "ERROR: downloaded archive did not contain frps" >&2
+  frp_verify_sha256 "$expected" "$archive" || {
+    UPDATE_FAIL_CLASS=INTEGRITY_FAILED
+    return 1
+  }
+  extracted="$(frp_extract_frp_member "$archive" "$TMPDIR" "$member")" || {
+    UPDATE_FAIL_CLASS=STAGING_FAILED
     return 1
   }
   cp "$extracted" "$EXTRACTED_FRPS"
@@ -283,17 +354,54 @@ prepare_new_binary() {
 validate_new_binary() {
   if frp_test_harness_enabled && [[ "${FRP_UPDATE_HOOK_VERIFY_FAIL:-}" == "1" ]]; then
     echo "ERROR: configuration is not valid for the target FRP version" >&2
+    UPDATE_FAIL_CLASS=STAGING_FAILED
     return 1
+  fi
+  if ! frp_validate_frp_binary "$EXTRACTED_FRPS" "$TARGET_VERSION" "$FRP_ARCH"; then
+    UPDATE_FAIL_CLASS=INTEGRITY_FAILED
+    return 1
+  fi
+  if [[ "${UPDATE_ROLE:-server}" == "client" ]]; then
+    "$EXTRACTED_FRPS" verify -c "$FRPC_CONFIG" || {
+      echo "ERROR: configuration is not valid for the target FRP version" >&2
+      UPDATE_FAIL_CLASS=STAGING_FAILED
+      return 1
+    }
+    return 0
   fi
   "$EXTRACTED_FRPS" verify -c "$FRPS_CONFIG" || {
     echo "ERROR: configuration is not valid for the target FRP version" >&2
+    UPDATE_FAIL_CLASS=STAGING_FAILED
     return 1
   }
 }
 
+restart_frp_unit() {
+  if [[ "${UPDATE_ROLE:-server}" == "client" ]]; then
+    if [[ "$SKIP_SYSTEMD" == "1" ]]; then
+      mkdir -p "$(dirname "$(frp_path /var/lib/frp-auto-deploy/update-actions.log)")"
+      echo "restart frpc" >>"$(frp_path /var/lib/frp-auto-deploy/update-actions.log)"
+      if frp_test_harness_enabled && [[ "${FRP_UPDATE_HOOK_RESTART_FAIL:-}" == "1" ]]; then
+        echo "ERROR: simulated restart failure" >&2
+        return 1
+      fi
+      return 0
+    fi
+    systemctl restart frpc
+    return
+  fi
+  restart_frps
+}
+
 # --- main ---
+UPDATE_ROLE=server
+UPDATE_FAIL_CLASS=""
 precheck || exit 1
-PREVIOUS_VERSION="$(frp_parse_binary_version "$FRPS_BIN")"
+if [[ "$UPDATE_ROLE" == "client" ]]; then
+  PREVIOUS_VERSION="$(frp_parse_binary_version "$FRPC_BIN")"
+else
+  PREVIOUS_VERSION="$(frp_parse_binary_version "$FRPS_BIN")"
+fi
 snapshot_preservation
 
 echo "Current FRP : ${PREVIOUS_VERSION}"
@@ -320,33 +428,44 @@ echo
 echo "Checking prerequisites..."
 frp_checksum_for "$TARGET_VERSION" "$FRP_ARCH" >/dev/null
 
-TMPDIR="$(mktemp -d)"
+TMPDIR="$(frp_secure_mktemp_dir)"
+frp_txn_write update stage "$PREVIOUS_VERSION" "$TARGET_VERSION"
 
 echo "Downloading FRP v${TARGET_VERSION}..."
-prepare_new_binary || fail_update
+prepare_new_binary || fail_update "${UPDATE_FAIL_CLASS:-DOWNLOAD_FAILED}"
 
 echo "Verifying SHA256..."
 # Real downloads already verified the archive. Fixture path verifies via hooks.
 
 echo "Validating configuration..."
-validate_new_binary || fail_update
+validate_new_binary || fail_update "${UPDATE_FAIL_CLASS:-STAGING_FAILED}"
 
 echo "Creating rollback backup..."
-create_backup || fail_update
+create_backup || fail_update STAGING_FAILED
+frp_txn_write update commit "$PREVIOUS_VERSION" "$TARGET_VERSION"
 
 echo "Installing FRP v${TARGET_VERSION}..."
-frp_atomic_install "$EXTRACTED_FRPS" "$FRPS_BIN" 0755 || fail_update
+if [[ "$UPDATE_ROLE" == "client" ]]; then
+  frp_atomic_install "$EXTRACTED_FRPS" "$FRPC_BIN" 0755 || fail_update FILE_COMMIT_FAILED
+else
+  frp_atomic_install "$EXTRACTED_FRPS" "$FRPS_BIN" 0755 || fail_update FILE_COMMIT_FAILED
+fi
 INSTALLED_NEW=1
 
-echo "Restarting frps..."
-restart_frps || fail_update
+echo "Restarting ${UPDATE_ROLE} runtime..."
+restart_frp_unit || fail_update SERVICE_START_FAILED
 
 echo "Running health checks..."
-health_check || fail_update
+health_check || fail_update HEALTH_CHECK_FAILED
 
+frp_txn_clear
 echo
 echo "FRP update completed successfully."
 echo
 echo "Previous : ${PREVIOUS_VERSION}"
-echo "Current  : $(frp_parse_binary_version "$FRPS_BIN")"
+if [[ "$UPDATE_ROLE" == "client" ]]; then
+  echo "Current  : $(frp_parse_binary_version "$FRPC_BIN")"
+else
+  echo "Current  : $(frp_parse_binary_version "$FRPS_BIN")"
+fi
 report_preservation

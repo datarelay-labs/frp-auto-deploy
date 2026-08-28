@@ -78,6 +78,7 @@ bash -n tools/frp-server-status tools/frp-update tools/frp-client tools/frpctl
 ./tests/test-client-allocator-url.sh
 ./tests/test-create-client.sh
 ./tests/test-client-upgrade.sh
+./tests/test-install-lifecycle.sh
 ./tests/test-frpctl.sh
 ./tests/test-frpctl-completion.sh
 python3 tests/test-allocator.py

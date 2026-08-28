@@ -46,8 +46,25 @@ frp_migrate_legacy_client_installer_url() {
   fi
 }
 
+frp_server_fs() {
+  local p="$1"
+  if [[ -n "${FRP_SERVER_TEST_ROOT:-}" ]]; then
+    printf '%s' "${FRP_SERVER_TEST_ROOT}${p}"
+  else
+    printf '%s' "$p"
+  fi
+}
+
+frp_server_test_mode() {
+  [[ -n "${FRP_SERVER_TEST_ROOT:-}" ]]
+}
+
 frp_server_config_path() {
-  printf '%s' "${FRP_SERVER_CONFIG:-/etc/frp-auto-deploy/config.json}"
+  if [[ -n "${FRP_SERVER_CONFIG:-}" ]]; then
+    printf '%s' "$FRP_SERVER_CONFIG"
+  else
+    frp_server_fs /etc/frp-auto-deploy/config.json
+  fi
 }
 
 frp_valid_https_url() {
@@ -85,7 +102,11 @@ frp_format_https_url() {
 }
 
 frp_pki_dir() {
-  printf '%s' "${FRP_PKI_DIR:-/etc/frp-auto-deploy/pki}"
+  if [[ -n "${FRP_PKI_DIR:-}" ]]; then
+    printf '%s' "$FRP_PKI_DIR"
+  else
+    frp_server_fs /etc/frp-auto-deploy/pki
+  fi
 }
 
 frp_valid_public_host() {
@@ -228,14 +249,31 @@ frp_wait_allocator_ready() {
 frp_server_prepare_host() {
   frp_require_bash || exit 1
   frp_detect_architecture || exit 1
+  if frp_server_test_mode; then
+    return 0
+  fi
   frp_detect_platform
   frp_detect_package_manager
   frp_print_detected_linux
   echo
-  frp_require_systemd || exit 1
+  frp_require_systemd || {
+    frp_emit_failure_class INSTALL_PRECHECK_FAILED
+    exit 1
+  }
   FRP_DEPENDENCY_ROLE=server
-  ensure_dependencies || exit 1
-  frp_require_python || exit 1
+  if [[ "${FRP_INSTALL_HOOK_DEP_FAIL:-}" == "1" ]]; then
+    echo "ERROR: simulated package manager failure" >&2
+    frp_emit_failure_class DEPENDENCY_INSTALL_FAILED
+    exit 1
+  fi
+  if ! ensure_dependencies; then
+    frp_emit_failure_class DEPENDENCY_INSTALL_FAILED
+    exit 1
+  fi
+  frp_require_python || {
+    frp_emit_failure_class INSTALL_PRECHECK_FAILED
+    exit 1
+  }
 }
 
 load_existing_server_config() {
@@ -584,46 +622,232 @@ EOF2
   fi
 }
 
+frp_server_begin_tmp() {
+  TMPDIR="$(frp_secure_mktemp_dir)"
+  FRP_SERVER_SAVED_EXIT_TRAP="$(trap -p EXIT || true)"
+  # shellcheck disable=SC2064
+  trap "rm -rf $(printf '%q' "$TMPDIR")" EXIT
+}
+
+frp_server_end_tmp() {
+  if [[ -n "${TMPDIR:-}" && -d "$TMPDIR" ]]; then
+    rm -rf "$TMPDIR"
+  fi
+  if [[ -n "${FRP_SERVER_SAVED_EXIT_TRAP:-}" ]]; then
+    eval "$FRP_SERVER_SAVED_EXIT_TRAP"
+  else
+    trap - EXIT
+  fi
+}
+
+frp_server_skip_systemd() {
+  frp_server_test_mode || [[ "${FRP_INSTALL_HOOK_SKIP_SYSTEMD:-}" == "1" ]]
+}
+
+frp_server_record_action() {
+  local log
+  log="$(frp_server_fs /var/lib/frp-auto-deploy/install-actions.log)"
+  mkdir -p "$(dirname "$log")"
+  printf '%s\n' "$1" >>"$log"
+}
+
+frp_server_enable_units() {
+  if frp_server_skip_systemd; then
+    frp_server_record_action "enable frps frp-port-allocator"
+    if [[ "${FRP_INSTALL_HOOK_ENABLE_FAIL:-}" == "1" ]]; then
+      echo "ERROR: simulated systemctl enable failure" >&2
+      return 1
+    fi
+    return 0
+  fi
+  frp_server_systemctl enable frps frp-port-allocator >/dev/null
+}
+
+frp_server_restart_unit() {
+  local unit="$1"
+  if frp_server_skip_systemd; then
+    frp_server_record_action "restart ${unit}"
+    if [[ "${FRP_INSTALL_HOOK_START_FAIL:-}" == "1" ]]; then
+      echo "ERROR: simulated systemd start failure" >&2
+      return 1
+    fi
+    return 0
+  fi
+  frp_server_systemctl restart "$unit"
+}
+
+frp_server_health_frps() {
+  if [[ "${FRP_INSTALL_HOOK_HEALTH_FAIL:-}" == "1" ]]; then
+    echo "ERROR: simulated health check failure" >&2
+    return 1
+  fi
+  if frp_server_skip_systemd; then
+    return 0
+  fi
+  frp_wait_unit_active frps
+}
+
+frp_server_health_allocator() {
+  local port="$1"
+  if [[ "${FRP_INSTALL_HOOK_HEALTH_FAIL:-}" == "1" ]]; then
+    echo "ERROR: simulated health check failure" >&2
+    return 1
+  fi
+  if frp_server_skip_systemd; then
+    return 0
+  fi
+  frp_wait_allocator_ready "$port"
+}
+
+frp_server_install_frp_binary() {
+  local dest archive url extracted
+  dest="$(frp_server_fs /usr/local/bin/frps)"
+  if [[ "${FRP_INSTALL_HOOK_DOWNLOAD_FAIL:-}" == "1" ]]; then
+    echo "ERROR: failed to download FRP archive" >&2
+    frp_emit_failure_class DOWNLOAD_FAILED
+    return 1
+  fi
+  if [[ -n "${FRP_INSTALL_HOOK_NEW_BINARY:-}" ]]; then
+    [[ -x "${FRP_INSTALL_HOOK_NEW_BINARY}" ]] || {
+      echo "ERROR: fixture binary is missing" >&2
+      frp_emit_failure_class STAGING_FAILED
+      return 1
+    }
+    if [[ "${FRP_INSTALL_HOOK_CHECKSUM_FAIL:-}" == "1" ]]; then
+      echo "ERROR: SHA256 checksum mismatch" >&2
+      frp_emit_failure_class INTEGRITY_FAILED
+      return 1
+    fi
+    frp_validate_frp_binary "${FRP_INSTALL_HOOK_NEW_BINARY}" "$FRP_VERSION" "$FRP_ARCH" || {
+      frp_emit_failure_class INTEGRITY_FAILED
+      return 1
+    }
+    frp_atomic_install "${FRP_INSTALL_HOOK_NEW_BINARY}" "$dest" 0755 || {
+      frp_emit_failure_class FILE_COMMIT_FAILED
+      return 1
+    }
+    return 0
+  fi
+
+  if [[ -x "$dest" ]]; then
+    if [[ "$(frp_parse_binary_version "$dest")" == "$FRP_VERSION" ]]; then
+      echo "Existing frps ${FRP_VERSION} reused."
+      return 0
+    fi
+  fi
+
+  archive="${TMPDIR}/frp.tar.gz"
+  url="https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/frp_${FRP_VERSION}_linux_${FRP_ARCH}.tar.gz"
+  echo "Downloading official FRP ${FRP_VERSION} (${FRP_ARCH}) ..."
+  if ! curl -fL --retry 3 -o "$archive" "$url"; then
+    echo "ERROR: failed to download FRP archive" >&2
+    frp_emit_failure_class DOWNLOAD_FAILED
+    return 1
+  fi
+  printf '%s  %s\n' "$EXPECTED_SHA" "$archive" | sha256sum -c - || {
+    frp_emit_failure_class INTEGRITY_FAILED
+    return 1
+  }
+  extracted="$(frp_extract_frp_member "$archive" "$TMPDIR" frps)" || {
+    frp_emit_failure_class STAGING_FAILED
+    return 1
+  }
+  frp_validate_frp_binary "$extracted" "$FRP_VERSION" "$FRP_ARCH" || {
+    frp_emit_failure_class INTEGRITY_FAILED
+    return 1
+  }
+  # Final path remains /usr/local/bin/frps (prefixed only in isolated tests).
+  frp_atomic_install "$extracted" "$dest" 0755 || {
+    frp_emit_failure_class FILE_COMMIT_FAILED
+    return 1
+  }
+}
+
 frp_server_main() {
-  if [[ ${EUID} -ne 0 ]]; then
+  if [[ ${EUID} -ne 0 ]] && ! frp_server_test_mode; then
     echo "ERROR: run with sudo" >&2
-    exit 1
+    return 1
   fi
 
   frp_server_prepare_host
 
-  DETECTED_PUBLIC_IP="$(curl -4 -fsS --max-time 5 https://ifconfig.me 2>/dev/null || true)"
+  if ! frp_server_test_mode; then
+    DETECTED_PUBLIC_IP="$(curl -4 -fsS --max-time 5 https://ifconfig.me 2>/dev/null || true)"
+  else
+    DETECTED_PUBLIC_IP="${DETECTED_PUBLIC_IP:-}"
+  fi
   DETECTED_INTERNAL_IP="$(frp_detect_internal_ip)"
 
   load_existing_server_config
   resolve_server_settings
 
   if [[ -z "${FRP_ARCH:-}" ]]; then
-    frp_detect_architecture || exit 1
+    frp_detect_architecture || return 1
   fi
+
+  local etc_frp etc_proj var_lib version_file token_file frps_toml
+  local registry_file backups_dir lib_dir unit_frps unit_alloc sbin_dir
+  etc_frp="$(frp_server_fs /etc/frp)"
+  etc_proj="$(frp_server_fs /etc/frp-auto-deploy)"
+  var_lib="$(frp_server_fs /var/lib/frp-auto-deploy)"
+  version_file="$(frp_server_fs /etc/frp-auto-deploy/version)"
+  token_file="$(frp_server_fs /etc/frp/server_token)"
+  frps_toml="$(frp_server_fs /etc/frp/frps.toml)"
+  registry_file="$(frp_server_fs /var/lib/frp-auto-deploy/registry.json)"
+  backups_dir="$(frp_server_fs /var/lib/frp-auto-deploy/backups)"
+  lib_dir="$(frp_server_fs /usr/local/lib/frp-auto-deploy)"
+  unit_frps="$(frp_server_fs /etc/systemd/system/frps.service)"
+  unit_alloc="$(frp_server_fs /etc/systemd/system/frp-port-allocator.service)"
+  sbin_dir="$(frp_server_fs /usr/local/sbin)"
+
+  local existing_install=0
+  if [[ -f "$(frp_server_config_path)" || -s "$token_file" || -f "$registry_file" ]]; then
+    existing_install=1
+  fi
+  local previous_project
+  previous_project="$(frp_read_kv_file "$version_file" PROJECT_VERSION)"
+  if [[ -n "$previous_project" ]]; then
+    local vcmp
+    vcmp="$(frp_version_compare "$previous_project" "$PROJECT_VERSION")"
+    if [[ "$vcmp" == "gt" ]]; then
+      echo "ERROR: installed project version ${previous_project} is newer than this bundle (${PROJECT_VERSION})." >&2
+      echo "Refusing to downgrade. Use the matching release or restore from backup." >&2
+      return 1
+    fi
+  fi
+
+  local hash_frps_before hash_toml_before hash_unit_frps_before hash_unit_alloc_before
+  local hash_alloc_py_before
+  hash_frps_before="$(frp_file_sha256 "$(frp_server_fs /usr/local/bin/frps)")"
+  hash_toml_before="$(frp_file_sha256 "$frps_toml")"
+  hash_unit_frps_before="$(frp_file_sha256 "$unit_frps")"
+  hash_unit_alloc_before="$(frp_file_sha256 "$unit_alloc")"
+  hash_alloc_py_before="$(frp_file_sha256 "${lib_dir}/frp-port-allocator.py")"
 
   # Capture existing listeners before restarting an existing frps. On first migration,
   # this preserves ports such as 6000/6001 already used by unmanaged clients.
   ACTIVE_PORTS="$(frp_listening_tcp_ports_in_range "$FRP_PORT_START" "$FRP_PORT_END")"
 
-  TMPDIR="$(mktemp -d)"
-  trap 'rm -rf "$TMPDIR"' EXIT
-  ARCHIVE="$TMPDIR/frp.tar.gz"
-  URL="https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/frp_${FRP_VERSION}_linux_${FRP_ARCH}.tar.gz"
-  echo "Downloading official FRP ${FRP_VERSION} (${FRP_ARCH}) ..."
-  curl -fL --retry 3 -o "$ARCHIVE" "$URL"
-  printf '%s  %s\n' "$EXPECTED_SHA" "$ARCHIVE" | sha256sum -c -
-  tar xzf "$ARCHIVE" -C "$TMPDIR"
-  install -m 0755 "$TMPDIR/frp_${FRP_VERSION}_linux_${FRP_ARCH}/frps" /usr/local/bin/frps
+  frp_server_begin_tmp
+  frp_txn_write install commit "${previous_project}" "${PROJECT_VERSION}"
 
-  mkdir -p /etc/frp /etc/frp-auto-deploy /var/lib/frp-auto-deploy/enrollments /var/lib/frp-auto-deploy/backups /usr/local/lib/frp-auto-deploy
-  chmod 700 /etc/frp /etc/frp-auto-deploy /var/lib/frp-auto-deploy /var/lib/frp-auto-deploy/enrollments /var/lib/frp-auto-deploy/backups
-  frp_write_version_file /etc/frp-auto-deploy/version
+  if ! frp_server_install_frp_binary; then
+    frp_txn_clear
+    frp_server_end_tmp
+    return 1
+  fi
+
+  mkdir -p "$etc_frp" "$etc_proj" "${var_lib}/enrollments" "$backups_dir" "$lib_dir" "$sbin_dir" \
+    "$(dirname "$unit_frps")"
+  chmod 700 "$etc_frp" "$etc_proj" "$var_lib" "${var_lib}/enrollments" "$backups_dir"
+  if [[ ${EUID} -eq 0 ]]; then
+    chown root:root "$etc_frp" "$etc_proj" "$var_lib" 2>/dev/null || true
+  fi
 
   TOKEN_ACTION=""
   TOKEN_PRESERVED="N/A"
   TOKEN_BACKUP=""
-  migrate_out="$(python3 "$BASE_DIR/server/migrate_token.py" ensure --etc-dir /etc/frp --backup)"
+  migrate_out="$(python3 "$BASE_DIR/server/migrate_token.py" ensure --etc-dir "$etc_frp" --backup)"
   while IFS= read -r line; do
     case "$line" in
       TOKEN_ACTION=*|TOKEN_PRESERVED=*|TOKEN_BACKUP=*)
@@ -631,10 +855,10 @@ frp_server_main() {
         ;;
     esac
   done <<< "$migrate_out"
-  [[ -s /etc/frp/server_token ]] || { echo "ERROR: FRP server token is missing after migration" >&2; exit 1; }
-  chmod 600 /etc/frp/server_token
+  [[ -s "$token_file" ]] || { echo "ERROR: FRP server token is missing after migration" >&2; frp_emit_failure_class FILE_COMMIT_FAILED; frp_server_end_tmp; return 1; }
+  chmod 600 "$token_file"
 
-  cat >/etc/frp/frps.toml <<EOF2
+  frp_atomic_write "$frps_toml" 0600 <<EOF2
 bindPort = ${FRP_CONTROL_LISTEN_PORT}
 
 auth.method = "token"
@@ -647,8 +871,12 @@ allowPorts = [
   { start = ${FRP_PORT_START}, end = ${FRP_PORT_END} }
 ]
 EOF2
-  chmod 600 /etc/frp/frps.toml
-  /usr/local/bin/frps verify -c /etc/frp/frps.toml
+  "$(frp_server_fs /usr/local/bin/frps)" verify -c "$frps_toml" || {
+    echo "ERROR: generated frps.toml failed verification" >&2
+    frp_emit_failure_class STAGING_FAILED
+    frp_server_end_tmp
+    return 1
+  }
 
   write_server_config
   pki_out="$(frp_ensure_server_pki)"
@@ -661,13 +889,13 @@ EOF2
         ;;
     esac
   done <<< "$pki_out"
-  [[ -n "$CA_FINGERPRINT" ]] || { echo "ERROR: allocator CA fingerprint is missing" >&2; exit 1; }
+  [[ -n "$CA_FINGERPRINT" ]] || { echo "ERROR: allocator CA fingerprint is missing" >&2; frp_emit_failure_class FILE_COMMIT_FAILED; frp_server_end_tmp; return 1; }
 
   REGISTRY_ACTION=""
   MIGRATED_CLIENTS="0"
   PRESERVED_PORTS="0"
   registry_out="$(python3 "$BASE_DIR/server/migrate_token.py" init-registry \
-    --registry /var/lib/frp-auto-deploy/registry.json \
+    --registry "$registry_file" \
     --ports "$ACTIVE_PORTS" \
     --port-start "$FRP_PORT_START" \
     --port-end "$FRP_PORT_END" \
@@ -679,28 +907,100 @@ EOF2
         ;;
     esac
   done <<< "$registry_out"
-  [[ -f /var/lib/frp-auto-deploy/registry.json ]] || { echo "ERROR: registry.json is missing" >&2; exit 1; }
-  chmod 600 /var/lib/frp-auto-deploy/registry.json
+  [[ -f "$registry_file" ]] || { echo "ERROR: registry.json is missing" >&2; frp_emit_failure_class FILE_COMMIT_FAILED; frp_server_end_tmp; return 1; }
+  chmod 600 "$registry_file"
 
-  install -m 0700 "$BASE_DIR/server/frp-port-allocator.py" /usr/local/lib/frp-auto-deploy/frp-port-allocator.py
-  install -m 0644 "$BASE_DIR/lib/frp_mgmt_auth.py" /usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py
-  install -m 0644 "$BASE_DIR/lib/frp_pki.py" /usr/local/lib/frp-auto-deploy/frp_pki.py
-  install -m 0644 "$BASE_DIR/lib/frp-common.sh" /usr/local/lib/frp-auto-deploy/frp-common.sh
-  install -m 0644 "$BASE_DIR/server/frps.service" /etc/systemd/system/frps.service
+  install -m 0700 "$BASE_DIR/server/frp-port-allocator.py" "${lib_dir}/frp-port-allocator.py"
+  install -m 0644 "$BASE_DIR/lib/frp_mgmt_auth.py" "${lib_dir}/frp_mgmt_auth.py"
+  install -m 0644 "$BASE_DIR/lib/frp_pki.py" "${lib_dir}/frp_pki.py"
+  install -m 0644 "$BASE_DIR/lib/frp-common.sh" "${lib_dir}/frp-common.sh"
+  install -m 0644 "$BASE_DIR/server/frps.service" "$unit_frps"
   frp_write_compatible_systemd_unit \
     "$BASE_DIR/server/frp-port-allocator.service" \
-    /etc/systemd/system/frp-port-allocator.service
+    "$unit_alloc"
   for tool in frp-create-client frp-clients frp-client-info frp-release-client frp-release-service frp-revoke-client frp-set-client-installer-url frp-server-status frp-update frpctl; do
-    install -m 0755 "$BASE_DIR/tools/$tool" "/usr/local/sbin/$tool"
+    install -m 0755 "$BASE_DIR/tools/$tool" "${sbin_dir}/$tool"
   done
 
-  systemctl daemon-reload
-  systemctl enable frps frp-port-allocator >/dev/null
-  systemctl restart frps
-  systemctl restart frp-port-allocator
+  local need_frps_restart=0 need_alloc_restart=0
+  if [[ "$existing_install" != "1" ]]; then
+    need_frps_restart=1
+    need_alloc_restart=1
+  else
+    if [[ "$(frp_file_sha256 "$(frp_server_fs /usr/local/bin/frps)")" != "$hash_frps_before" ]]; then
+      need_frps_restart=1
+    fi
+    if [[ "$(frp_file_sha256 "$frps_toml")" != "$hash_toml_before" ]]; then
+      need_frps_restart=1
+    fi
+    if [[ "$(frp_file_sha256 "$unit_frps")" != "$hash_unit_frps_before" ]]; then
+      need_frps_restart=1
+    fi
+    if [[ "$(frp_file_sha256 "$unit_alloc")" != "$hash_unit_alloc_before" ]]; then
+      need_alloc_restart=1
+    fi
+    if [[ "$(frp_file_sha256 "${lib_dir}/frp-port-allocator.py")" != "$hash_alloc_py_before" ]]; then
+      need_alloc_restart=1
+    fi
+    if [[ "${PKI_ACTION:-}" == "reissued-server" || "${PKI_ACTION:-}" == "generated" ]]; then
+      need_alloc_restart=1
+    fi
+  fi
 
-  frp_wait_unit_active frps || exit 1
-  frp_wait_allocator_ready "$FRP_ALLOCATOR_LISTEN_PORT" || exit 1
+  if ! frp_server_skip_systemd; then
+    systemctl daemon-reload || {
+      frp_emit_failure_class SYSTEMD_RELOAD_FAILED
+      frp_server_end_tmp
+      return 1
+    }
+  else
+    frp_server_record_action "daemon-reload"
+  fi
+
+  if ! frp_server_enable_units; then
+    frp_emit_failure_class SYSTEMD_ENABLE_FAILED
+    echo "ERROR: systemd enable failed; installation is not complete." >&2
+    frp_server_end_tmp
+    return 1
+  fi
+
+  if [[ "$need_frps_restart" == "1" ]]; then
+    if ! frp_server_restart_unit frps; then
+      frp_emit_failure_class SERVICE_START_FAILED
+      echo "ERROR: frps failed to start; installation is not complete." >&2
+      frp_server_end_tmp
+      return 1
+    fi
+  fi
+  if [[ "$need_alloc_restart" == "1" ]]; then
+    if ! frp_server_restart_unit frp-port-allocator; then
+      frp_emit_failure_class SERVICE_START_FAILED
+      echo "ERROR: frp-port-allocator failed to start; installation is not complete." >&2
+      frp_server_end_tmp
+      return 1
+    fi
+  fi
+
+  if [[ "$need_frps_restart" == "1" ]] || [[ "$existing_install" != "1" ]]; then
+    if ! frp_server_health_frps; then
+      frp_emit_failure_class HEALTH_CHECK_FAILED
+      frp_server_end_tmp
+      return 1
+    fi
+  fi
+  if [[ "$need_alloc_restart" == "1" ]] || [[ "$existing_install" != "1" ]]; then
+    if ! frp_server_health_allocator "$FRP_ALLOCATOR_LISTEN_PORT"; then
+      frp_emit_failure_class HEALTH_CHECK_FAILED
+      frp_server_end_tmp
+      return 1
+    fi
+  fi
+
+  # Version metadata is written only after a successful install/reinstall.
+  frp_write_version_file "$(frp_server_fs /etc/frp-auto-deploy/version)"
+  frp_txn_clear
+  frp_prune_backup_dirs "$backups_dir" "$FRP_BACKUP_KEEP"
+  frp_server_end_tmp
 
   cat <<EOF2
 
@@ -736,6 +1036,9 @@ EOF2
   elif [[ "${PKI_ACTION:-}" == "generated" ]]; then
     echo "Generated a new allocator private CA and server certificate."
   fi
+  if [[ "$existing_install" == "1" && "$need_frps_restart" != "1" && "$need_alloc_restart" != "1" ]]; then
+    echo "Runtime services were not restarted (project files only)."
+  fi
   frp_print_nat_summary
   cat <<EOF2
 Create a client enrollment:
@@ -763,5 +1066,5 @@ EOF2
 }
 
 if [[ "${FRP_SERVER_SOURCED:-}" != "1" ]]; then
-  frp_server_main "$@"
+  frp_server_main "$@" || exit $?
 fi

@@ -242,6 +242,14 @@ frp_client_main() {
     frp_client_existing_install_message
     return 1
   fi
+  if frp_client_has_partial_install; then
+    echo "ERROR: a partial FRP client installation was found." >&2
+    echo "Repair it with: sudo frpctl update" >&2
+    echo "or uninstall locally and enroll again." >&2
+    echo "Do not re-run first-install bootstrap on a partial client." >&2
+    frp_emit_failure_class RECOVERY_REQUIRED
+    return 1
+  fi
 
   frp_require_allocator_url
   frp_bootstrap_allocator_ca "$ALLOCATOR_URL" || exit 1
@@ -255,7 +263,15 @@ frp_client_main() {
     echo
     frp_require_systemd || exit 1
     FRP_DEPENDENCY_ROLE=client
-    ensure_dependencies || exit 1
+    if [[ "${FRP_INSTALL_HOOK_DEP_FAIL:-}" == "1" ]]; then
+      echo "ERROR: simulated package manager failure" >&2
+      frp_emit_failure_class DEPENDENCY_INSTALL_FAILED
+      exit 1
+    fi
+    ensure_dependencies || {
+      frp_emit_failure_class DEPENDENCY_INSTALL_FAILED
+      exit 1
+    }
     frp_require_python || exit 1
   fi
 
@@ -273,7 +289,8 @@ frp_client_main() {
   SERVICES_FILE="$(mktemp)"
   ALLOCATED_FILE="$(mktemp)"
   ENROLL_META_FILE="$(mktemp)"
-  TMPDIR="$(mktemp -d)"
+  TMPDIR="$(frp_secure_mktemp_dir)"
+  chmod 600 "$SERVICES_FILE" "$ALLOCATED_FILE" "$ENROLL_META_FILE"
   trap 'rm -rf "$TMPDIR" "$SERVICES_FILE" "$ALLOCATED_FILE" "$ENROLL_META_FILE"; unset FRP_TOKEN ENROLL_SECRET FRP_ENROLLMENT_CODE TOKEN_CIPHERTEXT' EXIT
 
   collect_services
@@ -317,11 +334,33 @@ frp_client_main() {
     ARCHIVE="$TMPDIR/frp.tar.gz"
     URL="https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/frp_${FRP_VERSION}_linux_${FRP_ARCH}.tar.gz"
     echo "Downloading FRP ${FRP_VERSION} (${FRP_ARCH}) ..."
-    curl -fL --retry 3 -o "$ARCHIVE" "$URL"
+    if [[ "${FRP_INSTALL_HOOK_DOWNLOAD_FAIL:-}" == "1" ]]; then
+      echo "ERROR: failed to download FRP archive" >&2
+      frp_emit_failure_class DOWNLOAD_FAILED
+      exit 1
+    fi
+    if ! curl -fL --retry 3 -o "$ARCHIVE" "$URL"; then
+      echo "ERROR: failed to download FRP archive" >&2
+      frp_emit_failure_class DOWNLOAD_FAILED
+      exit 1
+    fi
     echo "Verifying checksum ..."
-    printf '%s  %s\n' "$EXPECTED_SHA" "$ARCHIVE" | sha256sum -c -
-    tar xzf "$ARCHIVE" -C "$TMPDIR"
-    install -m 0755 "$TMPDIR/frp_${FRP_VERSION}_linux_${FRP_ARCH}/frpc" /usr/local/bin/frpc
+    printf '%s  %s\n' "$EXPECTED_SHA" "$ARCHIVE" | sha256sum -c - || {
+      frp_emit_failure_class INTEGRITY_FAILED
+      exit 1
+    }
+    extracted="$(frp_extract_frp_member "$ARCHIVE" "$TMPDIR" frpc)" || {
+      frp_emit_failure_class STAGING_FAILED
+      exit 1
+    }
+    frp_validate_frp_binary "$extracted" "$FRP_VERSION" "$FRP_ARCH" || {
+      frp_emit_failure_class INTEGRITY_FAILED
+      exit 1
+    }
+    frp_atomic_install "$extracted" /usr/local/bin/frpc 0755 || {
+      frp_emit_failure_class FILE_COMMIT_FAILED
+      exit 1
+    }
   fi
 
   HOST_SAFE="$(printf '%s' "$HOSTNAME_VALUE" | tr -cs 'A-Za-z0-9._-' '-')"
@@ -351,15 +390,27 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF2
     echo "Starting FRP client ..."
-    systemctl daemon-reload
-    systemctl enable frpc >/dev/null
-    systemctl restart frpc
+    systemctl daemon-reload || {
+      frp_emit_failure_class SYSTEMD_RELOAD_FAILED
+      exit 1
+    }
+    if ! systemctl enable frpc >/dev/null; then
+      echo "ERROR: systemd enable failed; installation is not complete." >&2
+      frp_emit_failure_class SYSTEMD_ENABLE_FAILED
+      exit 1
+    fi
+    if ! systemctl restart frpc; then
+      echo "ERROR: frpc failed to start; local files were written and the server reservation is preserved." >&2
+      frp_emit_failure_class SERVICE_START_FAILED
+      exit 1
+    fi
 
     echo "Verifying published proxies ..."
     mapfile -t PROXY_NAMES < <(proxy_names_from_services "$HOST_ID")
     if ! wait_for_proxies "${PROXY_NAMES[@]}"; then
       echo "ERROR: frpc did not register every requested proxy successfully" >&2
       journalctl -u frpc -n 80 --no-pager >&2 || true
+      frp_emit_failure_class HEALTH_CHECK_FAILED
       exit 1
     fi
   fi

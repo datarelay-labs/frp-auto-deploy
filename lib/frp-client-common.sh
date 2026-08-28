@@ -13,12 +13,21 @@ FRP_CLIENT_UPGRADE_BACKUP_KEEP="${FRP_CLIENT_UPGRADE_BACKUP_KEEP:-5}"
 FRP_CLIENT_UPDATE_URL="${FRP_CLIENT_UPDATE_URL:-https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh}"
 
 # Defaults match VERSION. A sibling VERSION file overrides project/FRP versions.
-PROJECT_VERSION="${PROJECT_VERSION:-1.7.0}"
+PROJECT_VERSION="${PROJECT_VERSION:-1.8.0}"
 FRP_VERSION="${FRP_VERSION:-0.70.1}"
 _FRP_CLIENT_COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${_FRP_CLIENT_COMMON_DIR}/../VERSION" ]]; then
   # shellcheck disable=SC1091
   . "${_FRP_CLIENT_COMMON_DIR}/../VERSION"
+fi
+if [[ -z "${FRP_COMMON_LOADED:-}" ]]; then
+  if [[ -f "${_FRP_CLIENT_COMMON_DIR}/frp-common.sh" ]]; then
+    # shellcheck source=frp-common.sh
+    . "${_FRP_CLIENT_COMMON_DIR}/frp-common.sh"
+  elif [[ -f /usr/local/lib/frp-auto-deploy/frp-common.sh ]]; then
+    # shellcheck disable=SC1091
+    . /usr/local/lib/frp-auto-deploy/frp-common.sh
+  fi
 fi
 
 frp_client_path() {
@@ -554,7 +563,23 @@ frp_client_installed_frp_version() {
 }
 
 frp_client_has_existing_install() {
-  [[ -f "$(frp_client_state_path)" ]]
+  if [[ -f "$(frp_client_state_path)" ]]; then
+    return 0
+  fi
+  if [[ -f "$(frp_client_toml_path)" && -f "$(frp_client_identity_key_path)" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+frp_client_has_partial_install() {
+  if frp_client_has_existing_install; then
+    return 1
+  fi
+  if [[ -f "$(frp_client_path /etc/systemd/system/frpc.service)" ]]; then
+    return 0
+  fi
+  return 1
 }
 
 frp_client_hook_log() {
@@ -574,11 +599,13 @@ frp_client_test_hook() {
   return 0
 }
 
-frp_emit_failure_class() {
-  local class="$1"
-  printf 'FAILURE_CLASS=%s\n' "$class"
-  printf 'FAILURE_CLASS=%s\n' "$class" >&2
-}
+if ! declare -F frp_emit_failure_class >/dev/null 2>&1; then
+  frp_emit_failure_class() {
+    local class="$1"
+    printf 'FAILURE_CLASS=%s\n' "$class"
+    printf 'FAILURE_CLASS=%s\n' "$class" >&2
+  }
+fi
 
 _FRP_TEST_INPUT_READY=0
 
@@ -2644,6 +2671,9 @@ PY
 frp_client_atomic_install() {
   local src="$1" dest="$2" mode="${3:-0755}"
   local dir tmp
+  if declare -F frp_require_safe_write_path >/dev/null 2>&1; then
+    frp_require_safe_write_path "$dest" || return 1
+  fi
   dir="$(dirname "$dest")"
   mkdir -p "$dir"
   tmp="$(mktemp "${dir}/.frp-upgrade.XXXXXX")"
@@ -2686,6 +2716,10 @@ frp_client_install_management_files() {
     echo "ERROR: missing ${source}/lib/frp-client-common.sh" >&2
     return 1
   }
+  [[ -f "${source}/lib/frp-common.sh" ]] || {
+    echo "ERROR: missing ${source}/lib/frp-common.sh" >&2
+    return 1
+  }
   [[ -f "${source}/lib/frp_mgmt_auth.py" ]] || {
     echo "ERROR: missing ${source}/lib/frp_mgmt_auth.py" >&2
     return 1
@@ -2699,6 +2733,7 @@ frp_client_install_management_files() {
     return 1
   }
   install -m 0644 "${source}/lib/frp-client-common.sh" "${libdir}/frp-client-common.sh"
+  install -m 0644 "${source}/lib/frp-common.sh" "${libdir}/frp-common.sh"
   install -m 0644 "${source}/lib/frp_mgmt_auth.py" "${libdir}/frp_mgmt_auth.py"
   install -m 0755 "${source}/tools/frp-client" "${bindir}/frp-client"
   install -m 0755 "${source}/tools/frpctl" "${bindir}/frpctl"
@@ -2710,6 +2745,7 @@ frp_client_upgrade_destinations() {
   # dest_rel:mode:source_rel
   printf '%s\n' \
     "usr/local/lib/frp-auto-deploy/frp-client-common.sh:0644:lib/frp-client-common.sh" \
+    "usr/local/lib/frp-auto-deploy/frp-common.sh:0644:lib/frp-common.sh" \
     "usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py:0644:lib/frp_mgmt_auth.py" \
     "usr/local/bin/frp-client:0755:tools/frp-client" \
     "usr/local/bin/frpctl:0755:tools/frpctl"
@@ -2749,6 +2785,7 @@ frp_client_upgrade_validate_staged() {
   bash -n "${staged}/usr/local/bin/frp-client" || return 1
   bash -n "${staged}/usr/local/bin/frpctl" || return 1
   bash -n "${staged}/usr/local/lib/frp-auto-deploy/frp-client-common.sh" || return 1
+  bash -n "${staged}/usr/local/lib/frp-auto-deploy/frp-common.sh" || return 1
   python3 -m py_compile "${staged}/usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py" || return 1
   rm -rf "${staged}/usr/local/lib/frp-auto-deploy/__pycache__" \
     "${staged}/usr/local/lib/frp-auto-deploy/"*.pyc 2>/dev/null || true
@@ -2876,10 +2913,6 @@ frp_client_upgrade_verify() {
   if [[ -f "$(frp_client_toml_path)" ]]; then
     frp_client_verify_config "$(frp_client_toml_path)" || return 1
   fi
-  [[ -f "$(frp_client_version_file)" ]] || {
-    echo "ERROR: version file was not written" >&2
-    return 1
-  }
   if [[ "$ident_before" == enrolled && "$(frp_identity_status)" != enrolled ]]; then
     echo "ERROR: management identity was not preserved" >&2
     return 1
@@ -2908,6 +2941,34 @@ frp_client_apply_upgrade() {
   fi
 
   frp_client_upgrade_validate_existing || return 1
+  if [[ -f "$(frp_txn_marker_path)" ]]; then
+    echo "A previous software update was interrupted."
+    local recovered=""
+    recovered="$(python3 - "$(frp_client_upgrade_backup_root)" <<'PY'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+if not root.is_dir():
+    raise SystemExit(0)
+dirs = sorted([p for p in root.iterdir() if p.is_dir()], key=lambda p: p.name)
+if dirs:
+    print(str(dirs[-1]))
+PY
+)"
+    if [[ -n "$recovered" && -d "$recovered" ]]; then
+      if ! frp_client_upgrade_restore_tools "$recovered"; then
+        echo "ERROR: interrupted update could not be rolled back automatically." >&2
+        frp_emit_failure_class RECOVERY_REQUIRED
+        return 1
+      fi
+      echo "Restored the previous management files from backup."
+    else
+      echo "ERROR: interrupted update left the installation incomplete." >&2
+      frp_emit_failure_class RECOVERY_REQUIRED
+      return 1
+    fi
+    frp_txn_clear
+  fi
   frp_client_upgrade_source_version "$source"
   previous="$(frp_client_installed_project_version)"
   target="${PROJECT_VERSION}"
@@ -2918,6 +2979,17 @@ frp_client_apply_upgrade() {
   echo "Target project version    : ${target}"
   echo "FRP version               : ${FRP_VERSION}"
   echo
+
+  if [[ "$previous" != "legacy / unknown" ]]; then
+    local vcmp
+    vcmp="$(frp_version_compare "$previous" "$target")"
+    if [[ "$vcmp" == "gt" ]]; then
+      echo "ERROR: installed project version ${previous} is newer than this bundle (${target})." >&2
+      echo "Refusing to downgrade." >&2
+      frp_emit_failure_class DOWNGRADE_REFUSED
+      return 1
+    fi
+  fi
 
   if [[ "$check_only" == "1" ]]; then
     if [[ "$previous" == "$target" ]]; then
@@ -2956,20 +3028,15 @@ frp_client_apply_upgrade() {
 
   echo "Backing up replaceable project files..."
   backup="$(frp_client_upgrade_backup_tools)" || return 1
+  frp_txn_write update commit "$previous" "$target"
 
   echo "Installing management files..."
   if ! frp_client_upgrade_install_staged "$staged"; then
     echo "ERROR: tool install failed; restoring previous management files." >&2
     frp_client_upgrade_restore_tools "$backup" || true
     echo "UPGRADE_ROLLBACK=PASS"
-    return 1
-  fi
-
-  echo "Writing project version..."
-  if ! frp_client_write_version_file; then
-    echo "ERROR: failed to write version file; restoring previous management files." >&2
-    frp_client_upgrade_restore_tools "$backup" || true
-    echo "UPGRADE_ROLLBACK=PASS"
+    frp_emit_failure_class FILE_COMMIT_FAILED
+    frp_txn_clear
     return 1
   fi
 
@@ -2978,8 +3045,26 @@ frp_client_apply_upgrade() {
     echo "ERROR: post-upgrade verification failed; restoring previous management files." >&2
     if frp_client_upgrade_restore_tools "$backup"; then
       echo "UPGRADE_ROLLBACK=PASS"
+      frp_emit_failure_class HEALTH_CHECK_FAILED
+      frp_txn_clear
     else
       echo "UPGRADE_ROLLBACK=FAIL"
+      frp_emit_failure_class UPDATE_ROLLBACK_FAILED
+      echo "RECOVERY_REQUIRED" >&2
+    fi
+    return 1
+  fi
+
+  echo "Writing project version..."
+  if ! frp_client_write_version_file; then
+    echo "ERROR: failed to write version file; restoring previous management files." >&2
+    if frp_client_upgrade_restore_tools "$backup"; then
+      echo "UPGRADE_ROLLBACK=PASS"
+      frp_txn_clear
+    else
+      echo "UPGRADE_ROLLBACK=FAIL"
+      frp_emit_failure_class UPDATE_ROLLBACK_FAILED
+      echo "RECOVERY_REQUIRED" >&2
     fi
     return 1
   fi
@@ -3023,9 +3108,13 @@ frp_client_apply_upgrade() {
 
   ident_after="$(frp_identity_label)"
   frp_after="${FRP_VERSION}"
+  frp_txn_clear
   echo
   echo "Upgrade complete."
   echo "Project version : ${previous} -> ${target}"
+  if [[ "$previous" == "$target" ]]; then
+    echo "Same-version update : refreshed management files"
+  fi
   if [[ "$frp_before" == "$frp_after" ]]; then
     echo "FRP version     : ${frp_after} (unchanged)"
   else

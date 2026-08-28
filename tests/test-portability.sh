@@ -237,11 +237,9 @@ pass "FRPCTL_NO_READLINE_FALLBACK_SAFE"
 # Install / uninstall layout (documented paths)
 # ---------------------------------------------------------------------------
 
-grep -q 'install -m 0755 "$TMPDIR/frp_${FRP_VERSION}_linux_${FRP_ARCH}/frps" /usr/local/bin/frps' \
-  "$ROOT/install-server.sh" || fail "server frps path"
-grep -q '"/usr/local/sbin/$tool"' "$ROOT/install-server.sh" || fail "server tools in sbin"
-grep -q 'install -m 0755 "$TMPDIR/frp_${FRP_VERSION}_linux_${FRP_ARCH}/frpc" /usr/local/bin/frpc' \
-  "$ROOT/install-client.sh" || fail "client frpc path"
+grep -q '/usr/local/bin/frps' "$ROOT/install-server.sh" || fail "server frps path"
+grep -q 'sbin_dir' "$ROOT/install-server.sh" || fail "server tools in sbin"
+grep -q '/usr/local/bin/frpc' "$ROOT/install-client.sh" || fail "client frpc path"
 grep -q 'frp_client_path /usr/local/bin' "$ROOT/lib/frp-client-common.sh" || fail "client tools in bin"
 grep -q 'lib/frp-common.sh' "$ROOT/scripts/build-bundles.py" || fail "client bundle missing common lib"
 if grep -q 'Debian/Ubuntu only' "$ROOT/install-server.sh"; then
@@ -264,8 +262,12 @@ from pathlib import Path
 import sys
 text = Path(sys.argv[1]).read_text(encoding='utf-8')
 idx_purge = text.find('if [[ "$PURGE" == true ]]; then')
-idx_rm = text.find('rm -rf /etc/frp /etc/frp-auto-deploy /var/lib/frp-auto-deploy')
-if idx_purge < 0 or idx_rm < idx_purge:
+if idx_purge < 0:
+    raise SystemExit(1)
+before = text[:idx_purge]
+if 'try_rm_rf "$(frp_u_path /etc/frp)"' in before or 'frp_u_safe_rm_rf "$(frp_u_path /etc/frp)"' in before:
+    raise SystemExit(1)
+if '--purge' not in text or 'PURGE_CONFIRMATION_REQUIRED' not in text:
     raise SystemExit(1)
 PY
 grep -q "Configuration, token, and registry were preserved" "$ROOT/uninstall-server.sh" \

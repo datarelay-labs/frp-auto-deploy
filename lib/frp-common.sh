@@ -8,7 +8,7 @@ fi
 FRP_COMMON_LOADED=1
 
 # Defaults match VERSION. A sibling VERSION file overrides project/FRP versions.
-PROJECT_VERSION="${PROJECT_VERSION:-1.7.0}"
+PROJECT_VERSION="${PROJECT_VERSION:-1.8.0}"
 FRP_VERSION="${FRP_VERSION:-0.70.1}"
 FRP_SHA256_AMD64="${FRP_SHA256_AMD64:-333da23d1b9009d7c01638e9ba38cf4600f7d37d393f854e96ee1396adefa9a6}"
 FRP_SHA256_ARM64="${FRP_SHA256_ARM64:-3990f396a9a490ee7f0e5f355287750ed41520064ed999eab443b5e9a78d773d}"
@@ -129,6 +129,7 @@ PY
 frp_atomic_install() {
   local src="$1" dest="$2" mode="${3:-0755}"
   local dir tmp
+  frp_require_safe_write_path "$dest" || return 1
   dir="$(dirname "$dest")"
   mkdir -p "$dir"
   tmp="$(mktemp "${dir}/.frp-install.XXXXXX")"
@@ -700,4 +701,332 @@ frp_listening_tcp_ports_in_range() {
       if (p ~ /^[0-9]+$/ && p+0>=s && p+0<=e) print p
     }
   ' | sort -nu | paste -sd, - 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# Software-lifecycle helpers (install / update / uninstall)
+# ---------------------------------------------------------------------------
+
+FRP_BACKUP_KEEP="${FRP_BACKUP_KEEP:-5}"
+
+if ! declare -F frp_emit_failure_class >/dev/null 2>&1; then
+  frp_emit_failure_class() {
+    local class="$1"
+    printf 'FAILURE_CLASS=%s\n' "$class"
+    printf 'FAILURE_CLASS=%s\n' "$class" >&2
+  }
+fi
+
+frp_is_unsafe_delete_path() {
+  local path="${1:-}"
+  if [[ -z "$path" || "$path" == "/" || "$path" == "." || "$path" == ".." || "$path" == "//" ]]; then
+    return 0
+  fi
+  case "$path" in
+    /*) ;;
+    *) return 0 ;;
+  esac
+  return 1
+}
+
+frp_path_has_symlink_component() {
+  local path="${1:-}"
+  local parent
+  if [[ -L "$path" ]]; then
+    return 0
+  fi
+  parent="${path%/*}"
+  if [[ -n "$parent" && "$parent" != "$path" && -L "$parent" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+frp_require_safe_write_path() {
+  local path="${1:-}"
+  if frp_is_unsafe_delete_path "$path"; then
+    echo "ERROR: refusing unsafe installation path" >&2
+    frp_emit_failure_class PATH_DELETION_REFUSED
+    return 1
+  fi
+  if [[ -e "$path" || -L "$path" ]] && frp_path_has_symlink_component "$path"; then
+    echo "ERROR: refusing to write through a symlink: ${path}" >&2
+    frp_emit_failure_class SYMLINK_REFUSED
+    return 1
+  fi
+  local parent
+  parent="${path%/*}"
+  if [[ -n "$parent" && "$parent" != "$path" && ( -e "$parent" || -L "$parent" ) ]]; then
+    if frp_path_has_symlink_component "$parent"; then
+      echo "ERROR: refusing to write through a symlink parent: ${path}" >&2
+      frp_emit_failure_class SYMLINK_REFUSED
+      return 1
+    fi
+  fi
+  return 0
+}
+
+frp_safe_rm_rf() {
+  local path="${1:-}"
+  if frp_is_unsafe_delete_path "$path"; then
+    echo "ERROR: refusing unsafe recursive deletion" >&2
+    frp_emit_failure_class PATH_DELETION_REFUSED
+    return 1
+  fi
+  if [[ -L "$path" ]]; then
+    echo "ERROR: refusing to recursively delete through a symlink" >&2
+    frp_emit_failure_class SYMLINK_REFUSED
+    return 1
+  fi
+  if [[ ! -e "$path" ]]; then
+    return 0
+  fi
+  if [[ ! -d "$path" ]]; then
+    echo "ERROR: refusing recursive deletion of a non-directory" >&2
+    frp_emit_failure_class PATH_DELETION_REFUSED
+    return 1
+  fi
+  rm -rf "$path"
+}
+
+frp_atomic_write() {
+  local dest="$1" mode="${2:-0600}"
+  local dir tmp
+  frp_require_safe_write_path "$dest" || return 1
+  dir="$(dirname "$dest")"
+  mkdir -p "$dir"
+  tmp="$(mktemp "${dir}/.frp-write.XXXXXX")"
+  cat >"$tmp"
+  chmod "$mode" "$tmp"
+  if [[ ${EUID} -eq 0 ]]; then
+    chown root:root "$tmp" 2>/dev/null || true
+  fi
+  mv -f "$tmp" "$dest"
+}
+
+frp_secure_mktemp_dir() {
+  local dir
+  dir="$(mktemp -d)"
+  chmod 700 "$dir"
+  printf '%s' "$dir"
+}
+
+frp_version_compare() {
+  python3 - "$1" "$2" <<'PY'
+import re, sys
+def parse(v):
+    text = (v or "").strip()
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", text):
+        return None
+    return tuple(int(x) for x in text.split("."))
+a, b = parse(sys.argv[1]), parse(sys.argv[2])
+if a is None or b is None:
+    print("invalid")
+    raise SystemExit(0)
+if a > b:
+    print("gt")
+elif a < b:
+    print("lt")
+else:
+    print("eq")
+PY
+}
+
+frp_elf_arch_label() {
+  python3 - "$1" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+if not path.is_file():
+    print("missing")
+    raise SystemExit(0)
+data = path.read_bytes()
+if len(data) < 20 or data[:4] != b"\x7fELF":
+    print("non-elf")
+    raise SystemExit(0)
+endian = "little" if data[5] == 1 else "big"
+machine = int.from_bytes(data[18:20], endian)
+if machine == 62:
+    print("amd64")
+elif machine == 183:
+    print("arm64")
+else:
+    print("other")
+PY
+}
+
+frp_extract_frp_member() {
+  local archive="$1" dest_dir="$2" member="$3"
+  python3 - "$archive" "$dest_dir" "$member" <<'PY'
+import os, sys, tarfile
+from pathlib import Path
+
+archive, dest_dir, member = sys.argv[1], sys.argv[2], sys.argv[3]
+dest = Path(dest_dir)
+dest.mkdir(parents=True, exist_ok=True)
+out = dest / member
+
+def unsafe(name):
+    name = name.replace("\\", "/")
+    if name.startswith("/") or name.startswith("../") or name == ".." or "/../" in name:
+        return True
+    if name.endswith("/.."):
+        return True
+    return False
+
+found = None
+try:
+    tf = tarfile.open(archive, "r:*")
+except tarfile.TarError:
+    sys.stderr.write("ERROR: archive is not a valid tar file\n")
+    raise SystemExit(1)
+with tf:
+    for info in tf.getmembers():
+        name = info.name.replace("\\", "/")
+        if unsafe(name):
+            sys.stderr.write("ERROR: archive contains an unsafe path\n")
+            raise SystemExit(1)
+        if Path(name).name != member:
+            continue
+        if info.issym() or info.islnk():
+            sys.stderr.write("ERROR: archive member %s is a link\n" % member)
+            raise SystemExit(1)
+        if not info.isfile():
+            continue
+        found = info
+        break
+    if found is None:
+        sys.stderr.write("ERROR: archive did not contain expected file %s\n" % member)
+        raise SystemExit(1)
+    src = tf.extractfile(found)
+    if src is None:
+        sys.stderr.write("ERROR: failed to read archive member %s\n" % member)
+        raise SystemExit(1)
+    data = src.read()
+tmp = dest / (".%s.extract" % member)
+tmp.write_bytes(data)
+os.chmod(str(tmp), 0o755)
+tmp.replace(out)
+print(str(out))
+PY
+}
+
+frp_validate_frp_binary() {
+  local bin="$1" expected_ver="$2" expected_arch="${3:-}"
+  local elf ver
+  [[ -f "$bin" ]] || {
+    echo "ERROR: candidate binary is missing" >&2
+    return 1
+  }
+  [[ -x "$bin" ]] || {
+    echo "ERROR: candidate is not executable" >&2
+    return 1
+  }
+  elf="$(frp_elf_arch_label "$bin")"
+  if [[ "$elf" != "non-elf" && "$elf" != "missing" && -n "$expected_arch" && "$elf" != "$expected_arch" ]]; then
+    echo "ERROR: candidate architecture (${elf}) does not match this host (${expected_arch})" >&2
+    return 1
+  fi
+  ver="$(frp_parse_binary_version "$bin")"
+  if [[ "$ver" != "$expected_ver" ]]; then
+    echo "ERROR: candidate FRP version (${ver}) is not the pinned version (${expected_ver})" >&2
+    return 1
+  fi
+  return 0
+}
+
+frp_prune_backup_dirs() {
+  local root="$1" keep="${2:-$FRP_BACKUP_KEEP}"
+  python3 - "$root" "$keep" <<'PY'
+import shutil, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+keep = int(sys.argv[2])
+if not root.is_dir():
+    raise SystemExit(0)
+dirs = sorted([p for p in root.iterdir() if p.is_dir()], key=lambda p: p.name)
+for extra in dirs[: max(0, len(dirs) - keep)]:
+    shutil.rmtree(extra, ignore_errors=True)
+PY
+}
+
+frp_txn_marker_path() {
+  local root="${FRP_UPDATE_ROOT:-${FRP_DEPLOY_TEST_ROOT:-${FRP_SERVER_TEST_ROOT:-${FRP_CLIENT_TEST_ROOT:-${FRP_UNINSTALL_TEST_ROOT:-}}}}}"
+  if [[ -n "$root" ]]; then
+    printf '%s' "${root}/var/lib/frp-auto-deploy/update-pending.json"
+  else
+    printf '%s' /var/lib/frp-auto-deploy/update-pending.json
+  fi
+}
+
+frp_txn_write() {
+  local operation="$1" phase="$2" previous="${3:-}" candidate="${4:-}"
+  local marker dir tmp
+  marker="$(frp_txn_marker_path)"
+  dir="$(dirname "$marker")"
+  mkdir -p "$dir"
+  chmod 700 "$dir" 2>/dev/null || true
+  tmp="$(mktemp "${dir}/.update-pending.XXXXXX")"
+  python3 - "$tmp" "$operation" "$phase" "$previous" "$candidate" <<'PY'
+import json, sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps({
+    "operation": sys.argv[2],
+    "phase": sys.argv[3],
+    "previous_version": sys.argv[4],
+    "candidate_version": sys.argv[5],
+}, sort_keys=True) + "\n", encoding="utf-8")
+PY
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$marker"
+}
+
+frp_txn_clear() {
+  local marker
+  marker="$(frp_txn_marker_path)"
+  rm -f "$marker"
+}
+
+frp_role_fs() {
+  local p="$1"
+  local root="${FRP_ROLE_TEST_ROOT:-${FRP_SERVER_TEST_ROOT:-${FRP_CLIENT_TEST_ROOT:-${FRP_UNINSTALL_TEST_ROOT:-${FRP_DEPLOY_TEST_ROOT:-${FRP_UPDATE_ROOT:-}}}}}}"
+  if [[ -n "$root" ]]; then
+    printf '%s' "${root}${p}"
+  else
+    printf '%s' "$p"
+  fi
+}
+
+frp_detect_host_role() {
+  local server_signals=0 client_signals=0
+  local has_server_config=0 has_client_state=0
+  FRP_HOST_ROLE=absent
+  [[ -f "$(frp_role_fs /etc/frp-auto-deploy/config.json)" ]] && { has_server_config=1; server_signals=$((server_signals + 1)); }
+  [[ -f "$(frp_role_fs /etc/frp/server_token)" ]] && server_signals=$((server_signals + 1))
+  [[ -f "$(frp_role_fs /var/lib/frp-auto-deploy/registry.json)" ]] && server_signals=$((server_signals + 1))
+  [[ -f "$(frp_role_fs /etc/frp/frps.toml)" ]] && server_signals=$((server_signals + 1))
+  [[ -x "$(frp_role_fs /usr/local/bin/frps)" ]] && server_signals=$((server_signals + 1))
+  [[ -x "$(frp_role_fs /usr/local/sbin/frp-create-client)" ]] && server_signals=$((server_signals + 1))
+  [[ -f "$(frp_role_fs /etc/frp/client-state.json)" ]] && { has_client_state=1; client_signals=$((client_signals + 1)); }
+  [[ -f "$(frp_role_fs /etc/frp/frpc.toml)" ]] && client_signals=$((client_signals + 1))
+  [[ -f "$(frp_role_fs /etc/frp/client-identity.key)" ]] && client_signals=$((client_signals + 1))
+  [[ -x "$(frp_role_fs /usr/local/bin/frpc)" ]] && client_signals=$((client_signals + 1))
+  [[ -x "$(frp_role_fs /usr/local/bin/frp-client)" ]] && client_signals=$((client_signals + 1))
+  if (( server_signals >= 2 && client_signals >= 2 )); then
+    FRP_HOST_ROLE=both
+  elif (( server_signals >= 2 )); then
+    FRP_HOST_ROLE=server
+  elif (( client_signals >= 2 )); then
+    FRP_HOST_ROLE=client
+  elif [[ "$has_server_config" == "1" ]]; then
+    FRP_HOST_ROLE=server
+  elif [[ "$has_client_state" == "1" ]]; then
+    FRP_HOST_ROLE=client
+  elif (( server_signals == 1 )); then
+    FRP_HOST_ROLE=partial-server
+  elif (( client_signals == 1 )); then
+    FRP_HOST_ROLE=partial-client
+  else
+    FRP_HOST_ROLE=absent
+  fi
 }
