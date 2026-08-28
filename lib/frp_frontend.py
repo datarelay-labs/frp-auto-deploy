@@ -21,6 +21,11 @@ FRP_WEBSOCKET_PATH = '/~!frp'
 DEFAULT_BACKEND_CONTROL_PORT = 7000
 DEFAULT_ALLOCATOR_LISTEN_PORT = 6099
 DEFAULT_FRONTEND_PORT = 443
+# Internal TLS identity for the loopback allocator backend. nginx
+# proxy_ssl_verify matches DNS names, not iPAddress SANs, so the frontend
+# verifies DNS:localhost rather than the public IP/hostname. This is not a
+# user-configurable public option.
+ALLOCATOR_BACKEND_TLS_NAME = 'localhost'
 
 _SAFE_HOST = re.compile(r'^[A-Za-z0-9._:\[\]-]+$')
 _LISTEN_SSL_RE = re.compile(r'^(\s*)listen\s+\S+\s+ssl;', re.M)
@@ -147,6 +152,9 @@ http {
             proxy_request_buffering off;
         }
 
+        # Allocator backend is always loopback HTTPS. Verify DNS:localhost
+        # (present on every project leaf) because nginx proxy_ssl_verify does
+        # not reliably match iPAddress SANs such as the public IP.
         location ~ ^/(ca\\.crt|healthz|enroll|bootstrap/redeem)$ {
             proxy_pass https://127.0.0.1:%s;
             proxy_http_version 1.1;
@@ -183,7 +191,7 @@ http {
         control_listen_port,
         allocator_listen_port,
         ca_cert,
-        host,
+        ALLOCATOR_BACKEND_TLS_NAME,
     )
 
 

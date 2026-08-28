@@ -126,6 +126,14 @@ nginx sites. Direct mode does not install or enable this unit.
 The frontend is not the distro `nginx.service`. Uninstall removes
 `frp-frontend.service` and does not purge the nginx package.
 
+If the installer added the nginx package, it stops and disables distro
+`nginx.service` so the package manager autostart does not bind TCP/80.
+A pre-existing active or enabled `nginx.service` is a conflict: single-443
+fails before changing a working Direct deployment. A pre-existing inactive
+and disabled `nginx.service` is left that way. Reinstall of an existing
+single-443 tree is idempotent and does not treat `frp-frontend.service` as
+the distro unit. Uninstall never enables or starts distro `nginx.service`.
+
 ## TLS termination (single-443)
 
 - Clients open TLS to public TCP/443 (looks like HTTPS).
@@ -133,7 +141,11 @@ The frontend is not the distro `nginx.service`. Uninstall removes
   existing private CA.
 - `/ca.crt`, `/healthz`, `/enroll`, and `/bootstrap/redeem` are an nginx
   allowlist proxied to `https://127.0.0.1:<allocator_listen>` with
-  `proxy_ssl_verify on` and the project CA. Other paths return 404.
+  `proxy_ssl_verify on`, the project CA, and `proxy_ssl_name localhost`.
+  nginx `proxy_ssl_verify` does not reliably match iPAddress SANs, so the
+  loopback backend is verified as `DNS:localhost` (present on every project
+  leaf). The public certificate identity for clients is unchanged. Other
+  paths return 404.
 - `GET /~!frp` is the FRP 0.70.1 WebSocket path (`FrpWebsocketPath`), matched
   with an exact `location =`. After HTTP Upgrade, nginx proxies to
   `http://127.0.0.1:<frp_control_listen>`. Management POST `/enroll` never

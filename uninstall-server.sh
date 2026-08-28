@@ -94,6 +94,10 @@ if [[ "$SKIP_SYSTEMD" != "1" ]] && command -v systemctl >/dev/null 2>&1; then
   systemctl stop frp-frontend frp-port-allocator frps 2>/dev/null || true
   systemctl disable frp-frontend frp-port-allocator frps 2>/dev/null || true
 fi
+# Never enable, start, or unmask distro nginx.service. Uninstall removes
+# frp-frontend.service only. If this project installed nginx and disabled
+# the distro unit, leave nginx.service disabled. Do not restore unknown
+# external nginx configuration.
 
 frp_u_rm_file "$(frp_u_path /etc/systemd/system/frps.service)"
 frp_u_rm_file "$(frp_u_path /etc/systemd/system/frp-port-allocator.service)"

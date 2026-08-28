@@ -18,7 +18,9 @@ The FRP control/data tunnel uses:
 - the FRP server token (`/etc/frp/server_token`)
 
 In single-443 mode nginx terminates TLS on public TCP/443 with the project
-leaf certificate. The frps backend on localhost does not use `tls.force`;
+leaf certificate. The frontend proxies allocator paths to loopback HTTPS
+and verifies that backend with `proxy_ssl_verify on` as `DNS:localhost`.
+The frps backend on localhost does not use `tls.force`;
 authentication remains the FRP token. Plain WebSocket (`websocket` without
 TLS) is not a supported production transport.
 

@@ -14,7 +14,7 @@ bash -n tools/frp-server-status tools/frp-update tools/frp-client tools/frpctl
 echo "=== Python compile ==="
 python3 -m py_compile server/frp-port-allocator.py server/migrate_token.py scripts/build-bundles.py lib/frp_mgmt_auth.py lib/frp_pki.py lib/frp_frontend.py lib/frp_doctor.py
 python3 -m py_compile tools/frp-create-client tools/frp-clients tools/frp-client-info tools/frp-release-client tools/frp-release-service tools/frp-revoke-client tools/frp-set-client-installer-url
-python3 -m py_compile tests/test-allocator.py tests/test-enrollment-security.py tests/test-mgmt-identity.py tests/test-pki-https.py tests/test-bootstrap-ticket.py
+python3 -m py_compile tests/test-allocator.py tests/test-enrollment-security.py tests/test-mgmt-identity.py tests/test-pki-https.py tests/test-bootstrap-ticket.py tests/test-frontend-proxy.py
 
 echo "=== tests ==="
 ./tests/test-server-migration.sh
@@ -42,7 +42,8 @@ python3 tests/test-mgmt-identity.py
 ./tests/test-frpctl-doctor.sh
 ./tests/test-port-architecture.sh
 ./tests/test-ca-bootstrap.sh
-python3 tests/test-pki-https.py
+./tests/test-pki-https.py
+python3 tests/test-frontend-proxy.py
 ./tests/test-distro-matrix.sh
 ./tests/test-frp-update.sh
 ./tests/test-frp-server-status.sh

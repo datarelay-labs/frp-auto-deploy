@@ -86,6 +86,15 @@ if grep -nE "FRP_ALLOCATOR_URL=['\"]http://" README.md docs/*.md; then
 fi
 pass "NO_HTTP_ALLOCATOR"
 
+if grep -nE 'proxy_ssl_verify[[:space:]]+off' "$ROOT/lib/frp_frontend.py" "$ROOT/install-server.sh"; then
+  fail "production frontend disables proxy_ssl_verify"
+fi
+if grep -nE 'curl[[:space:]].*((^|[[:space:]])-k([[:space:]]|$)|--insecure)' "$ROOT/lib/frp_doctor.py" "$ROOT/install-server.sh"; then
+  fail "installer/doctor use curl -k"
+fi
+pass "NO_TLS_VERIFY_DISABLE"
+pass "NO_CURL_K_PRODUCTION_FLOW"
+
 grep -q 'release candidate' CHANGELOG.md || fail "CHANGELOG missing RC wording"
 grep -q 'release candidate' README.md || fail "README missing RC wording"
 if grep -nE 'v2\.1\.0 is (a |the )?(stable|tagged)' README.md CHANGELOG.md docs/*.md; then

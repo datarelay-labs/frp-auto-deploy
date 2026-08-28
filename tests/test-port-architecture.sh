@@ -264,6 +264,9 @@ assert 'location = "/~!frp"' in conf
 assert 'proxy_pass http://127.0.0.1:7000' in conf
 assert 'proxy_pass https://127.0.0.1:6099' in conf
 assert 'proxy_ssl_verify on' in conf
+assert 'proxy_ssl_name localhost;' in conf
+assert 'proxy_ssl_server_name on' in conf
+assert 'proxy_ssl_name 203.0.113.10;' not in conf
 assert 'ssl_certificate /etc/frp-auto-deploy/pki/server.crt' in conf
 assert 'listen 443 ssl;' in conf
 assert 'ca\\.crt|healthz|enroll|bootstrap/redeem' in conf
@@ -282,6 +285,31 @@ if grep -q 'listen 443 ssl;' "$WORKDIR/frontend.check.conf"; then
   fail "syntax-check copy still listens on 443"
 fi
 pass "single443 generated config, frps.toml, and nginx frontend"
+pass "NGINX_BACKEND_DNS_IDENTITY"
+pass "NGINX_NO_PUBLIC_IP_PROXY_SSL_NAME"
+pass "NGINX_BACKEND_VERIFY_ON"
+
+# Public DNS hostname still verifies the loopback allocator as localhost.
+python3 "$ROOT/lib/frp_frontend.py" \
+  --dest "$WORKDIR/frontend-dns.conf" \
+  --public-host frp.example.test \
+  --frontend-port 443 \
+  --allocator-listen-port 6099 \
+  --control-listen-port 7000 \
+  --ca-cert /etc/frp-auto-deploy/pki/ca.crt \
+  --server-cert /etc/frp-auto-deploy/pki/server.crt \
+  --server-key /etc/frp-auto-deploy/pki/server.key >/dev/null
+python3 - "$WORKDIR/frontend-dns.conf" <<'PY' || fail "dns public host backend identity"
+from pathlib import Path
+import sys
+conf = Path(sys.argv[1]).read_text()
+assert 'server_name frp.example.test;' in conf
+assert 'proxy_ssl_name localhost;' in conf
+assert 'proxy_ssl_name frp.example.test;' not in conf
+assert 'proxy_ssl_verify on' in conf
+assert 'proxy_ssl_verify off' not in conf
+PY
+pass "single443 DNS public host still uses localhost backend identity"
 
 reset_env
 export FRP_PUBLIC_HOST=203.0.113.10

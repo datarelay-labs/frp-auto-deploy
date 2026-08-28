@@ -293,6 +293,9 @@ grep -q "Configuration, token, and registry were preserved" "$ROOT/uninstall-ser
 grep -qF 'if [[ ! -f /etc/frp-auto-deploy/config.json ]]' "$ROOT/uninstall-client.sh" \
   || fail "client uninstall dual-role guard"
 grep -q 'command -v systemctl' "$ROOT/uninstall-server.sh" || fail "server uninstall systemd guard"
+if grep -nE 'systemctl[[:space:]]+(enable|start|unmask)[[:space:]].*nginx' "$ROOT/uninstall-server.sh"; then
+  fail "server uninstall starts distro nginx"
+fi
 pass "UNINSTALL_CLIENT_PORTABILITY"
 pass "UNINSTALL_SERVER_PORTABILITY"
 

@@ -239,6 +239,8 @@ def collect_identities(public_host, extra_hosts=None):
     for extra in ('localhost', '127.0.0.1'):
         if extra not in hosts:
             hosts.append(extra)
+    # DNS:localhost is the internal trust identity used by the single-443
+    # nginx frontend (proxy_ssl_name localhost). It is not a public option.
     dns = []
     ips = []
     for host in hosts:

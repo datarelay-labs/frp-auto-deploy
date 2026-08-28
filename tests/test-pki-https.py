@@ -468,6 +468,37 @@ def test_enroll_single443_transport():
         env_tmp.cleanup()
 
 
+def test_localhost_san_invariant():
+    cases = [
+        ('203.0.113.10', set(), {'203.0.113.10', '127.0.0.1'}, {'localhost'}),
+        ('frp.example.test', {'frp.example.test', 'localhost'}, {'127.0.0.1'}, set()),
+    ]
+    for public_host, extra_dns, extra_ips, _ in cases:
+        dns, ips = frp_pki.collect_identities(public_host)
+        if 'localhost' not in dns:
+            fail('collect_identities localhost DNS', public_host)
+        if '127.0.0.1' not in ips:
+            fail('collect_identities 127.0.0.1 IP', public_host)
+        if frp_pki.is_ip_address(public_host):
+            if public_host not in ips:
+                fail('collect_identities public IP', public_host)
+        else:
+            if public_host not in dns:
+                fail('collect_identities public DNS', public_host)
+        with tempfile.TemporaryDirectory() as tmp:
+            result = frp_pki.ensure_pki(str(Path(tmp) / 'pki'), public_host)
+            have_dns, have_ips = frp_pki.read_cert_sans(result['server_crt'])
+            if 'localhost' not in have_dns:
+                fail('leaf missing DNS:localhost', public_host)
+            if '127.0.0.1' not in have_ips:
+                fail('leaf missing IP:127.0.0.1', public_host)
+            if extra_dns - have_dns:
+                fail('leaf missing DNS SAN', extra_dns - have_dns)
+            if extra_ips - have_ips:
+                fail('leaf missing IP SAN', extra_ips - have_ips)
+    pass_('PKI_LOCALHOST_SAN')
+
+
 def main():
     test_https_healthz()
     test_plain_http_rejected()
@@ -483,6 +514,7 @@ def main():
     test_fingerprint_format()
     test_enroll_uses_public_control_port()
     test_enroll_single443_transport()
+    test_localhost_san_invariant()
     print()
     print('PKI_HTTPS_TEST=PASS')
 

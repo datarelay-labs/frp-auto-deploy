@@ -15,6 +15,12 @@ FRP remains pinned at **0.70.1**.
 - `frpctl status` / `frpctl doctor` show topology and TLS-reset vs closed-port
 - Mode switch is an explicit maintenance-window cutover (`FRP_CONFIRM_MODE_SWITCH`)
 - HTTP allocator, `curl -k`, and plaintext WebSocket are not used
+- Single-443 frontend verifies the loopback allocator as `DNS:localhost`
+  (`proxy_ssl_verify on`); distro `nginx.service` autostart is disabled when
+  this project installs nginx, and a pre-existing active nginx unit is a
+  conflict rather than silently stopped
+- `frpctl doctor` checks frontend-proxied `/healthz` and `/ca.crt`, not only
+  the allocator backend
 
 See [docs/DEPLOYMENT_MODES.md](docs/DEPLOYMENT_MODES.md).
 

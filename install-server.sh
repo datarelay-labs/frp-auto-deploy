@@ -171,6 +171,161 @@ frp_nginx_bin() {
   command -v nginx 2>/dev/null || true
 }
 
+frp_nginx_ownership_path() {
+  frp_server_fs /var/lib/frp-auto-deploy/nginx-ownership
+}
+
+frp_nginx_package_is_installed() {
+  local status=""
+  if [[ -n "${FRP_INSTALL_HOOK_NGINX_PACKAGE_INSTALLED:-}" ]]; then
+    [[ "${FRP_INSTALL_HOOK_NGINX_PACKAGE_INSTALLED}" == "1" ]]
+    return
+  fi
+  if frp_server_test_mode; then
+    return 1
+  fi
+  case "${PACKAGE_MANAGER:-}" in
+    apt)
+      status="$(dpkg-query -W -f '${Status}' nginx 2>/dev/null || true)"
+      [[ "$status" == *'install ok installed'* ]]
+      return
+      ;;
+    dnf|yum)
+      rpm -q nginx >/dev/null 2>&1
+      return
+      ;;
+  esac
+  if command -v dpkg-query >/dev/null 2>&1; then
+    status="$(dpkg-query -W -f '${Status}' nginx 2>/dev/null || true)"
+    [[ "$status" == *'install ok installed'* ]]
+    return
+  fi
+  if command -v rpm >/dev/null 2>&1; then
+    rpm -q nginx >/dev/null 2>&1
+    return
+  fi
+  return 1
+}
+
+frp_distro_nginx_is_active() {
+  if [[ -n "${FRP_INSTALL_HOOK_NGINX_SERVICE_ACTIVE:-}" ]]; then
+    [[ "${FRP_INSTALL_HOOK_NGINX_SERVICE_ACTIVE}" == "1" ]]
+    return
+  fi
+  if frp_server_skip_systemd; then
+    return 1
+  fi
+  command -v systemctl >/dev/null 2>&1 || return 1
+  frp_server_systemctl is-active --quiet nginx.service
+}
+
+frp_distro_nginx_is_enabled() {
+  if [[ -n "${FRP_INSTALL_HOOK_NGINX_SERVICE_ENABLED:-}" ]]; then
+    [[ "${FRP_INSTALL_HOOK_NGINX_SERVICE_ENABLED}" == "1" ]]
+    return
+  fi
+  if frp_server_skip_systemd; then
+    return 1
+  fi
+  command -v systemctl >/dev/null 2>&1 || return 1
+  frp_server_systemctl is-enabled --quiet nginx.service
+}
+
+frp_nginx_is_single443_reinstall() {
+  local existing
+  existing="$(frp_normalize_deployment_mode "${EXISTING_DEPLOYMENT_MODE:-direct}")" || existing=direct
+  [[ "$existing" == "single443" ]]
+}
+
+frp_nginx_snapshot_state() {
+  FRP_NGINX_PACKAGE_WAS_INSTALLED=0
+  FRP_NGINX_SERVICE_WAS_ACTIVE=0
+  FRP_NGINX_SERVICE_WAS_ENABLED=0
+  if frp_nginx_package_is_installed; then
+    FRP_NGINX_PACKAGE_WAS_INSTALLED=1
+  fi
+  if frp_distro_nginx_is_active; then
+    FRP_NGINX_SERVICE_WAS_ACTIVE=1
+  fi
+  if frp_distro_nginx_is_enabled; then
+    FRP_NGINX_SERVICE_WAS_ENABLED=1
+  fi
+}
+
+frp_nginx_emit_preexisting_conflict() {
+  echo "ERROR: pre-existing nginx.service is active/enabled." >&2
+  echo "ERROR: Enterprise single-443 uses a project-owned nginx instance." >&2
+  echo "ERROR: stop/reconfigure the existing nginx service before switching modes." >&2
+  if [[ "$(frp_normalize_deployment_mode "${EXISTING_DEPLOYMENT_MODE:-direct}")" == "direct" ]]; then
+    echo "ERROR: existing Direct deployment was not modified." >&2
+  fi
+}
+
+frp_nginx_preflight() {
+  frp_mode_is_single443 || return 0
+  frp_nginx_snapshot_state
+  # Reinstall of project-owned single-443: distro nginx.service is not
+  # frp-frontend.service. Leftover package autostart is cleaned up later.
+  if frp_nginx_is_single443_reinstall; then
+    return 0
+  fi
+  if [[ "$FRP_NGINX_PACKAGE_WAS_INSTALLED" == "1" ]] && \
+     { [[ "$FRP_NGINX_SERVICE_WAS_ACTIVE" == "1" ]] || [[ "$FRP_NGINX_SERVICE_WAS_ENABLED" == "1" ]]; }; then
+    frp_nginx_emit_preexisting_conflict
+    return 1
+  fi
+  return 0
+}
+
+frp_nginx_stop_disable_distro() {
+  if frp_server_skip_systemd; then
+    frp_server_record_action "stop nginx.service"
+    frp_server_record_action "disable nginx.service"
+    return 0
+  fi
+  frp_server_systemctl stop nginx.service >/dev/null 2>&1 || true
+  frp_server_systemctl disable nginx.service >/dev/null 2>&1 || true
+}
+
+frp_nginx_write_ownership() {
+  local path installed_by=0 disabled_by=0
+  path="$(frp_nginx_ownership_path)"
+  mkdir -p "$(dirname "$path")"
+  installed_by="${FRP_NGINX_PACKAGE_INSTALLED_BY_PROJECT:-0}"
+  disabled_by="${FRP_NGINX_DISTRO_DISABLED_BY_PROJECT:-0}"
+  cat >"$path" <<EOF
+NGINX_PACKAGE_PREEXISTING=${FRP_NGINX_PACKAGE_WAS_INSTALLED:-0}
+NGINX_SERVICE_WAS_ACTIVE=${FRP_NGINX_SERVICE_WAS_ACTIVE:-0}
+NGINX_SERVICE_WAS_ENABLED=${FRP_NGINX_SERVICE_WAS_ENABLED:-0}
+NGINX_PACKAGE_INSTALLED_BY_PROJECT=${installed_by}
+NGINX_DISTRO_DISABLED_BY_PROJECT=${disabled_by}
+EOF
+  chmod 600 "$path"
+}
+
+frp_nginx_reconcile_distro_unit() {
+  frp_mode_is_single443 || return 0
+  FRP_NGINX_PACKAGE_INSTALLED_BY_PROJECT=0
+  FRP_NGINX_DISTRO_DISABLED_BY_PROJECT=0
+  if [[ "${FRP_NGINX_PACKAGE_WAS_INSTALLED:-0}" != "1" ]]; then
+    # Case A: this install brought in the nginx package. Distro nginx.service
+    # often auto-starts on TCP/80; stop and disable it. Use frp-frontend only.
+    frp_nginx_stop_disable_distro
+    FRP_NGINX_PACKAGE_INSTALLED_BY_PROJECT=1
+    FRP_NGINX_DISTRO_DISABLED_BY_PROJECT=1
+  elif frp_nginx_is_single443_reinstall; then
+    # Case D: leftover distro nginx.service from a previous package autostart
+    # must not keep TCP/80. Do not confuse this unit with frp-frontend.service.
+    if frp_distro_nginx_is_active || frp_distro_nginx_is_enabled; then
+      frp_nginx_stop_disable_distro
+      FRP_NGINX_DISTRO_DISABLED_BY_PROJECT=1
+    fi
+  fi
+  # Case B: package already installed and nginx.service was inactive/disabled.
+  # Leave it that way. Do not enable or start distro nginx.service.
+  frp_nginx_write_ownership
+}
+
 frp_tcp_port_is_listening() {
   local port="$1" raw=""
   [[ "$port" =~ ^[1-9][0-9]*$ ]] || return 1
@@ -1267,10 +1422,15 @@ frp_server_main() {
   resolve_server_settings
 
   if frp_mode_is_single443; then
+    if ! frp_nginx_preflight; then
+      frp_emit_failure_class INSTALL_PRECHECK_FAILED
+      return 1
+    fi
     if ! frp_ensure_nginx; then
       frp_emit_failure_class DEPENDENCY_INSTALL_FAILED
       return 1
     fi
+    frp_nginx_reconcile_distro_unit
     if ! frp_frontend_port_preflight; then
       frp_emit_failure_class INSTALL_PRECHECK_FAILED
       return 1

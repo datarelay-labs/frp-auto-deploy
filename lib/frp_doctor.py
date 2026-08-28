@@ -13,6 +13,7 @@ if sys.version_info < (3, 7):
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -751,6 +752,139 @@ def https_healthz(url, ca_path, timeout=NETWORK_TIMEOUT):
         return {'ok': False, 'error_class': 'unreachable', 'detail': str(exc), 'url': health}
 
 
+class LoopbackHTTPSConnection(http.client.HTTPSConnection):
+    """Connect to 127.0.0.1 while verifying TLS as the public host identity."""
+
+    def connect(self):
+        sock = socket.create_connection(('127.0.0.1', self.port), self.timeout)
+        context = getattr(self, '_context', None)
+        if context is None:
+            context = ssl.create_default_context()
+        self.sock = context.wrap_socket(sock, server_hostname=self.host)
+
+
+def https_loopback_get(public_host, port, path, ca_path, timeout=NETWORK_TIMEOUT):
+    host = str(public_host or '').strip()
+    if host.startswith('[') and host.endswith(']'):
+        host = host[1:-1]
+    if not host:
+        return {'ok': False, 'error_class': 'NO_HOST', 'detail': 'public host is missing'}
+    path = str(path or '/')
+    if not path.startswith('/'):
+        path = '/' + path
+    url = 'https://%s:%s%s' % (host, port, path)
+    try:
+        ctx = ssl.create_default_context(cafile=str(ca_path) if ca_path else None)
+        if hasattr(ssl, 'TLSVersion'):
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        conn = LoopbackHTTPSConnection(host, int(port), timeout=timeout, context=ctx)
+        try:
+            conn.request('GET', path)
+            resp = conn.getresponse()
+            body = resp.read(65536)
+            ctype = resp.getheader('Content-Type') or ''
+            status = int(resp.status)
+            result = {
+                'ok': status == 200,
+                'status_code': status,
+                'body': body,
+                'content_type': ctype,
+                'error_class': None if status == 200 else 'HTTP_%s' % status,
+                'detail': 'HTTP %s' % status,
+                'url': url,
+            }
+            return result
+        finally:
+            conn.close()
+    except ssl.CertificateError as exc:
+        return {'ok': False, 'error_class': classify_ssl_error(exc), 'detail': str(exc), 'url': url}
+    except ssl.SSLError as exc:
+        return {'ok': False, 'error_class': classify_ssl_error(exc), 'detail': str(exc), 'url': url}
+    except socket.timeout:
+        return {'ok': False, 'error_class': 'timeout', 'detail': 'timeout', 'url': url}
+    except socket.gaierror:
+        return {'ok': False, 'error_class': 'dns', 'detail': 'DNS failure', 'url': url}
+    except http.client.HTTPException as exc:
+        return {'ok': False, 'error_class': 'HTTP_ERROR', 'detail': str(exc), 'url': url}
+    except ConnectionResetError as exc:
+        return {'ok': False, 'error_class': 'TLS_RESET', 'detail': str(exc), 'url': url}
+    except OSError as exc:
+        text = str(exc).lower()
+        if 'timed out' in text:
+            cls = 'timeout'
+        elif 'refused' in text:
+            cls = 'connection_refused'
+        elif 'reset' in text:
+            cls = 'TLS_RESET'
+        else:
+            cls = 'unreachable'
+        return {'ok': False, 'error_class': cls, 'detail': str(exc), 'url': url}
+
+
+def fingerprint_pem_bytes(pem):
+    openssl = openssl_bin()
+    if not openssl:
+        return None, 'openssl is not installed'
+    data = pem if isinstance(pem, (bytes, bytearray)) else str(pem).encode('utf-8')
+    fd, tmp = tempfile.mkstemp(prefix='frp-doc-ca.', suffix='.crt')
+    try:
+        with os.fdopen(fd, 'wb') as handle:
+            handle.write(data if data.endswith(b'\n') else data + b'\n')
+        proc = run_cmd([openssl, 'x509', '-in', tmp, '-outform', 'DER'], timeout=10)
+        if proc is None or proc.returncode != 0:
+            return None, 'not a valid X.509 certificate'
+        der = proc.stdout or b''
+        if not der:
+            return None, 'not a valid X.509 certificate'
+        return hashlib.sha256(der).hexdigest(), None
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def fingerprint_cert_file(path):
+    try:
+        pem = Path(path).read_bytes()
+    except OSError as exc:
+        return None, str(exc)
+    return fingerprint_pem_bytes(pem)
+
+
+def classify_frontend_ca_body(body, content_type, expected_fingerprint):
+    if body is None:
+        body = b''
+    if isinstance(body, str):
+        body = body.encode('utf-8', 'replace')
+    if not body.strip():
+        return {'ok': False, 'error_class': 'EMPTY', 'detail': 'empty body'}
+    low = body.lower()
+    if b'<html' in low or b'bad gateway' in low:
+        return {
+            'ok': False,
+            'error_class': 'NOT_A_CA',
+            'detail': 'HTML error body is not a CA certificate',
+        }
+    if b'-----BEGIN CERTIFICATE-----' not in body or b'-----END CERTIFICATE-----' not in body:
+        return {'ok': False, 'error_class': 'NOT_A_CA', 'detail': 'body is not a PEM certificate'}
+    fp, err = fingerprint_pem_bytes(body)
+    if not fp:
+        return {'ok': False, 'error_class': 'NOT_A_CA', 'detail': err or 'body is not a valid X.509 certificate'}
+    wanted = str(expected_fingerprint or '').replace(':', '').strip().lower()
+    if wanted and fp != wanted:
+        return {'ok': False, 'error_class': 'FINGERPRINT_MISMATCH', 'detail': 'CA fingerprint mismatch'}
+    ctype = str(content_type or '').lower()
+    if 'application/x-pem-file' not in ctype:
+        return {
+            'ok': False,
+            'error_class': 'CONTENT_TYPE',
+            'detail': 'Content-Type %s is not application/x-pem-file' % (content_type or 'missing'),
+            'fingerprint': fp,
+        }
+    return {'ok': True, 'fingerprint': fp, 'content_type': content_type, 'error_class': None}
+
+
 def parse_frpc_proxies(text):
     proxies = []
     current = {}
@@ -1475,8 +1609,15 @@ def check_server(report, paths, facts, skip_network):
                     missing.append('WSS path /~!frp')
                 if 'proxy_ssl_verify on' not in text:
                     missing.append('proxy_ssl_verify')
+                if 'proxy_ssl_name localhost;' not in text:
+                    missing.append('proxy_ssl_name localhost')
+                if 'proxy_ssl_server_name on' not in text:
+                    missing.append('proxy_ssl_server_name')
                 if 'listen' not in text or 'ssl' not in text:
                     missing.append('TLS listen')
+                public_host = str(ports.get('public_host') or '').strip()
+                if public_host and public_host != 'localhost' and ('proxy_ssl_name %s;' % public_host) in text:
+                    missing.append('proxy_ssl_name must be localhost, not the public identity')
                 if missing:
                     report.add(
                         'frontend_config', FAIL,
@@ -1521,6 +1662,84 @@ def check_server(report, paths, facts, skip_network):
             )
             status = FAIL
         report.add('allocator_health', status, 'allocator HTTPS health check failed (%s)' % cls, net.get('detail') or '', rec, 'network')
+
+    if cfg and server_config_ports(cfg).get('deployment_mode') == 'single443':
+        ports = server_config_ports(cfg)
+        frontend_port = ports.get('frp_public') or 443
+        public_host = str(ports.get('public_host') or '').strip()
+        ca_path = paths.p(ca_crt)
+        fe_net = (facts.get('network') or {}).get('frontend_healthz')
+        fe_ca = (facts.get('network') or {}).get('frontend_ca')
+        if fe_net is None and not skip_network and public_host and ca_path.is_file():
+            fe_net = https_loopback_get(public_host, frontend_port, '/healthz', ca_path)
+        if fe_ca is None and not skip_network and public_host and ca_path.is_file():
+            fe_ca = https_loopback_get(public_host, frontend_port, '/ca.crt', ca_path)
+        alloc_ok = bool(net and net.get('ok'))
+        if fe_net is None:
+            report.add('frontend_proxy_health', NOT_TESTED, 'frontend proxied /healthz was not tested', '', '', 'network')
+        elif fe_net.get('ok'):
+            report.add(
+                'frontend_proxy_health', PASS,
+                'frontend GET /healthz succeeded through verified HTTPS proxy',
+                fe_net.get('detail') or '', '', 'network',
+            )
+        else:
+            cls = fe_net.get('error_class') or 'unreachable'
+            rec = 'inspect frp-frontend.service and frontend.conf; doctor does not restart it'
+            if alloc_ok:
+                rec = (
+                    'allocator backend /healthz succeeded but the public frontend proxy failed. '
+                    'Clients cannot use TCP/443. Re-run the server installer; do not disable proxy_ssl_verify.'
+                )
+            report.add(
+                'frontend_proxy_health', FAIL,
+                'frontend proxied /healthz failed (%s)' % cls,
+                fe_net.get('detail') or '', rec, 'network',
+            )
+        expected_fp = ''
+        if ca_path.is_file():
+            expected_fp, _fp_err = fingerprint_cert_file(ca_path)
+            expected_fp = expected_fp or ''
+        if fe_ca is None:
+            report.add('frontend_ca_endpoint', NOT_TESTED, 'frontend GET /ca.crt was not tested', '', '', 'network')
+        else:
+            rec = 'inspect frp-frontend.service; a 502 HTML body is not a CA'
+            if alloc_ok:
+                rec = (
+                    'allocator backend is healthy but frontend GET /ca.crt failed. '
+                    'A 502 HTML body must not be treated as the project CA. Re-run the server installer.'
+                )
+            body = fe_ca.get('body')
+            if body is not None and body != '':
+                verdict = classify_frontend_ca_body(
+                    body,
+                    fe_ca.get('content_type') or '',
+                    expected_fp or fe_ca.get('expected_fingerprint') or '',
+                )
+                if verdict.get('ok'):
+                    report.add(
+                        'frontend_ca_endpoint', PASS,
+                        'frontend GET /ca.crt returned the pinned project CA',
+                        verdict.get('detail') or fe_ca.get('detail') or '', '', 'network',
+                    )
+                else:
+                    report.add(
+                        'frontend_ca_endpoint', FAIL,
+                        'frontend GET /ca.crt failed (%s)' % (verdict.get('error_class') or 'NOT_A_CA'),
+                        verdict.get('detail') or '', rec, 'network',
+                    )
+            elif fe_ca.get('ok'):
+                report.add(
+                    'frontend_ca_endpoint', PASS,
+                    'frontend GET /ca.crt returned the pinned project CA',
+                    fe_ca.get('detail') or '', '', 'network',
+                )
+            else:
+                report.add(
+                    'frontend_ca_endpoint', FAIL,
+                    'frontend GET /ca.crt failed (%s)' % (fe_ca.get('error_class') or 'unreachable'),
+                    fe_ca.get('detail') or '', rec, 'network',
+                )
 
     bootstrap_abs = '/var/lib/frp-auto-deploy/bootstrap'
     if cfg:

@@ -231,6 +231,7 @@ assert cfg.get('listen_host')=='0.0.0.0'
 PY
 [[ ! -f "$SRV/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "stale txn marker after success"
 pass "SERVER_FRESH_INSTALL"
+pass "DIRECT_MODE_REGRESSION"
 pass "TEMP_FILE_SECURITY"
 pass "UPDATE_TRANSACTION_CLEANUP"
 pass "FILE_PERMISSION_REGRESSION"
@@ -333,11 +334,77 @@ grep -q 'healthz|enroll|bootstrap/redeem' "$S443/etc/frp-auto-deploy/frontend.co
   || fail "s443 allocator path allowlist"
 grep -q 'return 404;' "$S443/etc/frp-auto-deploy/frontend.conf" || fail "s443 default 404"
 grep -q 'proxy_ssl_verify on' "$S443/etc/frp-auto-deploy/frontend.conf" || fail "s443 proxy_ssl_verify"
+grep -q 'proxy_ssl_name localhost;' "$S443/etc/frp-auto-deploy/frontend.conf" || fail "s443 proxy_ssl_name localhost"
+if grep -q 'proxy_ssl_name 203.0.113.10;' "$S443/etc/frp-auto-deploy/frontend.conf"; then
+  fail "s443 proxy_ssl_name used public IP"
+fi
+if grep -q 'proxy_ssl_verify off' "$S443/etc/frp-auto-deploy/frontend.conf"; then
+  fail "s443 proxy_ssl_verify off"
+fi
+grep -q 'stop nginx.service' "$S443/var/lib/frp-auto-deploy/install-actions.log" \
+  || fail "s443 did not stop distro nginx.service after fresh package install"
+grep -q 'disable nginx.service' "$S443/var/lib/frp-auto-deploy/install-actions.log" \
+  || fail "s443 did not disable distro nginx.service after fresh package install"
+[[ -f "$S443/var/lib/frp-auto-deploy/nginx-ownership" ]] || fail "s443 nginx ownership marker"
+grep -q 'NGINX_PACKAGE_INSTALLED_BY_PROJECT=1' "$S443/var/lib/frp-auto-deploy/nginx-ownership" \
+  || fail "s443 ownership installed-by-project"
 assert_mode "$S443/etc/frp-auto-deploy/pki/ca.key" "0o600"
 assert_mode "$S443/etc/frp-auto-deploy/pki/server.key" "0o600"
 pass "SERVER_SINGLE443_INSTALL"
 pass "SINGLE443_CA_PIN"
 pass "SINGLE443_FRONTEND_CONFIG"
+pass "NGINX_PACKAGE_FRESH_INSTALL_SERVICE_CLEANUP"
+pass "SINGLE443_REGRESSION"
+
+# Case B: nginx package already present, distro unit inactive/disabled.
+NGX_B="$WORKDIR/server-nginx-preexisting-disabled"
+mkdir -p "$NGX_B"
+export FRP_SERVER_TEST_ROOT="$NGX_B"
+export FRP_DEPLOYMENT_MODE=single443
+export FRP_INSTALL_HOOK_NGINX_PACKAGE_INSTALLED=1
+export FRP_INSTALL_HOOK_NGINX_SERVICE_ACTIVE=0
+export FRP_INSTALL_HOOK_NGINX_SERVICE_ENABLED=0
+unset FRP_CONTROL_PUBLIC_PORT FRP_CONTROL_LISTEN_PORT \
+  FRP_ALLOCATOR_PUBLIC_PORT FRP_ALLOCATOR_LISTEN_PORT FRP_CONTROL_PORT FRP_ALLOCATOR_PORT \
+  FRP_ALLOCATOR_URL FRP_ALLOCATOR_PUBLIC_URL FRP_LISTEN_HOST FRP_CONTROL_BIND_ADDR \
+  FRP_TRANSPORT FRP_MODE_SWITCH EXISTING_DEPLOYMENT_MODE EXISTING_ALLOCATOR_URL \
+  FRP_SERVER_CONFIG FRP_PKI_DIR FRP_CONFIRM_MODE_SWITCH || true
+if ! frp_server_main >"$WORKDIR/nginx-b.out" 2>"$WORKDIR/nginx-b.err"; then
+  cat "$WORKDIR/nginx-b.out" "$WORKDIR/nginx-b.err" >&2
+  fail "single443 with preexisting disabled nginx"
+fi
+if grep -q 'stop nginx.service' "$NGX_B/var/lib/frp-auto-deploy/install-actions.log"; then
+  fail "preexisting disabled nginx.service was stopped"
+fi
+grep -q 'NGINX_PACKAGE_PREEXISTING=1' "$NGX_B/var/lib/frp-auto-deploy/nginx-ownership" \
+  || fail "preexisting disabled ownership"
+grep -q 'NGINX_PACKAGE_INSTALLED_BY_PROJECT=0' "$NGX_B/var/lib/frp-auto-deploy/nginx-ownership" \
+  || fail "preexisting disabled marked as project-installed"
+pass "NGINX_PREEXISTING_DISABLED_PRESERVED"
+unset FRP_INSTALL_HOOK_NGINX_PACKAGE_INSTALLED FRP_INSTALL_HOOK_NGINX_SERVICE_ACTIVE \
+  FRP_INSTALL_HOOK_NGINX_SERVICE_ENABLED || true
+
+# Case D: reinstall existing single443 is idempotent and is not distro nginx.service.
+export FRP_SERVER_TEST_ROOT="$S443"
+export FRP_DEPLOYMENT_MODE=single443
+export FRP_INSTALL_HOOK_NGINX_PACKAGE_INSTALLED=1
+export FRP_INSTALL_HOOK_NGINX_SERVICE_ACTIVE=0
+export FRP_INSTALL_HOOK_NGINX_SERVICE_ENABLED=0
+unset FRP_CONTROL_PUBLIC_PORT FRP_CONTROL_LISTEN_PORT \
+  FRP_ALLOCATOR_PUBLIC_PORT FRP_ALLOCATOR_LISTEN_PORT FRP_CONTROL_PORT FRP_ALLOCATOR_PORT \
+  FRP_ALLOCATOR_URL FRP_ALLOCATOR_PUBLIC_URL FRP_LISTEN_HOST FRP_CONTROL_BIND_ADDR \
+  FRP_TRANSPORT FRP_MODE_SWITCH EXISTING_DEPLOYMENT_MODE EXISTING_ALLOCATOR_URL \
+  FRP_SERVER_CONFIG FRP_PKI_DIR FRP_CONFIRM_MODE_SWITCH || true
+if ! frp_server_main >"$WORKDIR/s443-re.out" 2>"$WORKDIR/s443-re.err"; then
+  cat "$WORKDIR/s443-re.out" "$WORKDIR/s443-re.err" >&2
+  fail "single443 reinstall"
+fi
+grep -q 'proxy_ssl_name localhost;' "$S443/etc/frp-auto-deploy/frontend.conf" \
+  || fail "reinstall lost localhost backend identity"
+[[ -f "$S443/etc/systemd/system/frp-frontend.service" ]] || fail "reinstall dropped frontend unit"
+pass "NGINX_SINGLE443_REINSTALL_IDEMPOTENT"
+unset FRP_INSTALL_HOOK_NGINX_PACKAGE_INSTALLED FRP_INSTALL_HOOK_NGINX_SERVICE_ACTIVE \
+  FRP_INSTALL_HOOK_NGINX_SERVICE_ENABLED || true
 
 # Direct -> single443 preserves CA/token/registry and requires confirmation.
 SWITCH="$WORKDIR/server-switch"
@@ -472,6 +539,39 @@ grep -q 'bindPort = 443' "$BUSY/etc/frp/frps.toml" || fail "occupied 443 rewrote
 [[ "$(frp_file_sha256 "$BUSY/etc/frp/server_token")" == "$TOKEN_SHA" ]] || fail "occupied 443 rotated token"
 pass "SINGLE443_PORT_BUSY_PRECHECK"
 
+# Case C: pre-existing active/enabled nginx.service must fail before cutover.
+NGX_C="$WORKDIR/server-nginx-preexisting-active"
+cp -a "$SRV" "$NGX_C"
+export FRP_SERVER_TEST_ROOT="$NGX_C"
+export FRP_DEPLOYMENT_MODE=single443
+export FRP_CONFIRM_MODE_SWITCH=yes
+export FRP_INSTALL_HOOK_NGINX_PACKAGE_INSTALLED=1
+export FRP_INSTALL_HOOK_NGINX_SERVICE_ACTIVE=1
+export FRP_INSTALL_HOOK_NGINX_SERVICE_ENABLED=1
+unset FRP_CONTROL_PUBLIC_PORT FRP_CONTROL_LISTEN_PORT \
+  FRP_ALLOCATOR_PUBLIC_PORT FRP_ALLOCATOR_LISTEN_PORT FRP_CONTROL_PORT FRP_ALLOCATOR_PORT \
+  FRP_ALLOCATOR_URL FRP_ALLOCATOR_PUBLIC_URL FRP_LISTEN_HOST FRP_CONTROL_BIND_ADDR \
+  FRP_TRANSPORT FRP_MODE_SWITCH EXISTING_DEPLOYMENT_MODE EXISTING_ALLOCATOR_URL \
+  FRP_SERVER_CONFIG FRP_PKI_DIR || true
+if frp_server_main >"$WORKDIR/nginx-c.out" 2>"$WORKDIR/nginx-c.err"; then
+  fail "preexisting active nginx.service should fail before cutover"
+fi
+unset FRP_INSTALL_HOOK_NGINX_PACKAGE_INSTALLED FRP_INSTALL_HOOK_NGINX_SERVICE_ACTIVE \
+  FRP_INSTALL_HOOK_NGINX_SERVICE_ENABLED || true
+grep -q 'FAILURE_CLASS=INSTALL_PRECHECK_FAILED' "$WORKDIR/nginx-c.out" "$WORKDIR/nginx-c.err" \
+  || fail "preexisting nginx failure class"
+grep -q 'pre-existing nginx.service is active/enabled' "$WORKDIR/nginx-c.err" \
+  || fail "preexisting nginx conflict message"
+grep -q 'Enterprise single-443 uses a project-owned nginx instance' "$WORKDIR/nginx-c.err" \
+  || fail "preexisting nginx project-owned message"
+grep -q 'stop/reconfigure the existing nginx service before switching modes' "$WORKDIR/nginx-c.err" \
+  || fail "preexisting nginx operator guidance"
+grep -q 'existing Direct deployment was not modified' "$WORKDIR/nginx-c.err" \
+  || fail "preexisting nginx preserve message"
+grep -q 'bindPort = 443' "$NGX_C/etc/frp/frps.toml" || fail "preexisting nginx rewrote Direct toml"
+[[ ! -f "$NGX_C/etc/frp-auto-deploy/frontend.conf" ]] || fail "preexisting nginx wrote frontend.conf"
+pass "NGINX_PREEXISTING_ACTIVE_SERVICE_GUARD"
+
 # Failed cutover (frontend start) must restore previous frps.toml.
 RB="$WORKDIR/server-s443-rollback"
 cp -a "$SRV" "$RB"
@@ -493,6 +593,7 @@ grep -q 'FAILURE_CLASS=SERVICE_START_FAILED' "$WORKDIR/s443-rb.out" "$WORKDIR/s4
 grep -q 'bindPort = 443' "$RB/etc/frp/frps.toml" || fail "rollback did not restore Direct toml"
 [[ "$(frp_file_sha256 "$RB/etc/frp/server_token")" == "$TOKEN_SHA" ]] || fail "rollback rotated token"
 pass "SINGLE443_ROLLBACK_TEST"
+pass "MODE_SWITCH_ROLLBACK_REGRESSION"
 
 # Single-443 uninstall removes the project unit/config and does not purge nginx.
 export FRP_UNINSTALL_TEST_ROOT="$SWITCH"
@@ -510,7 +611,14 @@ fi
 if grep -nE 'apt-get remove|dnf remove|yum remove|nginx package' "$WORKDIR/s443-un.out" "$WORKDIR/s443-un.err"; then
   fail "uninstall output purges nginx"
 fi
+if grep -nE 'systemctl[[:space:]]+(enable|start|unmask)[[:space:]].*nginx' "$ROOT/uninstall-server.sh"; then
+  fail "uninstall enables or starts distro nginx.service"
+fi
+if grep -nE 'systemctl[[:space:]]+(enable|start|unmask)[[:space:]].*nginx' "$WORKDIR/s443-un.out" "$WORKDIR/s443-un.err"; then
+  fail "uninstall output starts distro nginx"
+fi
 pass "SINGLE443_UNINSTALL"
+pass "NGINX_UNINSTALL_NO_AUTO_START"
 
 unset FRP_UNINSTALL_TEST_ROOT
 unset FRP_DEPLOYMENT_MODE FRP_CONFIRM_MODE_SWITCH
