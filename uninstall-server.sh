@@ -177,6 +177,7 @@ ${p}"
 
   try_rm_file "$(frp_u_path /var/lib/frp-auto-deploy/update-pending.json)"
   try_rm_rf "$(frp_u_path /var/lib/frp-auto-deploy/enrollments)"
+  try_rm_rf "$(frp_u_path /var/lib/frp-auto-deploy/bootstrap)"
   try_rm_rf "$(frp_u_path /var/lib/frp-auto-deploy/backups)"
   try_rm_file "$(frp_u_path /var/lib/frp-auto-deploy/registry.json)"
   try_rm_file "$(frp_u_path /var/lib/frp-auto-deploy/mgmt-nonces.json)"

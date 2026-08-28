@@ -15,6 +15,7 @@
   "tls_server_key": "/etc/frp-auto-deploy/pki/server.key",
   "registry_file": "/var/lib/frp-auto-deploy/registry.json",
   "enrollments_dir": "/var/lib/frp-auto-deploy/enrollments",
+  "bootstrap_dir": "/var/lib/frp-auto-deploy/bootstrap",
   "token_file": "/etc/frp/server_token",
   "client_installer_url": ""
 }

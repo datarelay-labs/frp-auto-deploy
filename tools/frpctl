@@ -782,6 +782,9 @@ frpctl_complete_arg_stage() {
         printf '%s' "none"
       fi
       ;;
+    enroll|create-client)
+      printf '%s' "create-client-flag"
+      ;;
     client|client-info|revoke|revoke-client|release-client)
       if [[ "$argn" == "1" ]]; then
         printf '%s' "client"
@@ -871,6 +874,10 @@ frpctl_completion_candidates() {
       ;;
     doctor-flag)
       printf '%s\n' --json --verbose --quiet | frpctl_filter_prefix "${_FRP_CTL_COMP_PREFIX}"
+      ;;
+    create-client-flag)
+      printf '%s\n' --one-line --ssh --ssh-user --ssh-port --ttl --note --services-file \
+        | frpctl_filter_prefix "${_FRP_CTL_COMP_PREFIX}"
       ;;
     client)
       if ! frpctl_is_server; then

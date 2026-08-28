@@ -140,6 +140,45 @@ collect_services() {
 
 print_complete() {
   local server="$1" services_json_file="$2"
+  if frp_zero_touch_active || [[ "${FRP_ZERO_TOUCH_COMPLETE:-}" == "1" ]]; then
+    python3 - "$server" "$services_json_file" <<'PY'
+import json, sys
+from pathlib import Path
+server = sys.argv[1]
+services = json.loads(Path(sys.argv[2]).read_text(encoding='utf-8'))
+print()
+print('FRP client setup complete.')
+print()
+print('The requested remote service is connected.')
+print('You can close this terminal.')
+print()
+for item in services:
+    if item.get('enabled', True) is False:
+        continue
+    preset = item.get('preset') or 'custom'
+    remote_port = item.get('remote_port')
+    if preset == 'ssh':
+        user = item.get('ssh_user') or 'root'
+        print('SSH tunnel ready')
+        print()
+        print('Connect:')
+        print('  ssh -p %s %s@%s' % (remote_port, user, server))
+        print()
+    elif preset == 'http':
+        print('Connect:')
+        print('  http://%s:%s' % (server, remote_port))
+        print()
+    elif preset == 'https':
+        print('Connect:')
+        print('  https://%s:%s' % (server, remote_port))
+        print()
+    else:
+        print('Connect:')
+        print('  %s:%s' % (server, remote_port))
+        print()
+PY
+    return 0
+  fi
   python3 - "$server" "$services_json_file" <<'PY'
 import json,sys
 from pathlib import Path
@@ -208,6 +247,11 @@ PY
 }
 
 frp_client_existing_install_message() {
+  if frp_zero_touch_active; then
+    echo "This client is already installed." >&2
+    echo "Use sudo frpctl update or sudo frp-client manage." >&2
+    return 0
+  fi
   echo "ERROR: this host already has an FRP client installed." >&2
   echo >&2
   echo "A software update must not re-enroll the client and does not" >&2
@@ -252,7 +296,10 @@ frp_client_main() {
   fi
 
   frp_require_allocator_url
-  frp_bootstrap_allocator_ca "$ALLOCATOR_URL" || exit 1
+  if frp_zero_touch_active; then
+    frp_zero_touch_require_inputs || return 1
+  fi
+  frp_bootstrap_allocator_ca "$ALLOCATOR_URL" || return 1
   frp_detect_architecture || exit 1
 
   if [[ -z "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
@@ -275,25 +322,28 @@ frp_client_main() {
     frp_require_python || exit 1
   fi
 
-  frp_ux_intro
-  frp_ux_enrollment_help
-  prompt_secret "Enrollment Code: " FRP_ENROLLMENT_CODE
-
-  if [[ "$FRP_ENROLLMENT_CODE" != *.* ]]; then
-    echo "ERROR: invalid enrollment code format" >&2
-    exit 1
-  fi
-  ENROLL_ID="${FRP_ENROLLMENT_CODE%%.*}"
-  ENROLL_SECRET="${FRP_ENROLLMENT_CODE#*.}"
-
   SERVICES_FILE="$(mktemp)"
   ALLOCATED_FILE="$(mktemp)"
   ENROLL_META_FILE="$(mktemp)"
   TMPDIR="$(frp_secure_mktemp_dir)"
   chmod 600 "$SERVICES_FILE" "$ALLOCATED_FILE" "$ENROLL_META_FILE"
-  trap 'rm -rf "$TMPDIR" "$SERVICES_FILE" "$ALLOCATED_FILE" "$ENROLL_META_FILE"; unset FRP_TOKEN ENROLL_SECRET FRP_ENROLLMENT_CODE TOKEN_CIPHERTEXT' EXIT
+  trap 'rm -rf "$TMPDIR" "$SERVICES_FILE" "$ALLOCATED_FILE" "$ENROLL_META_FILE"; unset FRP_TOKEN ENROLL_SECRET FRP_ENROLLMENT_CODE TOKEN_CIPHERTEXT FRP_BOOTSTRAP_TICKET' EXIT
 
-  collect_services
+  if frp_zero_touch_active; then
+    :
+  else
+    frp_ux_intro
+    frp_ux_enrollment_help
+    prompt_secret "Enrollment Code: " FRP_ENROLLMENT_CODE
+
+    if [[ "$FRP_ENROLLMENT_CODE" != *.* ]]; then
+      echo "ERROR: invalid enrollment code format" >&2
+      exit 1
+    fi
+    ENROLL_ID="${FRP_ENROLLMENT_CODE%%.*}"
+    ENROLL_SECRET="${FRP_ENROLLMENT_CODE#*.}"
+    collect_services
+  fi
 
   local etc_frp
   etc_frp="$(frp_client_path /etc/frp)"
@@ -312,8 +362,35 @@ frp_client_main() {
 
   HOSTNAME_VALUE="$(frp_short_hostname)"
 
+  if frp_zero_touch_active; then
+    local ssh_user ssh_port
+    ssh_user="${FRP_SSH_USER:-}"
+    ssh_port="${FRP_SSH_PORT:-22}"
+    if [[ -n "$ssh_user" ]]; then
+      frp_zero_touch_ssh_preflight "$ssh_user" "$ssh_port" || return 1
+    fi
+  fi
+
   if ! frp_identity_ensure; then
     exit 1
+  fi
+
+  if frp_zero_touch_active; then
+    echo "Completing one-time setup ..."
+    if ! frp_redeem_bootstrap_ticket "$ALLOCATOR_URL" "$MACHINE_ID" "$HOSTNAME_VALUE" \
+      "$SERVICES_FILE" ENROLL_ID ENROLL_SECRET; then
+      return 1
+    fi
+    FRP_ZERO_TOUCH_COMPLETE=1
+    FRP_SERVICES_JSON="$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1],encoding="utf-8"))))' "$SERVICES_FILE")"
+    export FRP_SERVICES_JSON
+    services_load_from_env
+    unset FRP_SERVICES_JSON
+    if [[ "$(services_count)" == "0" ]]; then
+      echo "ERROR: bootstrap returned no services" >&2
+      frp_emit_failure_class ZERO_TOUCH_INPUT_INVALID
+      return 1
+    fi
   fi
 
   echo "Validating enrollment and requesting persistent public ports ..."
@@ -473,4 +550,5 @@ if [[ "${FRP_CLIENT_SOURCED:-}" != "1" ]]; then
     exit $?
   fi
   frp_client_main
+  exit $?
 fi

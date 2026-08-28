@@ -76,6 +76,9 @@ fp = str(client.get('mgmt_fingerprint') or '')
 if fp:
     print(f'Fingerprint : sha256:{fp[:16]}')
 print(f'Services    : {len(enabled)}')
+note = str(client.get('note') or '').strip()
+if note:
+    print(f'Note        : {note}')
 
 for sid, svc in enabled:
     protocol = str(svc.get('protocol') or 'tcp').upper()

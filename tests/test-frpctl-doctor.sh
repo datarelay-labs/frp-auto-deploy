@@ -35,7 +35,7 @@ write_version() {
   local tree="$1"
   mkdir -p "$tree/etc/frp-auto-deploy"
   cat >"$tree/etc/frp-auto-deploy/version" <<'EOF'
-PROJECT_VERSION=1.9.0
+PROJECT_VERSION=1.9.1
 FRP_VERSION=0.70.1
 EOF
 }

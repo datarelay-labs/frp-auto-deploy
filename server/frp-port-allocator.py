@@ -12,6 +12,7 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import socket
 import ssl
 import subprocess
@@ -35,6 +36,14 @@ MAX_HOST_LEN = 253
 ALLOWED_PRESETS = ('ssh', 'http', 'https', 'custom')
 ALLOWED_PROTOCOLS = ('tcp',)
 NONCE_RE = re.compile(r'^[0-9a-f]{64}$')
+BOOTSTRAP_TICKET_PREFIX = 'bt1'
+BOOTSTRAP_ID_HEX_LEN = 16
+BOOTSTRAP_SECRET_HEX_LEN = 64
+BOOTSTRAP_TICKET_MAX_LEN = 160
+BOOTSTRAP_DUMMY_HASH = '0' * 64
+HEX_RE = re.compile(r'^[0-9a-f]+$')
+MACHINE_ID_MAX_LEN = 128
+HOSTNAME_MAX_LEN = 253
 
 
 def _load_mgmt_auth():
@@ -182,6 +191,163 @@ def canonical_json(data):
 
 def hmac_hex(secret, message):
     return hmac.new(secret.encode(), message.encode(), hashlib.sha256).hexdigest()
+
+
+def unlink_quiet(path):
+    try:
+        Path(path).unlink()
+    except OSError:
+        pass
+
+
+def hash_bootstrap_secret(secret):
+    return hashlib.sha256(secret.encode('ascii')).hexdigest()
+
+
+def parse_bootstrap_ticket(raw):
+    """Return (ticket_id, secret) or None. Never raises on malformed input."""
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        return None
+    ticket = raw.strip()
+    if not ticket or len(ticket) > BOOTSTRAP_TICKET_MAX_LEN:
+        return None
+    parts = ticket.split('.')
+    if len(parts) != 3:
+        return None
+    prefix, ticket_id, secret = parts
+    if prefix != BOOTSTRAP_TICKET_PREFIX:
+        return None
+    if len(ticket_id) != BOOTSTRAP_ID_HEX_LEN or len(secret) != BOOTSTRAP_SECRET_HEX_LEN:
+        return None
+    if not HEX_RE.fullmatch(ticket_id) or not HEX_RE.fullmatch(secret):
+        return None
+    return ticket_id.lower(), secret.lower()
+
+
+def bootstrap_dir_from_cfg(cfg):
+    configured = str((cfg or {}).get('bootstrap_dir') or '').strip()
+    if configured:
+        return Path(configured)
+    enrollments = str((cfg or {}).get('enrollments_dir') or '').strip()
+    if enrollments:
+        return Path(enrollments).resolve().parent / 'bootstrap'
+    return Path('/var/lib/frp-auto-deploy/bootstrap')
+
+
+def ensure_secret_dir(path, mode=0o700):
+    p = Path(path)
+    p.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(str(p), mode)
+    except OSError:
+        pass
+    return p
+
+
+def enrollment_file_path(enrollments_dir, enrollment_id):
+    if not enrollment_id or any(c not in '0123456789abcdef' for c in enrollment_id.lower()):
+        return None
+    return Path(enrollments_dir) / (enrollment_id.lower() + '.json')
+
+
+def bootstrap_file_path(bootstrap_dir, ticket_id):
+    if not ticket_id or not HEX_RE.fullmatch(str(ticket_id).lower()):
+        return None
+    if len(ticket_id) != BOOTSTRAP_ID_HEX_LEN:
+        return None
+    return Path(bootstrap_dir) / (ticket_id.lower() + '.json')
+
+
+def cleanup_expired_bootstrap_tickets(bootstrap_dir, now=None, keep_id=None):
+    now = int(now if now is not None else time.time())
+    keep_id = (keep_id or '').lower()
+    try:
+        entries = list(Path(bootstrap_dir).glob('*.json'))
+    except OSError:
+        return
+    for path in entries:
+        if keep_id and path.stem.lower() == keep_id:
+            continue
+        try:
+            record = load_json(path)
+            if int(record.get('expires_at', 0)) < now:
+                unlink_quiet(path)
+        except Exception:
+            continue
+
+
+def issue_bootstrap_ticket(enrollments_dir, bootstrap_dir, services, ttl, note=''):
+    """Create a hashed bootstrap ticket plus a normal enrollment record.
+
+    Does not allocate a public port. Caller must have already validated
+    `services` with normalize_services().
+    """
+    ttl = int(ttl)
+    note = str(note or '')
+    enrollment_id = secrets.token_hex(8)
+    enroll_secret = secrets.token_hex(32)
+    ticket_id = secrets.token_hex(8)
+    ticket_secret = secrets.token_hex(32)
+    now = int(time.time())
+    expires_at = now + ttl
+    enroll_record = {
+        'id': enrollment_id,
+        'secret': enroll_secret,
+        'created_at': utc_now_iso(),
+        'expires_at': expires_at,
+        'expires_at_iso': datetime.fromtimestamp(
+            expires_at, timezone.utc
+        ).replace(microsecond=0).isoformat().replace('+00:00', 'Z'),
+        'bound_machine_id': None,
+        'used_at': None,
+        'note': note,
+    }
+    ticket_record = {
+        'schema': 1,
+        'id': ticket_id,
+        'secret_hash': hash_bootstrap_secret(ticket_secret),
+        'enrollment_id': enrollment_id,
+        'created_at': utc_now_iso(),
+        'expires_at': expires_at,
+        'bound_machine_id': None,
+        'completed_at': None,
+        'note': note,
+        'services': services,
+    }
+    enrollments_dir = Path(enrollments_dir)
+    bootstrap_dir = ensure_secret_dir(bootstrap_dir, 0o700)
+    try:
+        os.chmod(str(enrollments_dir), 0o700)
+    except OSError:
+        enrollments_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(str(enrollments_dir), 0o700)
+        except OSError:
+            pass
+    cleanup_expired_bootstrap_tickets(bootstrap_dir, now)
+    enroll_path = enrollment_file_path(enrollments_dir, enrollment_id)
+    ticket_path = bootstrap_file_path(bootstrap_dir, ticket_id)
+    if enroll_path is None or ticket_path is None:
+        raise RuntimeError('failed to allocate bootstrap ticket paths')
+    try:
+        atomic_write_json(enroll_path, enroll_record, mode=0o600)
+        try:
+            os.chmod(str(enroll_path), 0o600)
+        except OSError:
+            pass
+        atomic_write_json(ticket_path, ticket_record, mode=0o600)
+        try:
+            os.chmod(str(ticket_path), 0o600)
+        except OSError:
+            pass
+    except Exception:
+        unlink_quiet(ticket_path)
+        unlink_quiet(enroll_path)
+        raise
+    ticket = '%s.%s.%s' % (BOOTSTRAP_TICKET_PREFIX, ticket_id, ticket_secret)
+    return ticket, enroll_record, ticket_record
 
 
 def port_is_available(port):
@@ -459,6 +625,12 @@ class Allocator:
         self.registry_file = self.cfg['registry_file']
         self.enrollments_dir = Path(self.cfg['enrollments_dir'])
         self.enrollments_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(str(self.enrollments_dir), 0o700)
+        except OSError:
+            pass
+        self.bootstrap_dir = bootstrap_dir_from_cfg(self.cfg)
+        ensure_secret_dir(self.bootstrap_dir, 0o700)
         self.token_file = self.cfg['token_file']
         self.nonce_file = Path(self.registry_file).resolve().parent / 'mgmt-nonces.json'
 
@@ -522,6 +694,171 @@ class Allocator:
     def save_enrollment(self, path, record):
         atomic_write_json(path, record)
 
+    def bootstrap_path(self, ticket_id):
+        return bootstrap_file_path(self.bootstrap_dir, ticket_id)
+
+    def load_bootstrap(self, ticket_id):
+        path = self.bootstrap_path(ticket_id)
+        if path is None or not path.exists():
+            return None, path
+        try:
+            return load_json(path), path
+        except (OSError, json.JSONDecodeError):
+            return None, path
+
+    def save_bootstrap(self, path, record):
+        atomic_write_json(path, record, mode=0o600)
+
+    def cleanup_expired_bootstrap_tickets(self, now=None, keep_id=None):
+        cleanup_expired_bootstrap_tickets(self.bootstrap_dir, now, keep_id=keep_id)
+
+    def issue_bootstrap_ticket(self, services, ttl, note=''):
+        ensure_secret_dir(self.bootstrap_dir, 0o700)
+        return issue_bootstrap_ticket(
+            self.enrollments_dir, self.bootstrap_dir, services, ttl, note
+        )
+
+    def _invalid_ticket_response(self):
+        return 403, api_error('bootstrap ticket is invalid', 'BOOTSTRAP_TICKET_INVALID')
+
+    def redeem_bootstrap(self, body):
+        """Bind a bootstrap ticket to the first machine and return enrollment data."""
+        try:
+            payload = json.loads(body.decode())
+        except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+            return 400, api_error('invalid JSON', 'ZERO_TOUCH_INPUT_INVALID')
+        if not isinstance(payload, dict):
+            return 400, api_error('invalid JSON', 'ZERO_TOUCH_INPUT_INVALID')
+
+        raw_ticket = payload.get('ticket')
+        if raw_ticket is None:
+            raw_ticket = payload.get('bootstrap_ticket')
+        parsed = parse_bootstrap_ticket(raw_ticket if isinstance(raw_ticket, str) else '')
+        machine_id = str(payload.get('machine_id', '') or '').strip()
+        hostname = str(payload.get('hostname', '') or '').strip()
+        if not machine_id:
+            return 400, api_error('machine_id is required', 'ZERO_TOUCH_INPUT_INVALID')
+        if len(machine_id) > MACHINE_ID_MAX_LEN or any(c in machine_id for c in '\r\n/\\'):
+            return 400, api_error('invalid machine_id', 'ZERO_TOUCH_INPUT_INVALID')
+        if len(hostname) > HOSTNAME_MAX_LEN or any(c in hostname for c in '\r\n/\\'):
+            return 400, api_error('invalid hostname', 'ZERO_TOUCH_INPUT_INVALID')
+
+        provided_hash = BOOTSTRAP_DUMMY_HASH
+        ticket_id = ''
+        ticket_secret = ''
+        if parsed:
+            ticket_id, ticket_secret = parsed
+            provided_hash = hash_bootstrap_secret(ticket_secret)
+
+        try:
+            with LOCK:
+                with self.registry_lock():
+                    self.cleanup_expired_bootstrap_tickets(keep_id=ticket_id)
+                    record = None
+                    path = None
+                    stored_hash = BOOTSTRAP_DUMMY_HASH
+                    if parsed:
+                        record, path = self.load_bootstrap(ticket_id)
+                        if record and isinstance(record, dict):
+                            candidate = str(record.get('secret_hash') or '')
+                            if HEX_RE.fullmatch(candidate) and len(candidate) == 64:
+                                stored_hash = candidate
+                    match = hmac.compare_digest(provided_hash, stored_hash)
+                    if not parsed or record is None or not match:
+                        return self._invalid_ticket_response()
+
+                    now = int(time.time())
+                    try:
+                        expires_at = int(record.get('expires_at', 0))
+                    except (TypeError, ValueError):
+                        expires_at = 0
+                    if now > expires_at:
+                        return 410, api_error(
+                            'bootstrap ticket has expired',
+                            'BOOTSTRAP_TICKET_EXPIRED',
+                        )
+
+                    bound = record.get('bound_machine_id')
+                    if bound and bound != machine_id:
+                        return 409, api_error(
+                            'bootstrap ticket is bound to another machine',
+                            'BOOTSTRAP_TICKET_BOUND',
+                        )
+
+                    enrollment_id = str(record.get('enrollment_id') or '')
+                    enroll_record, enroll_path = self.load_enrollment(enrollment_id)
+                    if not enroll_record:
+                        return self._invalid_ticket_response()
+                    try:
+                        enroll_expires = int(enroll_record.get('expires_at', 0))
+                    except (TypeError, ValueError):
+                        enroll_expires = 0
+                    if now > enroll_expires:
+                        return 410, api_error(
+                            'bootstrap ticket has expired',
+                            'BOOTSTRAP_TICKET_EXPIRED',
+                        )
+
+                    try:
+                        services = normalize_services(record.get('services'))
+                    except ServiceValidationError:
+                        return self._invalid_ticket_response()
+
+                    if not bound:
+                        record['bound_machine_id'] = machine_id
+                        self.save_bootstrap(path, record)
+
+                    enroll_secret = str(enroll_record.get('secret') or '')
+                    if not enroll_secret:
+                        return self._invalid_ticket_response()
+                    enrollment_code = '%s.%s' % (
+                        str(enroll_record.get('id') or enrollment_id),
+                        enroll_secret,
+                    )
+                    return 200, {
+                        'enrollment_code': enrollment_code,
+                        'services': services,
+                        'note': str(record.get('note') or ''),
+                    }
+        except RegistrySchemaError as exc:
+            return 500, api_error(str(exc), 'REGISTRY_INVALID')
+        except OSError:
+            return 500, api_error(
+                'failed to persist bootstrap ticket', 'SERVER_MUTATION_FAILED'
+            )
+
+    def complete_bootstrap_for_enrollment(self, enrollment_id, machine_id):
+        """Record completed_at without making the ticket unrecoverable."""
+        if not enrollment_id:
+            return
+        try:
+            entries = list(self.bootstrap_dir.glob('*.json'))
+        except OSError:
+            return
+        now_iso = utc_now_iso()
+        for path in entries:
+            try:
+                record = load_json(path)
+            except Exception:
+                continue
+            if not isinstance(record, dict):
+                continue
+            if str(record.get('enrollment_id') or '') != str(enrollment_id):
+                continue
+            bound = record.get('bound_machine_id')
+            if bound and bound != machine_id:
+                continue
+            if record.get('completed_at'):
+                return
+            record['completed_at'] = now_iso
+            if not bound:
+                record['bound_machine_id'] = machine_id
+            try:
+                self.save_bootstrap(path, record)
+            except OSError:
+                return
+            return
+
     def cleanup_expired_enrollments(self):
         now = int(time.time())
         for path in self.enrollments_dir.glob('*.json'):
@@ -532,6 +869,7 @@ class Allocator:
             except Exception:
                 continue
         self.expire_nonces(now)
+        self.cleanup_expired_bootstrap_tickets(now)
 
     def load_nonces(self):
         path = self.nonce_file
@@ -808,12 +1146,16 @@ class Allocator:
                             'mgmt_status': 'legacy',
                             'services': {},
                         }
+                        if record is not None and record.get('note'):
+                            client['note'] = str(record.get('note') or '')
                         clients[machine_id] = client
                     else:
                         client['hostname'] = hostname or client.get('hostname', '')
                         client['last_enrolled_at'] = now_iso
                         if not isinstance(client.get('services'), dict):
                             client['services'] = {}
+                        if record is not None and record.get('note') and not client.get('note'):
+                            client['note'] = str(record.get('note') or '')
 
                     if client is None:
                         return 403, api_error('unknown client identity', 'AUTH_FAILED')
@@ -883,6 +1225,9 @@ class Allocator:
                         record['used_at'] = record.get('used_at') or now_iso
                         record['last_used_at'] = now_iso
                         self.save_enrollment(enroll_path, record)
+                        self.complete_bootstrap_for_enrollment(
+                            record.get('id') or enrollment_id, machine_id
+                        )
                     response_mac_key = client.get('mgmt_mac_key') if identity_auth else None
         except RegistrySchemaError as exc:
             return 500, api_error(str(exc), 'REGISTRY_INVALID')
@@ -961,23 +1306,32 @@ def make_handler(allocator):
             self.send_json(404, {'error': 'not found'})
 
         def do_POST(self):
-            if self._request_path() != '/enroll':
-                self.send_json(404, {'error': 'not found'})
-                return
+            path = self._request_path()
             try:
                 length = int(self.headers.get('Content-Length', '0'))
                 if length <= 0 or length > 65536:
                     self.send_json(400, {'error': 'invalid request body length'})
                     return
                 body = self.rfile.read(length)
-                code, result = allocator.enroll(
-                    self.headers.get('X-Enrollment-ID', ''),
-                    self.headers.get('X-Timestamp', ''),
-                    self.headers.get('X-Signature', ''),
-                    body,
-                    headers=self.headers,
-                )
-                self.send_json(code, result)
+            except Exception:
+                self.send_json(400, {'error': 'invalid request body length'})
+                return
+            try:
+                if path == '/enroll':
+                    code, result = allocator.enroll(
+                        self.headers.get('X-Enrollment-ID', ''),
+                        self.headers.get('X-Timestamp', ''),
+                        self.headers.get('X-Signature', ''),
+                        body,
+                        headers=self.headers,
+                    )
+                    self.send_json(code, result)
+                    return
+                if path == '/bootstrap/redeem':
+                    code, result = allocator.redeem_bootstrap(body)
+                    self.send_json(code, result)
+                    return
+                self.send_json(404, {'error': 'not found'})
             except json.JSONDecodeError:
                 self.send_json(400, api_error('invalid JSON', 'AUTH_FAILED'))
             except RegistrySchemaError as exc:

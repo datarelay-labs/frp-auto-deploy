@@ -78,12 +78,14 @@ bash -n tools/frp-server-status tools/frp-update tools/frp-client tools/frpctl
 ./tests/test-server-install-config.sh
 ./tests/test-client-allocator-url.sh
 ./tests/test-create-client.sh
+./tests/test-zero-touch-bootstrap.sh
 ./tests/test-client-upgrade.sh
 ./tests/test-install-lifecycle.sh
 ./tests/test-frpctl.sh
 ./tests/test-frpctl-completion.sh
 ./tests/test-frpctl-doctor.sh
 python3 tests/test-allocator.py
+python3 tests/test-bootstrap-ticket.py
 python3 tests/test-mgmt-identity.py
 python3 tests/test-enrollment-security.py
 python3 tests/test-pki-https.py

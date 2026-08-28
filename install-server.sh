@@ -524,6 +524,7 @@ cfg = {
     'allocator_public_url': sys.argv[9],
     'registry_file': '/var/lib/frp-auto-deploy/registry.json',
     'enrollments_dir': '/var/lib/frp-auto-deploy/enrollments',
+    'bootstrap_dir': '/var/lib/frp-auto-deploy/bootstrap',
     'token_file': '/etc/frp/server_token',
     'client_installer_url': sys.argv[10],
     'tls_ca_cert': pki.rstrip('/') + '/ca.crt',
@@ -839,9 +840,9 @@ frp_server_main() {
     return 1
   fi
 
-  mkdir -p "$etc_frp" "$etc_proj" "${var_lib}/enrollments" "$backups_dir" "$lib_dir" "$sbin_dir" \
+  mkdir -p "$etc_frp" "$etc_proj" "${var_lib}/enrollments" "${var_lib}/bootstrap" "$backups_dir" "$lib_dir" "$sbin_dir" \
     "$(dirname "$unit_frps")"
-  chmod 700 "$etc_frp" "$etc_proj" "$var_lib" "${var_lib}/enrollments" "$backups_dir"
+  chmod 700 "$etc_frp" "$etc_proj" "$var_lib" "${var_lib}/enrollments" "${var_lib}/bootstrap" "$backups_dir"
   if [[ ${EUID} -eq 0 ]]; then
     chown root:root "$etc_frp" "$etc_proj" "$var_lib" 2>/dev/null || true
   fi

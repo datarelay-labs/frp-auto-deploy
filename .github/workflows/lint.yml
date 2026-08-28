@@ -15,7 +15,7 @@ jobs:
         run: |
           python3 -m py_compile server/frp-port-allocator.py server/migrate_token.py scripts/build-bundles.py lib/frp_mgmt_auth.py lib/frp_pki.py lib/frp_doctor.py
           python3 -m py_compile tools/frp-create-client tools/frp-clients tools/frp-client-info tools/frp-release-client tools/frp-release-service tools/frp-revoke-client tools/frp-set-client-installer-url
-          python3 -m py_compile tests/test-allocator.py tests/test-enrollment-security.py tests/test-mgmt-identity.py tests/test-pki-https.py
+          python3 -m py_compile tests/test-allocator.py tests/test-enrollment-security.py tests/test-mgmt-identity.py tests/test-pki-https.py tests/test-bootstrap-ticket.py
       - name: Migration regression tests
         run: |
           ./tests/test-server-migration.sh
@@ -23,6 +23,7 @@ jobs:
       - name: Generic multi-service tests
         run: |
           python3 tests/test-allocator.py
+          python3 tests/test-bootstrap-ticket.py
           python3 tests/test-enrollment-security.py
           python3 tests/test-mgmt-identity.py
           ./tests/test-client-config.sh
@@ -32,6 +33,7 @@ jobs:
           ./tests/test-server-install-config.sh
           ./tests/test-allocator-ready.sh
           ./tests/test-create-client.sh
+          ./tests/test-zero-touch-bootstrap.sh
           ./tests/test-management-commands.sh
           ./tests/test-frp-client.sh
           ./tests/test-lifecycle.sh

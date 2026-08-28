@@ -13,7 +13,7 @@ FRP_CLIENT_UPGRADE_BACKUP_KEEP="${FRP_CLIENT_UPGRADE_BACKUP_KEEP:-5}"
 FRP_CLIENT_UPDATE_URL="${FRP_CLIENT_UPDATE_URL:-https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh}"
 
 # Defaults match VERSION. A sibling VERSION file overrides project/FRP versions.
-PROJECT_VERSION="${PROJECT_VERSION:-1.9.0}"
+PROJECT_VERSION="${PROJECT_VERSION:-1.9.1}"
 FRP_VERSION="${FRP_VERSION:-0.70.1}"
 _FRP_CLIENT_COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${_FRP_CLIENT_COMMON_DIR}/../VERSION" ]]; then
@@ -1219,6 +1219,7 @@ forbidden = {
     'token', 'auth.token', 'token_ciphertext', 'frp_token', 'server_token',
     'enrollment_code', 'enrollment_secret', 'enroll_secret', 'secret',
     'password', 'private_key', 'mgmt_mac_key', 'mac_key',
+    'bootstrap_ticket', 'frp_bootstrap_ticket',
 }
 def walk(obj, path=''):
     if isinstance(obj, dict):
@@ -1759,6 +1760,222 @@ wait_for_proxies() {
     fi
   done
   return 1
+}
+
+frp_zero_touch_active() {
+  [[ "${FRP_ZERO_TOUCH:-}" == "1" ]] || [[ -n "${FRP_BOOTSTRAP_TICKET:-}" ]]
+}
+
+frp_zero_touch_require_inputs() {
+  if [[ -z "${FRP_BOOTSTRAP_TICKET:-}" ]]; then
+    echo "ERROR: zero-touch setup requires FRP_BOOTSTRAP_TICKET." >&2
+    echo "Paste the full one-line command from the FRP server." >&2
+    echo "Setup could not continue because required bootstrap data is missing." >&2
+    frp_emit_failure_class ZERO_TOUCH_INPUT_INVALID
+    return 1
+  fi
+  if [[ -z "${FRP_ALLOCATOR_CA_SHA256:-}" && -z "${FRP_ALLOCATOR_CA_FILE:-}" ]]; then
+    echo "ERROR: zero-touch setup requires FRP_ALLOCATOR_CA_SHA256." >&2
+    frp_emit_failure_class ZERO_TOUCH_INPUT_INVALID
+    return 1
+  fi
+  return 0
+}
+
+frp_zero_touch_ssh_preflight() {
+  local user="${1:-}" port="${2:-22}"
+  local class=""
+  if [[ -z "$user" ]]; then
+    return 0
+  fi
+  if class="$(python3 - "$user" "$port" <<'PY'
+import pwd
+import re
+import socket
+import sys
+
+user = sys.argv[1]
+try:
+    port = int(sys.argv[2])
+except (TypeError, ValueError):
+    sys.stdout.write('SSH_TARGET_UNAVAILABLE')
+    raise SystemExit(4)
+if not re.fullmatch(r'[A-Za-z0-9._@-]{1,32}', user):
+    sys.stdout.write('SSH_USER_NOT_FOUND')
+    raise SystemExit(2)
+try:
+    pwd.getpwnam(user)
+except KeyError:
+    sys.stdout.write('SSH_USER_NOT_FOUND')
+    raise SystemExit(3)
+except Exception:
+    sys.stdout.write('SSH_USER_NOT_FOUND')
+    raise SystemExit(3)
+if port < 1 or port > 65535:
+    sys.stdout.write('SSH_TARGET_UNAVAILABLE')
+    raise SystemExit(4)
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.settimeout(3)
+try:
+    sock.connect(('127.0.0.1', port))
+except Exception:
+    sys.stdout.write('SSH_TARGET_UNAVAILABLE')
+    raise SystemExit(4)
+finally:
+    try:
+        sock.close()
+    except Exception:
+        pass
+raise SystemExit(0)
+PY
+)"; then
+    return 0
+  fi
+  case "$class" in
+    SSH_USER_NOT_FOUND)
+      echo "Setup could not continue because the SSH user '${user}' does not exist on this host." >&2
+      echo >&2
+      echo "No FRP port was allocated." >&2
+      echo "The one-time setup command may be run again before it expires after the user exists." >&2
+      echo >&2
+      frp_emit_failure_class SSH_USER_NOT_FOUND
+      return 1
+      ;;
+    SSH_TARGET_UNAVAILABLE)
+      echo "Setup could not continue because SSH is not listening on 127.0.0.1:${port}." >&2
+      echo >&2
+      echo "No FRP port was allocated." >&2
+      echo "The one-time setup command may be run again before it expires after SSH is available." >&2
+      echo >&2
+      frp_emit_failure_class SSH_TARGET_UNAVAILABLE
+      return 1
+      ;;
+    *)
+      echo "Setup could not continue because SSH is not ready on this host." >&2
+      echo >&2
+      echo "No FRP port was allocated." >&2
+      echo "The one-time setup command may be run again before it expires after SSH is available." >&2
+      echo >&2
+      frp_emit_failure_class SSH_TARGET_UNAVAILABLE
+      return 1
+      ;;
+  esac
+}
+
+frp_redeem_bootstrap_ticket() {
+  local allocator_url="$1" machine_id="$2" hostname_value="$3"
+  local services_file="$4" enroll_id_var="$5" enroll_secret_var="$6"
+  local origin redeem_url req_dir req_file resp_file curl_err response
+  local parsed_id parsed_secret error_class error_msg
+
+  frp_client_hook_log bootstrap_redeem
+  if [[ -z "${FRP_BOOTSTRAP_TICKET:-}" ]]; then
+    echo "ERROR: bootstrap ticket is missing." >&2
+    frp_emit_failure_class ZERO_TOUCH_INPUT_INVALID
+    return 1
+  fi
+  origin="$(frp_allocator_origin_url "$allocator_url")" || {
+    echo "ERROR: cannot derive allocator origin from URL" >&2
+    frp_emit_failure_class BOOTSTRAP_REDEEM_FAILED
+    return 1
+  }
+  redeem_url="${origin}/bootstrap/redeem"
+  req_dir="$(frp_secure_mktemp_dir)"
+  req_file="${req_dir}/redeem.json"
+  resp_file="${req_dir}/redeem-resp.json"
+  curl_err="${req_dir}/curl.err"
+  chmod 700 "$req_dir"
+
+  MACHINE_ID="$machine_id" HOSTNAME_VALUE="$hostname_value" \
+    FRP_BOOTSTRAP_TICKET="${FRP_BOOTSTRAP_TICKET}" python3 - "$req_file" <<'PY'
+import json, os, sys
+from pathlib import Path
+ticket = os.environ.get('FRP_BOOTSTRAP_TICKET', '')
+payload = {
+    'ticket': ticket,
+    'machine_id': os.environ.get('MACHINE_ID', ''),
+    'hostname': os.environ.get('HOSTNAME_VALUE', ''),
+}
+path = Path(sys.argv[1])
+path.write_text(json.dumps(payload, separators=(',', ':')) + '\n', encoding='utf-8')
+path.chmod(0o600)
+PY
+
+  if ! response="$(frp_allocator_curl \
+    -X POST \
+    -H 'Content-Type: application/json' \
+    --data-binary @"$req_file" \
+    "$redeem_url" 2>"$curl_err")"; then
+    frp_explain_allocator_curl_error "$curl_err"
+    rm -rf "$req_dir"
+    unset FRP_BOOTSTRAP_TICKET
+    frp_emit_failure_class BOOTSTRAP_REDEEM_FAILED
+    return 1
+  fi
+  unset FRP_BOOTSTRAP_TICKET
+  rm -f "$req_file"
+  printf '%s\n' "$response" >"$resp_file"
+  chmod 600 "$resp_file"
+
+  parsed="$(python3 - "$resp_file" "$services_file" <<'PY'
+import json, sys
+from pathlib import Path
+raw = Path(sys.argv[1]).read_text(encoding='utf-8')
+try:
+    data = json.loads(raw)
+except json.JSONDecodeError:
+    print('ERR\tZERO_TOUCH_INPUT_INVALID\tinvalid bootstrap response')
+    raise SystemExit(1)
+if not isinstance(data, dict):
+    print('ERR\tBOOTSTRAP_REDEEM_FAILED\tinvalid bootstrap response')
+    raise SystemExit(1)
+if data.get('error'):
+    cls = str(data.get('error_class') or 'BOOTSTRAP_REDEEM_FAILED')
+    msg = str(data.get('error') or 'bootstrap redeem failed')
+    print('ERR\t%s\t%s' % (cls, msg.replace('\t', ' ')))
+    raise SystemExit(1)
+code = str(data.get('enrollment_code') or '')
+if '.' not in code:
+    print('ERR\tBOOTSTRAP_REDEEM_FAILED\tbootstrap response is missing enrollment data')
+    raise SystemExit(1)
+eid, secret = code.split('.', 1)
+if not eid or not secret:
+    print('ERR\tBOOTSTRAP_REDEEM_FAILED\tbootstrap response is missing enrollment data')
+    raise SystemExit(1)
+services = data.get('services')
+if not isinstance(services, list) or not services:
+    print('ERR\tBOOTSTRAP_REDEEM_FAILED\tbootstrap response is missing services')
+    raise SystemExit(1)
+Path(sys.argv[2]).write_text(json.dumps(services, indent=2) + '\n', encoding='utf-8')
+print('OK\t%s\t%s' % (eid, secret))
+PY
+)" || true
+
+  rm -rf "$req_dir"
+  if [[ "$parsed" != OK$'\t'* ]]; then
+    error_class="$(printf '%s' "$parsed" | awk -F'\t' 'NR==1{print $2}')"
+    error_msg="$(printf '%s' "$parsed" | awk -F'\t' 'NR==1{print $3}')"
+    error_class="${error_class:-BOOTSTRAP_REDEEM_FAILED}"
+    echo "ERROR: ${error_msg:-bootstrap redeem failed}" >&2
+    case "$error_class" in
+      BOOTSTRAP_TICKET_EXPIRED)
+        echo "The one-time setup command has expired. Ask the administrator for a new command." >&2
+        ;;
+      BOOTSTRAP_TICKET_BOUND)
+        echo "This setup command was already used on another machine." >&2
+        ;;
+      BOOTSTRAP_TICKET_INVALID)
+        echo "The one-time setup command is not valid." >&2
+        ;;
+    esac
+    frp_emit_failure_class "$error_class"
+    return 1
+  fi
+  parsed_id="$(printf '%s' "$parsed" | awk -F'\t' 'NR==1{print $2}')"
+  parsed_secret="$(printf '%s' "$parsed" | awk -F'\t' 'NR==1{print $3}')"
+  printf -v "$enroll_id_var" '%s' "$parsed_id"
+  printf -v "$enroll_secret_var" '%s' "$parsed_secret"
+  return 0
 }
 
 frp_enroll_services() {

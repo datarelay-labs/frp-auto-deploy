@@ -52,22 +52,38 @@ def cfg_frp_control_public_port(cfg):
     return coerce_port(cfg.get('control_port'))
 
 
-def load_frp_pki():
+def load_module(name, rel_lib, installed):
     import importlib.util
     here = Path(__file__).resolve()
     candidates = [
-        here.parent.parent / 'lib' / 'frp_pki.py',
-        Path('/usr/local/lib/frp-auto-deploy/frp_pki.py'),
+        here.parent.parent / rel_lib,
+        Path(installed),
     ]
     if ROOT:
-        candidates.insert(1, Path(ROOT) / 'usr/local/lib/frp-auto-deploy/frp_pki.py')
+        candidates.insert(1, Path(ROOT) / 'usr/local/lib/frp-auto-deploy' / Path(rel_lib).name)
     for path in candidates:
         if path.is_file():
-            spec = importlib.util.spec_from_file_location('frp_pki', str(path))
+            spec = importlib.util.spec_from_file_location(name, str(path))
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
             return mod
     return None
+
+
+def load_frp_pki():
+    return load_module(
+        'frp_pki',
+        'lib/frp_pki.py',
+        '/usr/local/lib/frp-auto-deploy/frp_pki.py',
+    )
+
+
+def load_allocator():
+    return load_module(
+        'frp_port_allocator',
+        'server/frp-port-allocator.py',
+        '/usr/local/lib/frp-auto-deploy/frp-port-allocator.py',
+    )
 
 
 def fingerprint_from_cert(path):
@@ -80,90 +96,325 @@ def fingerprint_from_cert(path):
         return ''
 
 
-p = argparse.ArgumentParser(description='Create a short-lived FRP client enrollment code')
-p.add_argument('--ttl', type=int, default=600, help='TTL in seconds (default 600)')
-p.add_argument('--note', default='')
-a = p.parse_args()
+def shell_quote(value):
+    quoted = shlex.quote(str(value))
+    if quoted and quoted[0] not in ("'", '"'):
+        quoted = "'" + quoted + "'"
+    return quoted
 
-cfg = json.loads(Path(CONFIG).read_text())
-enroll_dir = remap(cfg['enrollments_dir'])
-enroll_dir.mkdir(parents=True, exist_ok=True)
 
-enrollment_id = secrets.token_hex(8)
-secret = secrets.token_hex(32)
-now = int(time.time())
-record = {
-    'id': enrollment_id,
-    'secret': secret,
-    'created_at': iso(now),
-    'expires_at': now + a.ttl,
-    'expires_at_iso': iso(now + a.ttl),
-    'bound_machine_id': None,
-    'used_at': None,
-    'note': a.note,
-}
-path = enroll_dir / f'{enrollment_id}.json'
-fd, tmp = tempfile.mkstemp(prefix=path.name + '.', suffix='.tmp', dir=str(path.parent))
-try:
-    with os.fdopen(fd, 'w', encoding='utf-8') as fh:
-        json.dump(record, fh, indent=2, sort_keys=True)
-        fh.write('\n')
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
-finally:
-    if os.path.exists(tmp):
-        os.unlink(tmp)
-path.chmod(0o600)
+def fail(message, code=2):
+    sys.stderr.write('ERROR: %s\n' % message)
+    raise SystemExit(code)
 
-public_host = cfg_public_host(cfg)
-control_public = cfg_frp_control_public_port(cfg)
-allocator = str(cfg.get('allocator_public_url', '') or '').strip()
-ca_path = remap(str(cfg.get('tls_ca_cert') or '/etc/frp-auto-deploy/pki/ca.crt'))
-ca_fp = fingerprint_from_cert(ca_path) if ca_path.is_file() else ''
 
-print()
-print('Enrollment Code:')
-print(f'{enrollment_id}.{secret}')
-print()
-print(f'Expires: {record["expires_at_iso"]} ({a.ttl} seconds)')
-print()
-if public_host and control_public:
-    print(f'FRP Server: {public_host}:{control_public}')
-elif public_host:
-    print(f'FRP Server: {public_host}')
-if allocator:
-    print(f'Allocator: {allocator}')
-if ca_fp:
-    print(f'CA SHA256: {ca_fp}')
+def atomic_write_json(path, data, mode=0o600):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + '.', suffix='.tmp', dir=str(path.parent))
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+            json.dump(data, fh, indent=2, sort_keys=True)
+            fh.write('\n')
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    try:
+        path.chmod(mode)
+    except OSError:
+        pass
 
-installer = str(cfg.get('client_installer_url', '') or '').strip()
-print()
-if installer and allocator:
-    env_parts = [f'FRP_ALLOCATOR_URL={shlex.quote(allocator)}']
+
+def write_enrollment(enroll_dir, enrollment_id, secret, ttl, note):
+    now = int(time.time())
+    record = {
+        'id': enrollment_id,
+        'secret': secret,
+        'created_at': iso(now),
+        'expires_at': now + ttl,
+        'expires_at_iso': iso(now + ttl),
+        'bound_machine_id': None,
+        'used_at': None,
+        'note': note,
+    }
+    path = enroll_dir / (enrollment_id + '.json')
+    atomic_write_json(path, record, 0o600)
+    return record, path
+
+
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(
+        description='Create a short-lived FRP client enrollment code',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            'examples:\n'
+            '  sudo frp-create-client\n'
+            '  sudo frp-create-client --one-line --ssh --ssh-user ubuntu --note customer-web01\n'
+        ),
+    )
+    p.add_argument('--ttl', type=int, default=600, help='TTL in seconds (default 600)')
+    p.add_argument('--note', default='')
+    p.add_argument(
+        '--one-line',
+        action='store_true',
+        help='Print a one-line zero-touch client install command',
+    )
+    p.add_argument(
+        '--ssh',
+        action='store_true',
+        help='SSH convenience service template (127.0.0.1:22)',
+    )
+    p.add_argument(
+        '--ssh-user',
+        default='',
+        metavar='USER',
+        help='SSH username (connection-info metadata and zero-touch preflight)',
+    )
+    p.add_argument(
+        '--ssh-port',
+        default=None,
+        metavar='PORT',
+        help='Local SSH listen port (default 22)',
+    )
+    p.add_argument(
+        '--services-file',
+        default='',
+        metavar='PATH',
+        help='JSON list of services (same schema as FRP_SERVICES_JSON)',
+    )
+    return p.parse_args(argv)
+
+
+def ssh_service(ssh_user, ssh_port):
+    return {
+        'id': 'ssh',
+        'name': 'SSH',
+        'protocol': 'tcp',
+        'local_ip': '127.0.0.1',
+        'local_port': int(ssh_port),
+        'preset': 'ssh',
+        'ssh_user': ssh_user,
+        'enabled': True,
+    }
+
+
+def load_services_file(path):
+    raw_path = Path(path)
+    if not raw_path.is_file():
+        fail('services file is missing: %s' % path)
+    try:
+        data = json.loads(raw_path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError):
+        fail('services file is not valid JSON')
+    if not isinstance(data, list):
+        fail('services file must contain a JSON list')
+    return data
+
+
+def first_ssh_preflight(services):
+    for item in services:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get('preset') or '').strip().lower() != 'ssh':
+            continue
+        user = str(item.get('ssh_user') or 'root').strip() or 'root'
+        port = coerce_port(item.get('local_port')) or 22
+        return user, port
+    return '', 22
+
+
+def print_manual(cfg, record, ttl, public_host, control_public, allocator, ca_fp, installer):
+    print()
+    print('Enrollment Code:')
+    print('%s.%s' % (record['id'], record['secret']))
+    print()
+    print('Expires: %s (%s seconds)' % (record['expires_at_iso'], ttl))
+    print()
+    if public_host and control_public:
+        print('FRP Server: %s:%s' % (public_host, control_public))
+    elif public_host:
+        print('FRP Server: %s' % public_host)
+    if allocator:
+        print('Allocator: %s' % allocator)
     if ca_fp:
-        env_parts.append(f'FRP_ALLOCATOR_CA_SHA256={shlex.quote(ca_fp)}')
-    print('Client install:')
-    print(
-        f'curl -fsSL {shlex.quote(installer)} | '
-        f'sudo env {" ".join(env_parts)} bash'
-    )
+        print('CA SHA256: %s' % ca_fp)
+
     print()
-    print('The enrollment code is entered interactively. It is not placed on the command line.')
-elif installer:
-    print('Client install:')
-    print(f'curl -fsSL {shlex.quote(installer)} | sudo bash')
-    print()
-    print('WARNING: allocator public URL is not configured.')
-    print('Set FRP_ALLOCATOR_URL on the client, or re-run the server installer.')
-else:
-    print('Set the client installer URL, then re-run this command:')
-    print(
-        '  sudo frp-set-client-installer-url '
-        'https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh'
-    )
-    if not allocator:
+    if installer and allocator:
+        env_parts = ['FRP_ALLOCATOR_URL=%s' % shell_quote(allocator)]
+        if ca_fp:
+            env_parts.append('FRP_ALLOCATOR_CA_SHA256=%s' % shell_quote(ca_fp))
+        print('Client install:')
+        print(
+            'curl -fsSL %s | sudo env %s bash'
+            % (shell_quote(installer), ' '.join(env_parts))
+        )
+        print()
+        print('The enrollment code is entered interactively. It is not placed on the command line.')
+    elif installer:
+        print('Client install:')
+        print('curl -fsSL %s | sudo bash' % shell_quote(installer))
         print()
         print('WARNING: allocator public URL is not configured.')
-print()
+        print('Set FRP_ALLOCATOR_URL on the client, or re-run the server installer.')
+    else:
+        print('Set the client installer URL, then re-run this command:')
+        print(
+            '  sudo frp-set-client-installer-url '
+            'https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh'
+        )
+        if not allocator:
+            print()
+            print('WARNING: allocator public URL is not configured.')
+    print()
+
+
+def print_one_line(ticket, ttl, note, public_host, control_public, allocator, ca_fp, installer, ssh_user, ssh_port):
+    env_parts = [
+        'FRP_ALLOCATOR_URL=%s' % shell_quote(allocator),
+        'FRP_ALLOCATOR_CA_SHA256=%s' % shell_quote(ca_fp),
+        'FRP_BOOTSTRAP_TICKET=%s' % shell_quote(ticket),
+        'FRP_ZERO_TOUCH=1',
+    ]
+    if ssh_user:
+        env_parts.append('FRP_SSH_USER=%s' % shell_quote(ssh_user))
+    if ssh_port and int(ssh_port) != 22:
+        env_parts.append('FRP_SSH_PORT=%s' % shell_quote(str(int(ssh_port))))
+    command = 'curl -fsSL %s | sudo env %s bash' % (
+        shell_quote(installer),
+        ' '.join(env_parts),
+    )
+    print()
+    print('Zero-touch client command')
+    print()
+    print('This command contains a short-lived one-time bootstrap ticket.')
+    print('Treat the command as sensitive until it expires or is used.')
+    print()
+    print(command)
+    print()
+    print('Expires: %s (%s seconds)' % (iso(int(time.time()) + ttl), ttl))
+    if note:
+        print('Note: %s' % note)
+    if public_host and control_public:
+        print('FRP Server: %s:%s' % (public_host, control_public))
+    print()
+    print('Send that single line to the remote user. They paste it and press Enter.')
+    print('No Enrollment Code prompt or FRP configuration is required.')
+    print()
+    print('The ticket is not the FRP token. It cannot manage the client after enrollment.')
+    print('It cannot be reused by another machine once bound.')
+    print()
+
+
+def main(argv=None):
+    a = parse_args(argv)
+    if a.ttl is None or int(a.ttl) <= 0:
+        fail('TTL must be a positive integer')
+    ttl = int(a.ttl)
+
+    if a.ssh_user and not a.ssh:
+        fail('--ssh-user requires --ssh')
+    if a.ssh_port is not None and not a.ssh:
+        fail('--ssh-port requires --ssh')
+    if a.services_file and a.ssh:
+        fail('use either --ssh or --services-file, not both')
+    if (a.ssh or a.services_file) and not a.one_line:
+        fail('--ssh and --services-file require --one-line')
+
+    ssh_port = 22
+    if a.ssh_port is not None:
+        ssh_port = coerce_port(a.ssh_port)
+        if ssh_port is None:
+            fail('invalid --ssh-port; must be an integer 1-65535')
+
+    cfg = json.loads(Path(CONFIG).read_text())
+    enroll_dir = remap(cfg['enrollments_dir'])
+    enroll_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(str(enroll_dir), 0o700)
+    except OSError:
+        pass
+
+    public_host = cfg_public_host(cfg)
+    control_public = cfg_frp_control_public_port(cfg)
+    allocator = str(cfg.get('allocator_public_url', '') or '').strip()
+    ca_path = remap(str(cfg.get('tls_ca_cert') or '/etc/frp-auto-deploy/pki/ca.crt'))
+    ca_fp = fingerprint_from_cert(ca_path) if ca_path.is_file() else ''
+    installer = str(cfg.get('client_installer_url', '') or '').strip()
+
+    if not a.one_line:
+        enrollment_id = secrets.token_hex(8)
+        secret = secrets.token_hex(32)
+        record, _path = write_enrollment(enroll_dir, enrollment_id, secret, ttl, a.note)
+        print_manual(cfg, record, ttl, public_host, control_public, allocator, ca_fp, installer)
+        return 0
+
+    if not a.ssh and not a.services_file:
+        fail('--one-line requires --ssh or --services-file')
+    if a.ssh and not str(a.ssh_user or '').strip():
+        fail('--ssh requires --ssh-user')
+
+    if not installer:
+        fail(
+            'client installer URL is not configured; '
+            'run sudo frp-set-client-installer-url before --one-line'
+        )
+    if not allocator:
+        fail('allocator public URL is not configured; cannot generate a zero-touch command')
+    if not allocator.lower().startswith('https://'):
+        fail('allocator public URL must be HTTPS')
+    if not ca_fp:
+        fail('allocator CA SHA256 fingerprint is not available; cannot generate a secure command')
+
+    alloc_mod = load_allocator()
+    if alloc_mod is None:
+        fail('allocator module is missing')
+
+    if a.ssh:
+        raw_services = [ssh_service(str(a.ssh_user).strip(), ssh_port)]
+    else:
+        raw_services = load_services_file(a.services_file)
+
+    try:
+        services = alloc_mod.normalize_services(raw_services)
+    except alloc_mod.ServiceValidationError as exc:
+        fail(str(exc))
+
+    bootstrap_cfg = str(cfg.get('bootstrap_dir') or '').strip()
+    if bootstrap_cfg:
+        bootstrap_dir = remap(bootstrap_cfg)
+    else:
+        bootstrap_dir = enroll_dir.parent / 'bootstrap'
+
+    try:
+        ticket, _enroll_record, _ticket_record = alloc_mod.issue_bootstrap_ticket(
+            enroll_dir, bootstrap_dir, services, ttl, a.note
+        )
+    except Exception as exc:
+        fail('failed to issue bootstrap ticket: %s' % exc)
+
+    ssh_user, ssh_pre_port = first_ssh_preflight(services)
+    print_one_line(
+        ticket,
+        ttl,
+        a.note,
+        public_host,
+        control_public,
+        allocator,
+        ca_fp,
+        installer,
+        ssh_user,
+        ssh_pre_port,
+    )
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

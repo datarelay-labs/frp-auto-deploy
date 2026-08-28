@@ -8,7 +8,7 @@ It automates FRP server/client installation, persistent public port assignment f
 > The IP addresses `203.0.113.10` and `192.0.2.50` used in this README are documentation-only example addresses (RFC 5737). Replace them with your own public and internal addresses when deploying.
 
 Current pinned FRP version: **v0.70.1**
-Current project version: **1.9.0**
+Current project version: **1.9.1**
 
 ---
 
@@ -29,7 +29,7 @@ FRP Auto Deploy CLI
 ===================
 
 Role            : Server
-Project version : 1.9.0
+Project version : 1.9.1
 FRP version     : 0.70.1
 
 Type 'help' or '?' for available commands.
@@ -53,7 +53,7 @@ FRP Auto Deploy CLI
 ===================
 
 Role            : Client
-Project version : 1.9.0
+Project version : 1.9.1
 FRP version     : 0.70.1
 
 frpctl> status
@@ -267,6 +267,26 @@ sudo env \
 Enrollment codes expire after 10 minutes by default and are bound to the first machine that uses them. The enrollment secret is entered interactively; it is not placed on the command line. The CA fingerprint is public trust metadata and may appear in the install command.
 
 `sudo env` is required so `FRP_ALLOCATOR_URL` and `FRP_ALLOCATOR_CA_SHA256` reach the installer after `sudo` resets the environment.
+
+### Zero-touch SSH client
+
+On the FRP server:
+
+```bash
+sudo frp-create-client --one-line --ssh --ssh-user aella --note customer-01
+```
+
+Send the printed command to the remote user. They paste that single line into a terminal. No Enrollment Code or FRP configuration knowledge is required.
+
+The one-line command contains a short-lived bootstrap ticket. Treat the command as sensitive until used or expired. It is not the FRP token. It cannot manage the client after enrollment. It cannot be reused by another machine once bound.
+
+Zero-touch FRP setup does not create SSH accounts or credentials. The target host must already have:
+
+- sshd listening on the configured local port
+- the configured SSH user
+- an authentication method the administrator can use
+
+After the client connects, the administrator can read the assigned public SSH endpoint with `sudo frpctl clients` or `sudo frp-client-info`.
 
 ## 4. Install a remote Linux client
 
@@ -1077,6 +1097,8 @@ For a change that touches runtime, install, client, or server code, the intended
 ./tests/test-server-migration.sh
 ./tests/test-registry-init.sh
 python3 tests/test-allocator.py
+python3 tests/test-bootstrap-ticket.py
+python3 tests/test-enrollment-security.py
 python3 tests/test-mgmt-identity.py
 ./tests/test-client-config.sh
 ./tests/test-client-allocator-url.sh
@@ -1085,6 +1107,7 @@ python3 tests/test-mgmt-identity.py
 ./tests/test-server-install-config.sh
 ./tests/test-allocator-ready.sh
 ./tests/test-create-client.sh
+./tests/test-zero-touch-bootstrap.sh
 ./tests/test-management-commands.sh
 ./tests/test-frp-client.sh
 ./tests/test-lifecycle.sh
@@ -1093,6 +1116,7 @@ python3 tests/test-mgmt-identity.py
 ./tests/test-install-lifecycle.sh
 ./tests/test-frpctl.sh
 ./tests/test-frpctl-completion.sh
+./tests/test-frpctl-doctor.sh
 ./tests/test-frp-update.sh
 ./tests/test-frp-server-status.sh
 ./tests/test-port-architecture.sh

@@ -63,6 +63,8 @@ SECRET_RE = re.compile(
     r'(BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY|'
     r'auth\.token\s*=\s*\S+|'
     r'mgmt_mac_key|'
+    r'FRP_BOOTSTRAP_TICKET=|'
+    r'bt1\.[0-9a-f]{16}\.[0-9a-f]{32,}|'
     r'Enrollment Code:\s*\S+)',
     re.IGNORECASE,
 )
@@ -1460,6 +1462,67 @@ def check_server(report, paths, facts, skip_network):
             rec = 're-run the server installer to reissue the allocator certificate under the existing CA'
             status = FAIL
         report.add('allocator_health', status, 'allocator HTTPS health check failed (%s)' % cls, net.get('detail') or '', rec, 'network')
+
+    bootstrap_abs = '/var/lib/frp-auto-deploy/bootstrap'
+    if cfg:
+        configured = str(cfg.get('bootstrap_dir') or '').strip()
+        enrollments = str(cfg.get('enrollments_dir') or '').strip()
+        if configured.startswith('/'):
+            bootstrap_abs = configured
+        elif enrollments.startswith('/'):
+            parent = enrollments.rsplit('/', 1)[0]
+            if parent:
+                bootstrap_abs = parent + '/bootstrap'
+    if paths.is_dir(bootstrap_abs):
+        now = int(time.time())
+        active = 0
+        expired = 0
+        try:
+            for entry in sorted(paths.p(bootstrap_abs).glob('*.json')):
+                try:
+                    rec = json.loads(entry.read_text(encoding='utf-8'))
+                except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                    expired += 1
+                    continue
+                if not isinstance(rec, dict):
+                    expired += 1
+                    continue
+                try:
+                    exp = int(rec.get('expires_at') or 0)
+                except (TypeError, ValueError):
+                    expired += 1
+                    continue
+                if exp >= now:
+                    active += 1
+                else:
+                    expired += 1
+        except OSError:
+            active = 0
+            expired = 0
+        if expired >= 50:
+            report.add(
+                'bootstrap_tickets', WARN,
+                'stale expired bootstrap ticket records were not cleaned up',
+                'active=%s expired=%s' % (active, expired),
+                'expired tickets are removed when a new ticket is created or redeemed; doctor does not delete them',
+                'state',
+            )
+        else:
+            report.add(
+                'bootstrap_tickets', INFO,
+                'active unexpired bootstrap tickets: %s' % active,
+                'expired=%s' % expired if expired else '',
+                '',
+                'state',
+            )
+    else:
+        report.add(
+            'bootstrap_tickets', INFO,
+            'active unexpired bootstrap tickets: 0',
+            '',
+            '',
+            'state',
+        )
 
     if cfg:
         ports = server_config_ports(cfg)
