@@ -176,7 +176,7 @@ PY
 [[ -f "$TREE/usr/local/lib/frp-auto-deploy/frp-client-common.sh" ]] || fail "client lib not installed"
 [[ -f "$TREE/usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py" ]] || fail "mgmt auth helper not installed"
 [[ -f "$TREE/etc/frp-auto-deploy/version" ]] || fail "client version file missing"
-grep -q 'PROJECT_VERSION=1.6.0' "$TREE/etc/frp-auto-deploy/version" || fail "client project version"
+grep -q 'PROJECT_VERSION=1.7.0' "$TREE/etc/frp-auto-deploy/version" || fail "client project version"
 grep -q 'FRP_VERSION=0.70.1' "$TREE/etc/frp-auto-deploy/version" || fail "client FRP version"
 [[ -f "$TREE/etc/frp-auto-deploy/allocator-ca.crt" ]] || fail "trusted CA missing"
 grep -q 'serverPort = 8443' "$TREE/etc/frp/frpc.toml" || fail "frpc must use public control port"
@@ -222,7 +222,7 @@ PY
 [[ "$before" == "$after" ]] || fail "read-only CLI modified files"
 if grep -qx enroll "$HOOK"; then fail "read-only contacted allocator"; fi
 if grep -qx restart "$HOOK"; then fail "read-only restarted frpc"; fi
-grep -q 'Project version : 1.6.0' "$WORKDIR/status.out" || fail "status project version"
+grep -q 'Project version : 1.7.0' "$WORKDIR/status.out" || fail "status project version"
 grep -q 'Hostname        : dp-example' "$WORKDIR/status.out" || fail "status hostname"
 grep -q 'Management identity : enrolled' "$WORKDIR/status.out" || fail "status identity"
 grep -q 'ssh' "$WORKDIR/status.out" || fail "status ssh"
@@ -643,19 +643,32 @@ grep -q 'predates local management state' "$WORKDIR/missing.err" || fail "missin
 pass "missing pre-P2 state fails closed"
 
 # Lock
-mkdir -p "$TREE/etc/frp/client-manage.lock"
-export FRP_CLIENT_CANDIDATE="$CAND"
-if FRP_CLIENT_TOOL_SOURCED=1; then :; fi
-# restore state for lock test of apply
+LOCKFILE="$TREE/etc/frp/client-manage.lock"
 python3 - "$WORKDIR/state.before" "$STATE" <<'PY'
 import pathlib,sys
 pathlib.Path(sys.argv[2]).write_bytes(pathlib.Path(sys.argv[1]).read_bytes())
 PY
+exec {LOCKFD}>>"$LOCKFILE"
+flock -n "$LOCKFD"
+export FRP_CLIENT_CANDIDATE="$CAND"
 if "$ROOT/tools/frp-client" apply >"$WORKDIR/lock.out" 2>"$WORKDIR/lock.err"; then
+  flock -u "$LOCKFD"
+  exec {LOCKFD}>&-
   fail "lock should block apply"
 fi
 grep -q 'another frp-client management operation is already running' "$WORKDIR/lock.err" || fail "lock error"
-rmdir "$TREE/etc/frp/client-manage.lock" 2>/dev/null || rm -rf "$TREE/etc/frp/client-manage.lock"
+flock -u "$LOCKFD"
+exec {LOCKFD}>&-
+# Stale mkdir lock from a dead PID must not block forever.
+rm -f "$LOCKFILE" "${LOCKFILE}.pid"
+mkdir -p "$LOCKFILE"
+printf '999999\n' >"$LOCKFILE/pid"
+if ! "$ROOT/tools/frp-client" apply >"$WORKDIR/stale-lock.out" 2>"$WORKDIR/stale-lock.err"; then
+  # candidate may be a no-op or a change; either must not fail on stale lock
+  if grep -q 'another frp-client management operation is already running' "$WORKDIR/stale-lock.err"; then
+    fail "stale directory lock blocked apply"
+  fi
+fi
 pass "local management lock"
 
 # Existing install refuses re-enrollment via the installer

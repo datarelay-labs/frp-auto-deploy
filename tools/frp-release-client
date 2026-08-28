@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import fcntl
 import json
 import os
 import socket
@@ -7,6 +8,42 @@ import tempfile
 from pathlib import Path
 
 ROOT = os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
+
+
+def lock_registry(path):
+    lock_path = Path(path).resolve().parent / 'registry.lock'
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def unlock_registry(fd):
+    if fd is None:
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def atomic_write_json(path, data, mode=0o600):
+    fd, tmp = tempfile.mkstemp(prefix=path.name + '.', suffix='.tmp', dir=str(path.parent))
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, sort_keys=True)
+            f.write('\n')
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
 def require_v2(state):
     if not isinstance(state, dict) or state.get('schema_version') != 2:
         version = 1
@@ -90,13 +127,19 @@ answer = input('Type RELEASE to continue: ')
 if answer != 'RELEASE':
     raise SystemExit('Cancelled')
 
-state['clients'].pop(mid)
-fd, tmp = tempfile.mkstemp(prefix='registry.', suffix='.tmp', dir=str(path.parent))
-with os.fdopen(fd, 'w') as f:
-    json.dump(state, f, indent=2, sort_keys=True)
-    f.write('\n')
-    f.flush()
-    os.fsync(f.fileno())
-os.chmod(tmp, 0o600)
-os.replace(tmp, path)
+lock_fd = lock_registry(path)
+try:
+    state = json.loads(path.read_text())
+    require_v2(state)
+    matches = []
+    for mid, client in (state.get('clients') or {}).items():
+        if mid.startswith(args.query) or client.get('hostname') == args.query:
+            matches.append((mid, client))
+    if len(matches) != 1:
+        raise SystemExit('Expected exactly one matching client')
+    mid, client = matches[0]
+    state['clients'].pop(mid)
+    atomic_write_json(path, state)
+finally:
+    unlock_registry(lock_fd)
 print('Released.')

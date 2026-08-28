@@ -170,6 +170,31 @@ if grep -qi 'private key\|mgmt_mac_key\|BEGIN PUBLIC' "$WORKDIR/revoke.out"; the
 fi
 pass "frp-revoke-client keeps reservations"
 
+printf 'RELEASE\n' | python3 "$ROOT/tools/frp-release-client" dev-dp-mirror --force >"$WORKDIR/revoke-release.out"
+python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY' || fail "release after revoke"
+import json,sys
+from pathlib import Path
+state=json.loads(Path(sys.argv[1]).read_text())
+assert 'aabbccdd' not in state['clients']
+PY
+pass "admin release still works after revoke"
+
+# Restore a client so status still has one remaining host (client-b was already released).
+python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY'
+import json,sys
+from pathlib import Path
+p=Path(sys.argv[1])
+state=json.loads(p.read_text())
+state['clients']['aabbccdd']={
+  'hostname':'dev-dp-mirror',
+  'services':{
+    'ssh':{'name':'SSH','protocol':'tcp','local_ip':'127.0.0.1','local_port':22,'remote_port':6002,'preset':'ssh','enabled':True},
+    'api':{'name':'API','protocol':'tcp','local_ip':'127.0.0.1','local_port':8080,'remote_port':6004,'preset':'custom','enabled':False},
+  },
+}
+p.write_text(json.dumps(state, indent=2, sort_keys=True)+'\n')
+PY
+
 # shellcheck source=../lib/frp-common.sh
 . "$ROOT/lib/frp-common.sh"
 MARKER="$WORKDIR/harness.marker"

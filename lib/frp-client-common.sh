@@ -13,7 +13,7 @@ FRP_CLIENT_UPGRADE_BACKUP_KEEP="${FRP_CLIENT_UPGRADE_BACKUP_KEEP:-5}"
 FRP_CLIENT_UPDATE_URL="${FRP_CLIENT_UPDATE_URL:-https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh}"
 
 # Defaults match VERSION. A sibling VERSION file overrides project/FRP versions.
-PROJECT_VERSION="${PROJECT_VERSION:-1.6.0}"
+PROJECT_VERSION="${PROJECT_VERSION:-1.7.0}"
 FRP_VERSION="${FRP_VERSION:-0.70.1}"
 _FRP_CLIENT_COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${_FRP_CLIENT_COMMON_DIR}/../VERSION" ]]; then
@@ -48,6 +48,10 @@ frp_client_backup_dir() {
 
 frp_client_lock_dir() {
   frp_client_path /etc/frp/client-manage.lock
+}
+
+frp_client_pending_path() {
+  frp_client_path /etc/frp/apply-pending.json
 }
 
 frp_client_identity_key_path() {
@@ -557,6 +561,23 @@ frp_client_hook_log() {
   if [[ -n "${FRP_CLIENT_HOOK_LOG:-}" ]]; then
     printf '%s\n' "$1" >>"$FRP_CLIENT_HOOK_LOG"
   fi
+}
+
+frp_client_test_hook() {
+  local name="$1"
+  local var="FRP_CLIENT_HOOK_${name}"
+  frp_client_hook_log "$name"
+  if [[ -n "${FRP_CLIENT_TEST_ROOT:-}" && "${!var:-}" == "1" ]]; then
+    echo "ERROR: simulated ${name} failure" >&2
+    return 1
+  fi
+  return 0
+}
+
+frp_emit_failure_class() {
+  local class="$1"
+  printf 'FAILURE_CLASS=%s\n' "$class"
+  printf 'FAILURE_CLASS=%s\n' "$class" >&2
 }
 
 _FRP_TEST_INPUT_READY=0
@@ -1104,14 +1125,43 @@ except Exception:
 PY
 }
 
+frp_atomic_copy_file() {
+  local dest="$1" src="$2" mode="$3"
+  python3 - "$dest" "$src" "$mode" <<'PY'
+import os, sys, tempfile
+from pathlib import Path
+dest = Path(sys.argv[1])
+src = Path(sys.argv[2])
+mode = int(sys.argv[3], 8)
+text = src.read_text(encoding='utf-8')
+dest.parent.mkdir(parents=True, exist_ok=True)
+fd, tmp = tempfile.mkstemp(prefix=dest.name + '.', suffix='.tmp', dir=str(dest.parent))
+try:
+    with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.chmod(tmp, mode)
+    os.replace(tmp, dest)
+except Exception:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise
+PY
+}
+
 frp_atomic_write_json_file() {
   local dest="$1" src="$2" mode="${3:-0600}"
-  python3 - "$dest" "$src" "$mode" <<'PY'
+  python3 - "$dest" "$src" "$mode" "${FRP_CLIENT_TEST_ROOT:-}" "${FRP_CLIENT_HOOK_STATE_WRITE:-}" <<'PY'
 import json, os, sys, tempfile
 from pathlib import Path
 dest = Path(sys.argv[1])
 src = Path(sys.argv[2])
 mode = int(sys.argv[3], 8)
+test_root = sys.argv[4]
+hook = sys.argv[5]
 data = json.loads(src.read_text(encoding='utf-8'))
 dest.parent.mkdir(parents=True, exist_ok=True)
 fd, tmp = tempfile.mkstemp(prefix=dest.name + '.', suffix='.tmp', dir=str(dest.parent))
@@ -1122,6 +1172,8 @@ try:
         fh.flush()
         os.fsync(fh.fileno())
     os.chmod(tmp, mode)
+    if test_root and hook == '1' and dest.name == 'client-state.json':
+        raise OSError('simulated state write failure')
     os.replace(tmp, dest)
 except Exception:
     try:
@@ -1555,10 +1607,21 @@ for item in services:
 text = '\n'.join(lines) + '\n'
 path = Path(dest)
 path.parent.mkdir(parents=True, exist_ok=True)
-tmp = path.with_name(path.name + '.tmp')
-tmp.write_text(text, encoding='utf-8')
-tmp.chmod(0o600)
-tmp.replace(path)
+import os, tempfile
+fd, tmp = tempfile.mkstemp(prefix=path.name + '.', suffix='.tmp', dir=str(path.parent))
+try:
+    with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+finally:
+    if os.path.exists(tmp):
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 PY
 }
 
@@ -1606,10 +1669,22 @@ for item in services:
     lines.append('')
 path = Path(dest)
 path.parent.mkdir(parents=True, exist_ok=True)
-tmp = path.with_name(path.name + '.tmp')
-tmp.write_text('\n'.join(lines).rstrip()+'\n', encoding='utf-8')
-tmp.chmod(0o644)
-tmp.replace(path)
+import os, tempfile
+text = '\n'.join(lines).rstrip() + '\n'
+fd, tmp = tempfile.mkstemp(prefix=path.name + '.', suffix='.tmp', dir=str(path.parent))
+try:
+    with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+finally:
+    if os.path.exists(tmp):
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 PY
 }
 
@@ -1696,7 +1771,7 @@ PY
     esac
   fi
   request="$(python3 - "$machine_id" "$hostname_value" "$services_file" "$pubkey_pem" <<'PY'
-import json,sys
+import json, os, sys
 from pathlib import Path
 raw=json.loads(Path(sys.argv[3]).read_text(encoding='utf-8'))
 if isinstance(raw, dict) and 'services' in raw:
@@ -1731,6 +1806,9 @@ pub=sys.argv[4]
 if pub:
     payload['mgmt_pubkey']=pub
     payload['mgmt_alg']='ecdsa-p256-sha256'
+op_id=os.environ.get('FRP_CLIENT_OPERATION_ID','').strip()
+if op_id:
+    payload['operation_id']=op_id
 print(json.dumps(payload, separators=(',', ':')))
 PY
 )"
@@ -2081,7 +2159,7 @@ PY
     rm -f "$tmp_access"
     return 1
   }
-  install -m 0644 "$tmp_access" "$access"
+  frp_atomic_copy_file "$access" "$tmp_access" 0644
   rm -f "$tmp_access"
   echo "Applied local changes."
   echo "Allocator contacted : NO"
@@ -2137,38 +2215,356 @@ PY
 frp_restore_client_files() {
   local backup="$1"
   [[ -d "$backup" ]] || return 1
-  local f dest
+  local f dest mode
   for f in client-state.json frpc.toml access-info.txt; do
     if [[ -f "$backup/$f" ]]; then
       case "$f" in
-        client-state.json) dest="$(frp_client_state_path)" ;;
-        frpc.toml) dest="$(frp_client_toml_path)" ;;
-        access-info.txt) dest="$(frp_client_access_path)" ;;
+        client-state.json) dest="$(frp_client_state_path)"; mode=0600 ;;
+        frpc.toml) dest="$(frp_client_toml_path)"; mode=0600 ;;
+        access-info.txt) dest="$(frp_client_access_path)"; mode=0644 ;;
       esac
-      install -m 0600 "$backup/$f" "$dest"
-      if [[ "$f" == access-info.txt ]]; then
-        chmod 644 "$dest"
-      fi
+      frp_atomic_copy_file "$dest" "$backup/$f" "$mode"
     fi
   done
 }
 
+frp_lock_pid_alive() {
+  local pid="$1"
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
 frp_acquire_client_lock() {
-  local dir
-  dir="$(frp_client_lock_dir)"
-  mkdir -p "$(dirname "$dir")"
-  if ! mkdir "$dir" 2>/dev/null; then
-    echo "ERROR: another frp-client management operation is already running." >&2
-    return 1
+  local lock pid
+  lock="$(frp_client_lock_dir)"
+  mkdir -p "$(dirname "$lock")"
+  if [[ -d "$lock" ]]; then
+    pid="$(tr -d '\n' <"$lock/pid" 2>/dev/null || true)"
+    if frp_lock_pid_alive "$pid"; then
+      echo "ERROR: another frp-client management operation is already running." >&2
+      return 1
+    fi
+    rm -rf "$lock"
   fi
-  printf '%s\n' "$$" >"$dir/pid"
-  chmod 700 "$dir" 2>/dev/null || true
+  if [[ -f "$lock" ]]; then
+    pid=""
+    if [[ -f "${lock}.pid" ]]; then
+      pid="$(tr -d '\n' <"${lock}.pid")"
+    fi
+    if frp_lock_pid_alive "$pid" && ! command -v flock >/dev/null 2>&1; then
+      echo "ERROR: another frp-client management operation is already running." >&2
+      return 1
+    fi
+    if [[ -z "${FRP_CLIENT_LOCK_FD:-}" ]] && ! command -v flock >/dev/null 2>&1; then
+      if ! frp_lock_pid_alive "$pid"; then
+        rm -f "$lock" "${lock}.pid"
+      fi
+    fi
+  fi
+  if command -v flock >/dev/null 2>&1; then
+    if [[ -z "${FRP_CLIENT_LOCK_FD:-}" ]]; then
+      exec {FRP_CLIENT_LOCK_FD}>>"$lock"
+    fi
+    if ! flock -n "$FRP_CLIENT_LOCK_FD"; then
+      echo "ERROR: another frp-client management operation is already running." >&2
+      exec {FRP_CLIENT_LOCK_FD}>&-
+      unset FRP_CLIENT_LOCK_FD
+      return 1
+    fi
+    printf '%s\n' "$$" >"${lock}.pid"
+    chmod 600 "$lock" 2>/dev/null || true
+    return 0
+  fi
+  if ! mkdir "$lock" 2>/dev/null; then
+    pid="$(tr -d '\n' <"$lock/pid" 2>/dev/null || true)"
+    if frp_lock_pid_alive "$pid"; then
+      echo "ERROR: another frp-client management operation is already running." >&2
+      return 1
+    fi
+    rm -rf "$lock"
+    if ! mkdir "$lock" 2>/dev/null; then
+      echo "ERROR: another frp-client management operation is already running." >&2
+      return 1
+    fi
+  fi
+  printf '%s\n' "$$" >"$lock/pid"
+  chmod 700 "$lock" 2>/dev/null || true
 }
 
 frp_release_client_lock() {
-  local dir
-  dir="$(frp_client_lock_dir)"
-  rm -rf "$dir"
+  local lock
+  lock="$(frp_client_lock_dir)"
+  if [[ -n "${FRP_CLIENT_LOCK_FD:-}" ]]; then
+    flock -u "$FRP_CLIENT_LOCK_FD" 2>/dev/null || true
+    exec {FRP_CLIENT_LOCK_FD}>&- 2>/dev/null || true
+    unset FRP_CLIENT_LOCK_FD
+    rm -f "${lock}.pid"
+  fi
+  if [[ -d "$lock" ]]; then
+    rm -rf "$lock"
+  fi
+}
+
+frp_sha256_file() {
+  python3 - "$1" <<'PY'
+import hashlib, sys
+from pathlib import Path
+p = Path(sys.argv[1])
+if not p.is_file():
+    sys.stdout.write('')
+else:
+    sys.stdout.write(hashlib.sha256(p.read_bytes()).hexdigest())
+PY
+}
+
+frp_pending_write() {
+  local phase="$1" op_id="$2" server_outcome="${3:-pending}"
+  local dest current candidate
+  dest="$(frp_client_pending_path)"
+  current="$(frp_client_state_path)"
+  candidate="${CANDIDATE_FILE:-}"
+  python3 - "$dest" "$phase" "$op_id" "$server_outcome" "$current" "$candidate" <<'PY'
+import json, os, sys, tempfile, time
+from pathlib import Path
+dest = Path(sys.argv[1])
+phase, op_id, server_outcome = sys.argv[2:5]
+current, candidate = Path(sys.argv[5]), Path(sys.argv[6]) if sys.argv[6] else None
+
+def sha(path):
+    if not path or not path.is_file():
+        return ''
+    import hashlib
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+service_ids = []
+if candidate and candidate.is_file():
+    try:
+        data = json.loads(candidate.read_text(encoding='utf-8'))
+        service_ids = sorted((data.get('services') or {}).keys())
+    except Exception:
+        service_ids = []
+marker = {
+    'schema_version': 1,
+    'operation_id': op_id,
+    'phase': phase,
+    'server_mutation': server_outcome,
+    'started_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+    'service_ids': service_ids,
+    'prior_state_sha256': sha(current),
+    'candidate_state_sha256': sha(candidate) if candidate else '',
+}
+dest.parent.mkdir(parents=True, exist_ok=True)
+fd, tmp = tempfile.mkstemp(prefix=dest.name + '.', suffix='.tmp', dir=str(dest.parent))
+try:
+    with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+        json.dump(marker, fh, indent=2, sort_keys=True)
+        fh.write('\n')
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, dest)
+finally:
+    if os.path.exists(tmp):
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+PY
+}
+
+frp_pending_clear() {
+  rm -f "$(frp_client_pending_path)"
+}
+
+frp_latest_backup_dir() {
+  python3 - "$(frp_client_backup_dir)" <<'PY'
+import sys
+from pathlib import Path
+root = Path(sys.argv[1])
+if not root.is_dir():
+    raise SystemExit(0)
+dirs = sorted([p for p in root.iterdir() if p.is_dir()], key=lambda p: p.name)
+if not dirs:
+    raise SystemExit(0)
+sys.stdout.write(str(dirs[-1]))
+PY
+}
+
+frp_token_from_toml_file() {
+  python3 - "$1" <<'PY'
+import re, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+if not path.is_file():
+    raise SystemExit(1)
+text = path.read_text(encoding='utf-8')
+for line in text.splitlines():
+    m = re.match(r'^\s*auth\.token\s*=\s*"(.*)"\s*$', line)
+    if m:
+        sys.stdout.write(m.group(1))
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+frp_regenerate_access_from_state() {
+  local state server
+  state="$(frp_client_state_path)"
+  [[ -f "$state" ]] || return 1
+  frp_load_client_state "$state" || return 1
+  server="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8")).get("frp_server",""))' "$state")"
+  render_access_info "$(frp_client_access_path)" "$server" "$state"
+}
+
+frp_regenerate_toml_from_state() {
+  local state token server port host_id enabled_list
+  state="$(frp_client_state_path)"
+  [[ -f "$state" ]] || return 1
+  frp_load_client_state "$state" || return 1
+  token="$1"
+  [[ -n "$token" ]] || return 1
+  server="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["frp_server"])' "$state")"
+  port="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["frp_server_port"])' "$state")"
+  host_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["host_id"])' "$state")"
+  enabled_list="$(mktemp)"
+  frp_enabled_services_list "$state" >"$enabled_list"
+  if ! render_frpc_toml "$(frp_client_toml_path)" "$server" "$port" "$token" "$host_id" "$enabled_list"; then
+    rm -f "$enabled_list"
+    return 1
+  fi
+  rm -f "$enabled_list"
+  return 0
+}
+
+frp_artifacts_consistent() {
+  python3 - "$(frp_client_state_path)" "$(frp_client_toml_path)" "$(frp_client_access_path)" <<'PY'
+import json, re, sys
+from pathlib import Path
+state_p, toml_p, access_p = (Path(a) for a in sys.argv[1:4])
+if not state_p.is_file():
+    raise SystemExit(2)
+try:
+    data = json.loads(state_p.read_text(encoding='utf-8'))
+except Exception:
+    raise SystemExit(2)
+if not isinstance(data, dict) or data.get('schema_version') != 1:
+    raise SystemExit(2)
+services = data.get('services') or {}
+if not isinstance(services, dict):
+    raise SystemExit(2)
+toml_text = toml_p.read_text(encoding='utf-8') if toml_p.is_file() else ''
+missing_toml = not toml_p.is_file()
+missing_access = not access_p.is_file()
+enabled = []
+for sid, rec in services.items():
+    if rec.get('enabled', True) is False:
+        continue
+    enabled.append(str(rec.get('id') or sid))
+missing_proxy = False
+for sid in enabled:
+    if f'-{sid}"' not in toml_text and f'-{sid}' not in toml_text:
+        missing_proxy = True
+        break
+if missing_toml or missing_access or missing_proxy:
+    raise SystemExit(1)
+raise SystemExit(0)
+PY
+}
+
+frp_lifecycle_recover() {
+  local state toml access pending backup token rc=0
+  state="$(frp_client_state_path)"
+  toml="$(frp_client_toml_path)"
+  access="$(frp_client_access_path)"
+  pending="$(frp_client_pending_path)"
+  if [[ ! -f "$state" ]]; then
+    return 0
+  fi
+  if ! frp_load_client_state "$state" 2>/dev/null; then
+    echo "ERROR: client-state.json is unreadable." >&2
+    frp_emit_failure_class REGISTRY_INVALID
+    return 1
+  fi
+  if [[ ! -f "$access" ]]; then
+    if frp_regenerate_access_from_state; then
+      echo "Regenerated missing access-info.txt from local client state."
+    else
+      echo "ERROR: access-info.txt is missing and could not be regenerated." >&2
+      frp_emit_failure_class RECOVERY_REQUIRED
+      return 2
+    fi
+  fi
+  if [[ ! -f "$toml" ]]; then
+    token=""
+    backup="$(frp_latest_backup_dir || true)"
+    if [[ -n "$backup" && -f "$backup/frpc.toml" ]]; then
+      token="$(frp_token_from_toml_file "$backup/frpc.toml" || true)"
+    fi
+    if [[ -z "$token" ]]; then
+      echo "ERROR: frpc.toml is missing and the FRP token is not available from backups." >&2
+      echo "RECOVERY_REQUIRED: restore frpc.toml from backup or re-enroll this client." >&2
+      frp_emit_failure_class RECOVERY_REQUIRED
+      return 2
+    fi
+    if frp_regenerate_toml_from_state "$token"; then
+      echo "Regenerated missing frpc.toml from local client state."
+    else
+      echo "ERROR: frpc.toml is missing and could not be regenerated." >&2
+      frp_emit_failure_class RECOVERY_REQUIRED
+      return 2
+    fi
+  fi
+  if ! frp_artifacts_consistent; then
+    token="$(frp_read_existing_token 2>/dev/null || true)"
+    if [[ -z "$token" ]]; then
+      backup="$(frp_latest_backup_dir || true)"
+      if [[ -n "$backup" && -f "$backup/frpc.toml" ]]; then
+        token="$(frp_token_from_toml_file "$backup/frpc.toml" || true)"
+      fi
+    fi
+    if [[ -n "$token" ]] && frp_regenerate_toml_from_state "$token" && frp_regenerate_access_from_state; then
+      echo "Repaired local runtime artifacts from client-state.json."
+    else
+      echo "ERROR: local client artifacts are inconsistent." >&2
+      frp_emit_failure_class RECOVERY_REQUIRED
+      return 2
+    fi
+  fi
+  if [[ -f "$pending" ]]; then
+    if frp_artifacts_consistent; then
+      frp_pending_clear
+    else
+      echo "ERROR: an Apply was interrupted and local state needs recovery." >&2
+      echo "RECOVERY_REQUIRED: run frp-client apply with the desired configuration." >&2
+      frp_emit_failure_class RECOVERY_REQUIRED
+      return 2
+    fi
+  fi
+  return 0
+}
+
+frp_lifecycle_report() {
+  local pending
+  pending="$(frp_client_pending_path)"
+  if [[ -f "$pending" ]]; then
+    echo "Lifecycle        : RECOVERY_REQUIRED"
+    python3 - "$pending" <<'PY'
+import json, sys
+from pathlib import Path
+try:
+    data = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+except Exception:
+    raise SystemExit(0)
+phase = data.get('phase') or 'unknown'
+op = data.get('operation_id') or ''
+print(f"Pending apply    : phase={phase} operation_id={op}")
+PY
+    return 0
+  fi
+  if frp_artifacts_consistent; then
+    echo "Lifecycle        : consistent"
+  else
+    echo "Lifecycle        : RECOVERY_REQUIRED"
+  fi
 }
 
 frp_client_verify_config() {

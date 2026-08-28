@@ -34,6 +34,7 @@ jobs:
           ./tests/test-create-client.sh
           ./tests/test-management-commands.sh
           ./tests/test-frp-client.sh
+          ./tests/test-lifecycle.sh
           ./tests/test-guided-ux.sh
           ./tests/test-client-upgrade.sh
           ./tests/test-frpctl.sh

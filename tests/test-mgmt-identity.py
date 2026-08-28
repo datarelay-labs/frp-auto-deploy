@@ -210,11 +210,21 @@ def main():
         pass_('signed mutation accepted')
         pass_('FRP token not in management response')
 
+        (code, result), _, _ = env.enroll_signed(body)
+        if code != 200:
+            fail('signed lost-response retry', result)
+        retry_ports = {item['id']: item['remote_port'] for item in result['services']}
+        if retry_ports['ssh'] != ssh_port or retry_ports['grafana'] != grafana_port:
+            fail('signed retry reallocated', retry_ports)
+        pass_('signed lost-response retry reuses ports')
+
         replay_code, replay_result = env.allocator.enroll(
             '', headers['X-Timestamp'], '', signed_body, headers=headers
         )
         if replay_code != 403 or 'replay' not in replay_result.get('error', ''):
             fail('replay', replay_result)
+        if replay_result.get('error_class') != 'REPLAY_REJECTED':
+            fail('replay class', replay_result)
         pass_('replayed nonce rejected')
 
         stale_body = env.body(include_pub=False)
@@ -267,6 +277,39 @@ def main():
             fail('malformed signature', result)
         pass_('malformed signature rejected')
 
+        edit_body = env.body(include_pub=False, services=[{
+            'id': 'ssh', 'name': 'SSH', 'protocol': 'tcp',
+            'local_ip': '127.0.0.1', 'local_port': 2222, 'preset': 'ssh', 'ssh_user': 'aella',
+        }, {
+            'id': 'grafana', 'name': 'Grafana', 'protocol': 'tcp',
+            'local_ip': '127.0.0.1', 'local_port': 3000, 'preset': 'custom',
+        }])
+        headers, ts, nonce, signature = env.signed_headers(edit_body)
+        before = env.registry.read_bytes()
+
+        def boom(path):
+            if str(path).endswith('registry.json'):
+                raise OSError('simulated registry write failure')
+
+        original = MOD._test_before_registry_write
+        MOD._test_before_registry_write = boom
+        try:
+            code, result = env.allocator.enroll('', str(ts), '', edit_body, headers=headers)
+        finally:
+            MOD._test_before_registry_write = original
+        if code != 500:
+            fail('nonce write-fail status', result)
+        if env.registry.read_bytes() != before:
+            fail('nonce write-fail mutated registry')
+        code, result = env.allocator.enroll('', str(ts), '', edit_body, headers=headers)
+        if code != 200:
+            fail('same nonce after failed save', result)
+        if env.load_client()['services']['ssh']['local_port'] != 2222:
+            fail('retry after write-fail did not apply')
+        if env.load_client()['services']['ssh']['remote_port'] != ssh_port:
+            fail('retry after write-fail reallocated ssh')
+        pass_('failed mutation does not burn nonce')
+
         env.allocator.load_registry()
         state = json.loads(env.registry.read_text())
         state['clients']['machine-id-p23']['mgmt_status'] = 'revoked'
@@ -275,6 +318,8 @@ def main():
         (code, result), _, _ = env.enroll_signed(env.body(include_pub=False))
         if code != 403 or 'revoked' not in result.get('error', ''):
             fail('revoked identity', result)
+        if result.get('error_class') != 'REVOKED':
+            fail('revoked class', result)
         stored = env.load_client()
         if stored['services']['grafana']['remote_port'] != grafana_port:
             fail('revoke released ports')

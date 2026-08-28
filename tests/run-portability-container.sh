@@ -86,6 +86,7 @@ python3 tests/test-enrollment-security.py
 python3 tests/test-pki-https.py
 ./tests/test-port-architecture.sh
 ./tests/test-ca-bootstrap.sh
+./tests/test-lifecycle.sh
 
 echo
 echo "CONTAINER_PORTABILITY=PASS"

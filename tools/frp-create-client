@@ -5,6 +5,7 @@ import os
 import secrets
 import shlex
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -102,7 +103,18 @@ record = {
     'note': a.note,
 }
 path = enroll_dir / f'{enrollment_id}.json'
-path.write_text(json.dumps(record, indent=2, sort_keys=True) + '\n')
+fd, tmp = tempfile.mkstemp(prefix=path.name + '.', suffix='.tmp', dir=str(path.parent))
+try:
+    with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+        json.dump(record, fh, indent=2, sort_keys=True)
+        fh.write('\n')
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+finally:
+    if os.path.exists(tmp):
+        os.unlink(tmp)
 path.chmod(0o600)
 
 public_host = cfg_public_host(cfg)

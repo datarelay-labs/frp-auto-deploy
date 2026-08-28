@@ -344,6 +344,8 @@ def case_j_exhaustion():
         )
         if code != 500 or 'No available FRP service ports' not in str(result.get('error', '')):
             fail('CASE J exhaustion', result)
+        if result.get('error_class') != 'PORT_RANGE_EXHAUSTED':
+            fail('CASE J error_class', result)
         after = env.load_state()
         if after != before:
             fail('CASE J registry mutated')
@@ -369,8 +371,8 @@ def case_k_concurrent():
             return code, result
 
         ports = []
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = [pool.submit(worker, i) for i in range(8)]
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            futures = [pool.submit(worker, i) for i in range(16)]
             for fut in as_completed(futures):
                 code, result = fut.result()
                 if code != 200:
@@ -378,6 +380,8 @@ def case_k_concurrent():
                 ports.append(result['services'][0]['remote_port'])
         if len(ports) != len(set(ports)):
             fail('CASE K duplicate ports', ports)
+        if len(ports) != 16:
+            fail('CASE K count', ports)
         pass_('CASE K concurrent enrollment')
     finally:
         env.cleanup()
@@ -471,6 +475,129 @@ def case_malformed_registry_rejected():
         env.cleanup()
 
 
+def case_duplicate_port_rejected():
+    env = Env()
+    try:
+        env.registry.write_text(json.dumps({
+            'schema_version': 2,
+            'reserved': [],
+            'clients': {
+                'a': {'hostname': 'a', 'services': {
+                    'ssh': {'remote_port': 18000, 'enabled': True, 'local_ip': '127.0.0.1', 'local_port': 22},
+                }},
+                'b': {'hostname': 'b', 'services': {
+                    'web': {'remote_port': 18000, 'enabled': True, 'local_ip': '127.0.0.1', 'local_port': 80},
+                }},
+            },
+        }) + '\n')
+        try:
+            env.allocator.load_registry()
+            fail('duplicate ports should raise')
+        except MOD.RegistrySchemaError as exc:
+            if 'duplicate public port' not in str(exc):
+                fail('duplicate port message', exc)
+        before = env.registry.read_text()
+        code, result = env.enroll([svc('ssh', preset='ssh')])
+        if code != 500 or result.get('error_class') != 'REGISTRY_INVALID':
+            fail('duplicate port enroll', result)
+        if env.registry.read_text() != before:
+            fail('duplicate port registry rewritten')
+        pass_('duplicate port ownership fail-closed')
+    finally:
+        env.cleanup()
+
+
+def case_registry_write_failure():
+    env = Env()
+    try:
+        code, result = env.enroll([svc('ssh', preset='ssh')], machine_id='machine-write')
+        if code != 200:
+            fail('write-fail setup', result)
+        before = env.registry.read_bytes()
+
+        def boom(path):
+            if str(path).endswith('registry.json'):
+                raise OSError('simulated registry write failure')
+
+        original = MOD._test_before_registry_write
+        MOD._test_before_registry_write = boom
+        try:
+            eid, secret = env.add_enrollment('9988776655443322', 'secret-9988776655443322')
+            code, result = env.enroll(
+                [svc('ssh', preset='ssh'), svc('grafana', local_port=3000)],
+                machine_id='machine-write',
+                enrollment_id=eid,
+                secret=secret,
+            )
+        finally:
+            MOD._test_before_registry_write = original
+        if code != 500 or result.get('error_class') != 'SERVER_MUTATION_FAILED':
+            fail('write-fail response', result)
+        if env.registry.read_bytes() != before:
+            fail('write-fail mutated registry')
+        pass_('registry write failure leaves previous registry')
+    finally:
+        env.cleanup()
+
+
+def case_lost_response_retry():
+    env = Env()
+    try:
+        first = [svc('ssh', preset='ssh'), svc('grafana', local_port=3000)]
+        code, result = env.enroll(first, machine_id='machine-lost')
+        if code != 200:
+            fail('lost-response first', result)
+        original = ports_from_response(result)
+        eid, secret = env.add_enrollment('aabbccddeeff0099', 'secret-aabbccddeeff0099')
+        code, result = env.enroll(
+            first, machine_id='machine-lost', enrollment_id=eid, secret=secret
+        )
+        if code != 200:
+            fail('lost-response retry', result)
+        if ports_from_response(result) != original:
+            fail('lost-response ports changed', (original, ports_from_response(result)))
+        state = env.load_state()
+        services = state['clients']['machine-lost']['services']
+        if set(services) != {'ssh', 'grafana'}:
+            fail('lost-response duplicate services', services)
+        pass_('lost response retry is idempotent')
+    finally:
+        env.cleanup()
+
+
+def case_range_6000_exhaustion():
+    env = Env(port_start=6000, port_end=6002)
+    try:
+        for i, sid in enumerate(('ssh', 'web', 'api')):
+            eid, secret = env.add_enrollment(f'{i+1:016x}', f'secret-{i+1:016x}')
+            code, result = env.enroll(
+                [svc(sid, local_port=20 + i)],
+                machine_id=f'machine-r{i}',
+                hostname=f'host-r{i}',
+                enrollment_id=eid,
+                secret=secret,
+            )
+            if code != 200:
+                fail(f'range fill {sid}', result)
+        before = env.load_state()
+        eid, secret = env.add_enrollment('0000000000000099', 'secret-range-extra')
+        code, result = env.enroll(
+            [svc('extra', local_port=9)],
+            machine_id='machine-extra',
+            enrollment_id=eid,
+            secret=secret,
+        )
+        if code != 500 or result.get('error_class') != 'PORT_RANGE_EXHAUSTED':
+            fail('range 6000-6002 exhaustion', result)
+        if env.load_state() != before:
+            fail('range exhaustion mutated registry')
+        if 'machine-extra' in env.load_state()['clients']:
+            fail('range exhaustion created partial client')
+        pass_('range 6000-6002 exhaustion')
+    finally:
+        env.cleanup()
+
+
 def main():
     case_a_single_ssh()
     case_b_no_ssh()
@@ -488,6 +615,10 @@ def main():
     case_v1_registry_rejected()
     case_future_schema_rejected()
     case_malformed_registry_rejected()
+    case_duplicate_port_rejected()
+    case_registry_write_failure()
+    case_lost_response_retry()
+    case_range_6000_exhaustion()
     print()
     print('ALLOCATOR_GENERIC_TESTS=PASS')
 

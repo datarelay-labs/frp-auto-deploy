@@ -4,6 +4,7 @@ if sys.version_info < (3, 7):
     sys.stderr.write('ERROR: python 3.7 or newer is required\n')
     raise SystemExit(1)
 import argparse
+import fcntl
 import hashlib
 import hmac
 import importlib.util
@@ -73,6 +74,64 @@ class ServiceValidationError(ValueError):
     pass
 
 
+class PortRangeExhausted(RuntimeError):
+    pass
+
+
+class FileLock:
+    """Exclusive filesystem lock. Released automatically on process death."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self.fd = None
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.fd = os.open(str(self.path), os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(self.fd, fcntl.LOCK_EX)
+        except Exception:
+            os.close(self.fd)
+            self.fd = None
+            raise
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.fd is not None:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+            self.fd = None
+        return False
+
+
+def api_error(message, error_class):
+    return {'error': str(message), 'error_class': error_class}
+
+
+def classify_auth_error(error):
+    text = str(error or '').lower()
+    if 'revoked' in text:
+        return 'REVOKED'
+    if 'replay' in text:
+        return 'REPLAY_REJECTED'
+    return 'AUTH_FAILED'
+
+
+def registry_lock_path(registry_file):
+    return Path(registry_file).resolve().parent / 'registry.lock'
+
+
+def _test_before_registry_write(path):
+    """Production no-op. Unit tests may replace this symbol."""
+    return None
+
+
 def utc_now_iso():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
 
@@ -97,6 +156,7 @@ def load_json(path, default=None):
 
 def atomic_write_json(path, data, mode=0o600):
     p = Path(path)
+    _test_before_registry_write(str(p))
     p.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=p.name + '.', suffix='.tmp', dir=str(p.parent))
     try:
@@ -219,6 +279,59 @@ def require_registry_v2(state):
         reserved = []
     if not isinstance(reserved, list):
         raise RegistrySchemaError(unsupported_registry_message(state))
+    return state
+
+
+def validate_registry_invariants(state, cfg=None):
+    """Fail closed on severe registry corruption. Do not silently repair."""
+    state = require_registry_v2(state)
+    seen_ports = {}
+    port_start = None
+    port_end = None
+    protected = set()
+    if cfg:
+        try:
+            port_start = int(cfg.get('port_start'))
+            port_end = int(cfg.get('port_end'))
+        except (TypeError, ValueError):
+            port_start = None
+            port_end = None
+        for key in ('allocator_listen_port', 'frp_control_listen_port', 'listen_port'):
+            port = coerce_port(cfg.get(key))
+            if port is not None:
+                protected.add(port)
+    for item in state.get('reserved') or []:
+        port = coerce_port(item)
+        if port is not None:
+            seen_ports[port] = ('reserved', None)
+    for mid, client in (state.get('clients') or {}).items():
+        if not isinstance(client, dict):
+            raise RegistrySchemaError('REGISTRY_INVALID: client record is not an object')
+        status = client.get('mgmt_status')
+        if status is not None and status not in ('enrolled', 'legacy', 'revoked'):
+            raise RegistrySchemaError('REGISTRY_INVALID: invalid management identity status')
+        services = client.get('services') or {}
+        if not isinstance(services, dict):
+            raise RegistrySchemaError('REGISTRY_INVALID: client services must be a map')
+        seen_ids = set()
+        for sid, svc in services.items():
+            key = str(sid).strip().lower()
+            if key in seen_ids:
+                raise RegistrySchemaError('REGISTRY_INVALID: duplicate service id for client')
+            seen_ids.add(key)
+            if not isinstance(svc, dict):
+                raise RegistrySchemaError('REGISTRY_INVALID: service record is not an object')
+            port = coerce_port(svc.get('remote_port'))
+            if port is None:
+                continue
+            if port in seen_ports:
+                raise RegistrySchemaError('REGISTRY_INVALID: duplicate public port ownership')
+            seen_ports[port] = (mid, key)
+            if port_start is not None and port_end is not None:
+                if port < port_start or port > port_end:
+                    raise RegistrySchemaError('REGISTRY_INVALID: allocated port outside configured range')
+            if port in protected:
+                raise RegistrySchemaError('REGISTRY_INVALID: allocated port collides with a reserved control port')
     return state
 
 
@@ -349,6 +462,9 @@ class Allocator:
         self.token_file = self.cfg['token_file']
         self.nonce_file = Path(self.registry_file).resolve().parent / 'mgmt-nonces.json'
 
+    def registry_lock(self):
+        return FileLock(registry_lock_path(self.registry_file))
+
     def load_registry(self):
         if not Path(self.registry_file).exists():
             return empty_registry()
@@ -356,12 +472,14 @@ class Allocator:
             state = load_json(self.registry_file)
         except (OSError, json.JSONDecodeError) as exc:
             raise RegistrySchemaError('unable to read an existing FRP registry') from exc
-        return require_registry_v2(state)
+        require_registry_v2(state)
+        return validate_registry_invariants(state, self.cfg)
 
     def save_registry(self, state):
         state = dict(state)
         state['schema_version'] = REGISTRY_SCHEMA_VERSION
         require_registry_v2(state)
+        validate_registry_invariants(state, self.cfg)
         atomic_write_json(self.registry_file, state)
 
     def used_ports(self, state):
@@ -388,7 +506,7 @@ class Allocator:
             if not port_is_available(port):
                 continue
             return port
-        raise RuntimeError('No available FRP service ports')
+        raise PortRangeExhausted('No available FRP service ports')
 
     def enrollment_path(self, enrollment_id):
         if not enrollment_id or any(c not in '0123456789abcdef' for c in enrollment_id.lower()):
@@ -421,13 +539,13 @@ class Allocator:
             return {'schema_version': 1, 'nonces': {}}
         try:
             data = load_json(path)
-        except (OSError, json.JSONDecodeError):
-            return {'schema_version': 1, 'nonces': {}}
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RegistrySchemaError('unable to read an existing management nonce store') from exc
         if not isinstance(data, dict):
-            return {'schema_version': 1, 'nonces': {}}
+            raise RegistrySchemaError('unable to read an existing management nonce store')
         nonces = data.get('nonces')
         if not isinstance(nonces, dict):
-            nonces = {}
+            raise RegistrySchemaError('unable to read an existing management nonce store')
         return {'schema_version': 1, 'nonces': nonces}
 
     def save_nonces(self, data):
@@ -452,14 +570,23 @@ class Allocator:
             self.save_nonces(data)
         return data
 
-    def consume_nonce(self, machine_id, nonce, now):
-        """Replay defense: a captured signed request cannot be reused.
+    def check_nonce(self, machine_id, nonce, now):
+        """Return an error string if the nonce is unusable. Do not persist yet.
 
-        Nonces are stored as machine_id:nonce -> expiry. Entries expire after
-        MGMT_NONCE_TTL seconds (900), which is longer than MAX_CLOCK_SKEW so a
-        request stays non-replayable for its entire accepted timestamp window.
-        Per-client count is capped; oldest entries are dropped first.
+        Persistence happens in commit_nonce() after a successful registry save
+        so a failed mutation does not burn a valid signed request.
         """
+        if not NONCE_RE.fullmatch(nonce or ''):
+            return 'invalid nonce'
+        data = self.expire_nonces(now)
+        nonces = data['nonces']
+        key = f'{machine_id}:{nonce}'
+        if key in nonces:
+            return 'replayed request'
+        return None
+
+    def commit_nonce(self, machine_id, nonce, now):
+        """Persist a nonce after the matching mutation has been committed."""
         if not NONCE_RE.fullmatch(nonce or ''):
             return 'invalid nonce'
         data = self.expire_nonces(now)
@@ -478,6 +605,22 @@ class Allocator:
         nonces[key] = now + MGMT_NONCE_TTL
         self.save_nonces(data)
         return None
+
+    def consume_nonce(self, machine_id, nonce, now):
+        """Replay defense: a captured signed request cannot be reused.
+
+        Nonces are stored as machine_id:nonce -> expiry. Entries expire after
+        MGMT_NONCE_TTL seconds (900), which is longer than MAX_CLOCK_SKEW so a
+        request stays non-replayable for its entire accepted timestamp window.
+        Per-client count is capped; oldest entries are dropped first.
+
+        Callers that need check-then-commit around a registry mutation should
+        use check_nonce() + commit_nonce() instead.
+        """
+        error = self.check_nonce(machine_id, nonce, now)
+        if error:
+            return error
+        return self.commit_nonce(machine_id, nonce, now)
 
     @staticmethod
     def mgmt_status(client):
@@ -528,36 +671,36 @@ class Allocator:
         try:
             ts = int(str(headers.get('X-Timestamp') or headers.get('X-Mgmt-Timestamp') or ''))
         except Exception:
-            return 'invalid timestamp', None
+            return 'invalid timestamp', None, None
         nonce = str(headers.get('X-Mgmt-Nonce') or '').strip().lower()
         signature = str(headers.get('X-Mgmt-Signature') or '').strip()
         if not signature:
-            return 'missing signature', None
+            return 'missing signature', None, None
         now = int(time.time())
         if abs(now - ts) > MAX_CLOCK_SKEW:
-            return 'request timestamp outside allowed window', None
+            return 'request timestamp outside allowed window', None, None
         if not isinstance(client, dict):
-            return 'unknown client identity', None
+            return 'unknown client identity', None, None
         status = self.mgmt_status(client)
         if status == 'revoked':
             return (
                 "this client's management identity has been revoked. "
                 'Run the server enrollment command to create a new Enrollment Code, '
                 'then re-enroll this client.'
-            ), None
+            ), None, None
         if status != 'enrolled' or not client.get('mgmt_pubkey'):
-            return 'this client does not have a management identity', None
+            return 'this client does not have a management identity', None, None
         message = MGMT.signed_message(machine_id, body, ts, nonce)
         try:
             ok = MGMT.verify_signature(client['mgmt_pubkey'], message, signature)
         except ValueError as exc:
-            return str(exc), None
+            return str(exc), None, None
         if not ok:
-            return 'invalid signature', None
-        nonce_error = self.consume_nonce(machine_id, nonce, now)
+            return 'invalid signature', None, None
+        nonce_error = self.check_nonce(machine_id, nonce, now)
         if nonce_error:
-            return nonce_error, None
-        return None, now
+            return nonce_error, None, None
+        return None, now, nonce
 
     def verify_request(self, enrollment_id, timestamp, signature, body):
         record, path = self.load_enrollment(enrollment_id)
@@ -592,138 +735,165 @@ class Allocator:
                 enrollment_id, timestamp, signature, body
             )
             if error:
-                return 403, {'error': error}
+                return 403, api_error(error, classify_auth_error(error))
 
         try:
             payload = json.loads(body.decode())
         except json.JSONDecodeError:
-            return 400, {'error': 'invalid JSON'}
+            return 400, api_error('invalid JSON', 'AUTH_FAILED')
         if not isinstance(payload, dict):
-            return 400, {'error': 'invalid JSON'}
+            return 400, api_error('invalid JSON', 'AUTH_FAILED')
 
         machine_id = str(payload.get('machine_id', '')).strip()
         hostname = str(payload.get('hostname', '')).strip()
         if not machine_id:
-            return 400, {'error': 'machine_id is required'}
+            return 400, api_error('machine_id is required', 'AUTH_FAILED')
         if any(c in machine_id for c in '\r\n/\\'):
-            return 400, {'error': 'invalid machine_id'}
+            return 400, api_error('invalid machine_id', 'AUTH_FAILED')
 
         try:
             requested = normalize_services(payload.get('services'))
         except ServiceValidationError as exc:
-            return 400, {'error': str(exc)}
+            cls = 'SERVICE_ALREADY_EXISTS' if 'duplicate' in str(exc).lower() else 'AUTH_FAILED'
+            return 400, api_error(str(exc), cls)
 
         issued_mac = None
-        if not identity_auth:
-            bound_machine_id = record.get('bound_machine_id')
-            if bound_machine_id and bound_machine_id != machine_id:
-                return 403, {'error': 'enrollment code is already bound to another machine'}
+        pending_nonce = None
+        allocated = []
+        response_mac_key = None
 
         try:
             with LOCK:
-                state = self.load_registry()
-                clients = state.setdefault('clients', {})
-                client = clients.get(machine_id)
-                now_iso = utc_now_iso()
+                with self.registry_lock():
+                    if not identity_auth:
+                        record, enroll_path = self.load_enrollment(enrollment_id)
+                        if not record:
+                            return 403, api_error('unknown enrollment id', 'AUTH_FAILED')
+                        bound_machine_id = record.get('bound_machine_id')
+                        if bound_machine_id and bound_machine_id != machine_id:
+                            return 403, api_error(
+                                'enrollment code is already bound to another machine',
+                                'AUTH_FAILED',
+                            )
 
-                if identity_auth:
-                    error, _now = self.verify_mgmt_against_client(
-                        client, machine_id, headers, body
-                    )
-                    if error:
-                        code = 403 if 'invalid JSON' not in error else 400
-                        if error.startswith('malformed') or error.startswith('invalid nonce'):
-                            code = 403
-                        if error.startswith('unknown') or 'revoked' in error or 'does not have' in error:
-                            code = 403
-                        return code, {'error': error}
-                    if payload.get('mgmt_pubkey'):
-                        try:
-                            presented = MGMT.canonicalize_pubkey_pem(payload.get('mgmt_pubkey'))
-                            stored = MGMT.canonicalize_pubkey_pem(client.get('mgmt_pubkey'))
-                        except Exception:
-                            return 403, {'error': 'invalid management public key'}
-                        if presented != stored:
-                            return 403, {'error': 'management public key does not match this client'}
-                elif client is None:
-                    client = {
-                        'hostname': hostname,
-                        'created_at': now_iso,
-                        'last_enrolled_at': now_iso,
-                        'mgmt_status': 'legacy',
-                        'services': {},
-                    }
-                    clients[machine_id] = client
-                else:
+                    state = self.load_registry()
+                    clients = state.setdefault('clients', {})
+                    client = clients.get(machine_id)
+                    now_iso = utc_now_iso()
+
+                    if identity_auth:
+                        error, _now, pending_nonce = self.verify_mgmt_against_client(
+                            client, machine_id, headers, body
+                        )
+                        if error:
+                            return 403, api_error(error, classify_auth_error(error))
+                        if payload.get('mgmt_pubkey'):
+                            try:
+                                presented = MGMT.canonicalize_pubkey_pem(payload.get('mgmt_pubkey'))
+                                stored = MGMT.canonicalize_pubkey_pem(client.get('mgmt_pubkey'))
+                            except Exception:
+                                return 403, api_error(
+                                    'invalid management public key', 'AUTH_FAILED'
+                                )
+                            if presented != stored:
+                                return 403, api_error(
+                                    'management public key does not match this client',
+                                    'AUTH_FAILED',
+                                )
+                    elif client is None:
+                        client = {
+                            'hostname': hostname,
+                            'created_at': now_iso,
+                            'last_enrolled_at': now_iso,
+                            'mgmt_status': 'legacy',
+                            'services': {},
+                        }
+                        clients[machine_id] = client
+                    else:
+                        client['hostname'] = hostname or client.get('hostname', '')
+                        client['last_enrolled_at'] = now_iso
+                        if not isinstance(client.get('services'), dict):
+                            client['services'] = {}
+
+                    if client is None:
+                        return 403, api_error('unknown client identity', 'AUTH_FAILED')
                     client['hostname'] = hostname or client.get('hostname', '')
                     client['last_enrolled_at'] = now_iso
                     if not isinstance(client.get('services'), dict):
                         client['services'] = {}
 
-                if client is None:
-                    return 403, {'error': 'unknown client identity'}
-                client['hostname'] = hostname or client.get('hostname', '')
-                client['last_enrolled_at'] = now_iso
-                if not isinstance(client.get('services'), dict):
-                    client['services'] = {}
+                    if not identity_auth:
+                        issued_mac, ident_error = self.register_mgmt_identity(
+                            client, payload, record['secret'], machine_id
+                        )
+                        if ident_error:
+                            return 400, api_error(ident_error, 'AUTH_FAILED')
 
-                if not identity_auth:
-                    issued_mac, ident_error = self.register_mgmt_identity(
-                        client, payload, record['secret'], machine_id
-                    )
-                    if ident_error:
-                        return 400, {'error': ident_error}
+                    existing_services = dict(client.get('services') or {})
+                    used = self.used_ports(state)
+                    updated = {}
+                    requested_ids = {svc['id'] for svc in requested}
 
-                existing_services = dict(client.get('services') or {})
-                used = self.used_ports(state)
-                updated = {}
-                requested_ids = {svc['id'] for svc in requested}
+                    for sid, rec in existing_services.items():
+                        if sid in requested_ids:
+                            continue
+                        kept = dict(rec)
+                        kept['enabled'] = False
+                        updated[sid] = kept
 
-                for sid, rec in existing_services.items():
-                    if sid in requested_ids:
-                        continue
-                    kept = dict(rec)
-                    kept['enabled'] = False
-                    updated[sid] = kept
+                    allocated = []
+                    for spec in requested:
+                        sid = spec['id']
+                        previous = existing_services.get(sid) or {}
+                        remote_port = coerce_port(previous.get('remote_port'))
+                        if remote_port is None:
+                            remote_port = self.allocate_port(used)
+                            used.add(remote_port)
+                        stored = {
+                            'name': spec['name'],
+                            'protocol': 'tcp',
+                            'local_ip': spec['local_ip'],
+                            'local_port': spec['local_port'],
+                            'remote_port': remote_port,
+                            'preset': spec['preset'],
+                            'enabled': True,
+                        }
+                        if spec['preset'] == 'ssh':
+                            stored['ssh_user'] = spec.get('ssh_user', 'root')
+                        updated[sid] = stored
+                        allocated.append({
+                            'id': sid,
+                            'remote_port': remote_port,
+                        })
 
-                allocated = []
-                for spec in requested:
-                    sid = spec['id']
-                    previous = existing_services.get(sid) or {}
-                    remote_port = coerce_port(previous.get('remote_port'))
-                    if remote_port is None:
-                        remote_port = self.allocate_port(used)
-                        used.add(remote_port)
-                    stored = {
-                        'name': spec['name'],
-                        'protocol': 'tcp',
-                        'local_ip': spec['local_ip'],
-                        'local_port': spec['local_port'],
-                        'remote_port': remote_port,
-                        'preset': spec['preset'],
-                        'enabled': True,
-                    }
-                    if spec['preset'] == 'ssh':
-                        stored['ssh_user'] = spec.get('ssh_user', 'root')
-                    updated[sid] = stored
-                    allocated.append({
-                        'id': sid,
-                        'remote_port': remote_port,
-                    })
+                    client['services'] = updated
+                    self.save_registry(state)
 
-                client['services'] = updated
-                self.save_registry(state)
+                    if pending_nonce:
+                        nonce_error = self.commit_nonce(
+                            machine_id, pending_nonce, int(time.time())
+                        )
+                        if nonce_error:
+                            return 403, api_error(
+                                nonce_error, classify_auth_error(nonce_error)
+                            )
 
-                if record is not None and enroll_path is not None:
-                    record['bound_machine_id'] = machine_id
-                    record['used_at'] = record.get('used_at') or now_iso
-                    record['last_used_at'] = now_iso
-                    self.save_enrollment(enroll_path, record)
-                response_mac_key = client.get('mgmt_mac_key') if identity_auth else None
+                    if record is not None and enroll_path is not None:
+                        record['bound_machine_id'] = machine_id
+                        record['used_at'] = record.get('used_at') or now_iso
+                        record['last_used_at'] = now_iso
+                        self.save_enrollment(enroll_path, record)
+                    response_mac_key = client.get('mgmt_mac_key') if identity_auth else None
         except RegistrySchemaError as exc:
-            return 500, {'error': str(exc)}
+            return 500, api_error(str(exc), 'REGISTRY_INVALID')
+        except PortRangeExhausted as exc:
+            return 500, api_error(str(exc), 'PORT_RANGE_EXHAUSTED')
+        except OSError:
+            return 500, api_error(
+                'failed to persist registry', 'SERVER_MUTATION_FAILED'
+            )
         except RuntimeError as exc:
-            return 500, {'error': str(exc)}
+            return 500, api_error(str(exc), 'SERVER_MUTATION_FAILED')
 
         response_payload = {
             'frp_server': cfg_public_host(self.cfg),
@@ -733,7 +903,10 @@ class Allocator:
         if identity_auth:
             mac_secret = response_mac_key
             if not mac_secret:
-                return 500, {'error': 'management response authentication is not available'}
+                return 500, api_error(
+                    'management response authentication is not available',
+                    'SERVER_MUTATION_FAILED',
+                )
             response_payload['response_hmac'] = MGMT.hmac_hex(
                 mac_secret, canonical_json(response_payload)
             )
@@ -746,6 +919,7 @@ class Allocator:
             response_payload['mgmt_status'] = 'enrolled'
         response_payload['response_hmac'] = hmac_hex(secret, canonical_json(response_payload))
         return 200, response_payload
+
 
 
 def make_handler(allocator):
@@ -805,11 +979,13 @@ def make_handler(allocator):
                 )
                 self.send_json(code, result)
             except json.JSONDecodeError:
-                self.send_json(400, {'error': 'invalid JSON'})
+                self.send_json(400, api_error('invalid JSON', 'AUTH_FAILED'))
             except RegistrySchemaError as exc:
-                self.send_json(500, {'error': str(exc)})
+                self.send_json(500, api_error(str(exc), 'REGISTRY_INVALID'))
+            except PortRangeExhausted as exc:
+                self.send_json(500, api_error(str(exc), 'PORT_RANGE_EXHAUSTED'))
             except Exception as exc:
-                self.send_json(500, {'error': str(exc)})
+                self.send_json(500, api_error(str(exc), 'SERVER_MUTATION_FAILED'))
 
     return Handler
 

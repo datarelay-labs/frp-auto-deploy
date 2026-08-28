@@ -8,7 +8,7 @@ It automates FRP server/client installation, persistent public port assignment f
 > The IP addresses `203.0.113.10` and `192.0.2.50` used in this README are documentation-only example addresses (RFC 5737). Replace them with your own public and internal addresses when deploying.
 
 Current pinned FRP version: **v0.70.1**
-Current project version: **1.6.0**
+Current project version: **1.7.0**
 
 ---
 
@@ -29,7 +29,7 @@ FRP Auto Deploy CLI
 ===================
 
 Role            : Server
-Project version : 1.6.0
+Project version : 1.7.0
 FRP version     : 0.70.1
 
 Type 'help' or '?' for available commands.
@@ -53,7 +53,7 @@ FRP Auto Deploy CLI
 ===================
 
 Role            : Client
-Project version : 1.6.0
+Project version : 1.7.0
 FRP version     : 0.70.1
 
 frpctl> status
@@ -473,6 +473,14 @@ Existing clients that already have `client-state.json` but no management identit
 Display-name and SSH-user metadata changes stay local: they do not contact the allocator, do not require an Enrollment Code or management signature, and do not restart `frpc`.
 
 Disable a service to stop publishing it. The public port stays reserved. Re-enable to get the same port back. Permanent per-service release is done on the server with `sudo frp-release-service <client> <service-id>`. `frp-release-client` still releases the whole client. Revoking a client's management identity (`sudo frp-revoke-client`) does not release ports.
+
+**Disable vs release.** Disable stops publication and keeps the reservation and public port. Release permanently frees that reservation. They are not interchangeable.
+
+**Revoke vs release.** Revoke blocks future signed management changes and keeps every service reservation. Release removes reservations. An administrator can still `frp-release-client` / `frp-release-service` after revoke.
+
+**Retries.** The same logical Apply (same machine and service IDs, new timestamp/nonce/signature) reuses existing public ports. It does not allocate duplicates. Exact replay of a signed request with the same nonce is still rejected.
+
+**Failed Apply.** If the allocator accepts a change but local apply cannot finish, the previous readable `client-state.json` / `frpc.toml` is kept. Reservations are not silently given to another client. Retry Apply to reconcile, or follow the `RECOVERY_REQUIRED` / `FAILURE_CLASS` line printed on failure. Generated files (`frpc.toml`, `access-info.txt`) can be rebuilt from canonical client state without an Enrollment Code when the FRP token is still available.
 
 At least one enabled service is required. Clients installed before this management state must be re-enrolled once with the current bootstrap installer.
 
@@ -1027,6 +1035,7 @@ python3 tests/test-mgmt-identity.py
 ./tests/test-create-client.sh
 ./tests/test-management-commands.sh
 ./tests/test-frp-client.sh
+./tests/test-lifecycle.sh
 ./tests/test-guided-ux.sh
 ./tests/test-client-upgrade.sh
 ./tests/test-frpctl.sh

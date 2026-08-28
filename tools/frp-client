@@ -188,6 +188,7 @@ for sid, item in services.items():
     print(f"  state         : {state}")
     print()
 PY
+  frp_lifecycle_report
 }
 
 frp_client_info() {
@@ -388,6 +389,24 @@ frp_apply_candidate() {
   local current candidate
   current="$(frp_client_state_path)"
   candidate="$CANDIDATE_FILE"
+  if [[ -f "$current" ]]; then
+    if [[ ! -f "$(frp_client_access_path)" ]]; then
+      frp_regenerate_access_from_state || true
+    fi
+    if [[ ! -f "$(frp_client_toml_path)" ]]; then
+      local rec_token="" rec_backup=""
+      rec_backup="$(frp_latest_backup_dir || true)"
+      if [[ -n "$rec_backup" && -f "$rec_backup/frpc.toml" ]]; then
+        rec_token="$(frp_token_from_toml_file "$rec_backup/frpc.toml" || true)"
+      fi
+      if [[ -n "$rec_token" ]]; then
+        frp_regenerate_toml_from_state "$rec_token" || true
+      fi
+    fi
+    if [[ -f "$(frp_client_pending_path)" ]] && frp_artifacts_consistent; then
+      frp_pending_clear
+    fi
+  fi
   if frp_state_has_diff "$current" "$candidate"; then
     echo "No pending changes."
     return 0
@@ -432,6 +451,14 @@ frp_apply_candidate() {
     return $?
   fi
 
+  if ! frp_lifecycle_recover; then
+    if [[ ! -f "$(frp_client_toml_path)" ]] && [[ "$(frp_identity_status)" == enrolled ]]; then
+      echo "ERROR: local runtime configuration is incomplete and cannot be repaired automatically." >&2
+      frp_emit_failure_class RECOVERY_REQUIRED
+      return 1
+    fi
+  fi
+
   local enroll_id="" enroll_secret=""
   if [[ "$ident_status" == enrolled ]]; then
     auth_mode="identity"
@@ -458,9 +485,17 @@ frp_apply_candidate() {
 
   local work allocated meta token server port host_id machine_id hostname_value allocator_url
   local ciphertext backup local_rollback="N/A" server_rollback="N/A" restore_needed=0
+  local operation_id
+  operation_id="$(python3 - <<'PY'
+import secrets
+print(secrets.token_hex(16))
+PY
+)"
+  export FRP_CLIENT_OPERATION_ID="$operation_id"
   work="$(mktemp -d)"
   allocated="$work/allocated.json"
   meta="$work/meta.json"
+  frp_pending_write prepare "$operation_id" pending
 
   python3 - "$candidate" "$current" <<'PY'
 import json,sys
@@ -515,10 +550,24 @@ PY
   fi
   if [[ "$enroll_rc" -ne 0 ]]; then
     rm -rf "$work"
-    unset enroll_secret
+    unset enroll_secret FRP_CLIENT_OPERATION_ID
+    frp_pending_clear
     echo "ERROR: enrollment failed; local configuration was not changed." >&2
+    frp_emit_failure_class SERVER_MUTATION_FAILED
     return 1
   fi
+  if ! frp_client_test_hook AFTER_SERVER_MUTATION; then
+    frp_pending_write server_mutation "$operation_id" ok
+    rm -rf "$work"
+    unset enroll_secret FRP_CLIENT_OPERATION_ID
+    echo "ERROR: apply interrupted after the server accepted the change; local configuration was not changed." >&2
+    echo "The server reservation is preserved. Retry Apply to reconcile." >&2
+    frp_emit_failure_class FAILED_WITH_RESERVATION_PRESERVED
+    echo "LOCAL_ROLLBACK=PASS"
+    echo "SERVER_ROLLBACK=N/A"
+    return 1
+  fi
+  frp_pending_write server_mutation "$operation_id" ok
   server="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["frp_server"])' "$meta")"
   port="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["frp_server_port"])' "$meta")"
   ciphertext="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8")).get("token_ciphertext") or "")' "$meta")"
@@ -532,11 +581,15 @@ PY
         server_rollback="FAIL"
       fi
       rm -rf "$work"
-      unset enroll_secret
+      unset enroll_secret token FRP_CLIENT_OPERATION_ID
       echo "LOCAL_ROLLBACK=PASS"
       echo "SERVER_ROLLBACK=${server_rollback}"
       if [[ "$server_rollback" != "PASS" ]]; then
         echo "WARNING: server registry may not match local configuration. Reconcile with a new enrollment." >&2
+        frp_emit_failure_class RECOVERY_REQUIRED
+      else
+        frp_pending_clear
+        frp_emit_failure_class CONFIG_GENERATION_FAILED
       fi
       return 1
     fi
@@ -571,7 +624,19 @@ PY
     frp_compensate_previous "$allocator_url" "$enroll_id" "$enroll_secret" \
       "$machine_id" "$hostname_value" "$current" "$auth_mode" || true
     rm -rf "$work"
-    unset enroll_secret token
+    unset enroll_secret token FRP_CLIENT_OPERATION_ID
+    frp_emit_failure_class SERVER_MUTATION_FAILED
+    return 1
+  fi
+
+  if ! frp_client_test_hook BEFORE_STATE_COMMIT; then
+    echo "ERROR: apply stopped before local state commit; previous local configuration was kept." >&2
+    echo "The server reservation is preserved. Retry Apply to reconcile." >&2
+    rm -rf "$work"
+    unset enroll_secret token FRP_CLIENT_OPERATION_ID
+    echo "LOCAL_ROLLBACK=PASS"
+    echo "SERVER_ROLLBACK=N/A"
+    frp_emit_failure_class FAILED_WITH_RESERVATION_PRESERVED
     return 1
   fi
 
@@ -581,17 +646,40 @@ PY
   tmp_state="$work/client-state.json"
   enabled_list="$work/enabled.json"
   frp_enabled_services_list "$candidate" >"$enabled_list"
+  if ! frp_client_test_hook CONFIG_GENERATION; then
+    echo "ERROR: generated frpc configuration failed verification." >&2
+    if frp_compensate_previous "$allocator_url" "$enroll_id" "$enroll_secret" \
+      "$machine_id" "$hostname_value" "$current" "$auth_mode"; then
+      server_rollback="PASS"
+      frp_pending_clear
+      frp_emit_failure_class CONFIG_GENERATION_FAILED
+    else
+      server_rollback="FAIL"
+      frp_emit_failure_class RECOVERY_REQUIRED
+    fi
+    rm -rf "$work"
+    unset enroll_secret token FRP_CLIENT_OPERATION_ID
+    echo "LOCAL_ROLLBACK=PASS"
+    echo "SERVER_ROLLBACK=${server_rollback}"
+    if [[ "$server_rollback" != "PASS" ]]; then
+      echo "WARNING: server registry may not match local configuration. Reconcile with a new enrollment." >&2
+    fi
+    return 1
+  fi
   render_frpc_toml "$tmp_toml" "$server" "$port" "$token" "$host_id" "$enabled_list"
   if ! frp_client_verify_config "$tmp_toml"; then
     echo "ERROR: generated frpc configuration failed verification." >&2
     if frp_compensate_previous "$allocator_url" "$enroll_id" "$enroll_secret" \
       "$machine_id" "$hostname_value" "$current" "$auth_mode"; then
       server_rollback="PASS"
+      frp_pending_clear
+      frp_emit_failure_class CONFIG_GENERATION_FAILED
     else
       server_rollback="FAIL"
+      frp_emit_failure_class RECOVERY_REQUIRED
     fi
     rm -rf "$work"
-    unset enroll_secret token
+    unset enroll_secret token FRP_CLIENT_OPERATION_ID
     echo "LOCAL_ROLLBACK=PASS"
     echo "SERVER_ROLLBACK=${server_rollback}"
     if [[ "$server_rollback" != "PASS" ]]; then
@@ -604,14 +692,34 @@ PY
   frp_state_has_secrets "$tmp_state" || {
     echo "ERROR: refusing to write client-state containing secrets" >&2
     rm -rf "$work"
-    unset enroll_secret token
+    unset enroll_secret token FRP_CLIENT_OPERATION_ID
+    frp_emit_failure_class LOCAL_STATE_WRITE_FAILED
     return 1
   }
 
   backup="$(frp_backup_client_files)"
-  install -m 0600 "$tmp_toml" "$(frp_client_toml_path)"
-  install -m 0644 "$tmp_access" "$(frp_client_access_path)"
-  install -m 0600 "$tmp_state" "$(frp_client_state_path)"
+  if ! frp_client_test_hook BEFORE_CONFIG_REPLACE; then
+    echo "ERROR: apply stopped before replacing runtime files; previous configuration was kept." >&2
+    rm -rf "$work"
+    unset enroll_secret token FRP_CLIENT_OPERATION_ID
+    echo "LOCAL_ROLLBACK=PASS"
+    echo "SERVER_ROLLBACK=N/A"
+    frp_emit_failure_class FAILED_WITH_RESERVATION_PRESERVED
+    return 1
+  fi
+  frp_pending_write local_commit "$operation_id" ok
+  if ! frp_atomic_copy_file "$(frp_client_toml_path)" "$tmp_toml" 0600 \
+    || ! frp_atomic_copy_file "$(frp_client_access_path)" "$tmp_access" 0644 \
+    || ! frp_atomic_write_json_file "$(frp_client_state_path)" "$tmp_state" 0600; then
+    echo "ERROR: failed to write local client state; previous readable state was kept." >&2
+    frp_restore_client_files "$backup" || true
+    rm -rf "$work"
+    unset enroll_secret token FRP_CLIENT_OPERATION_ID
+    echo "LOCAL_ROLLBACK=PASS"
+    echo "SERVER_ROLLBACK=N/A"
+    frp_emit_failure_class LOCAL_STATE_WRITE_FAILED
+    return 1
+  fi
 
   if ! frp_client_restart; then
     restore_needed=1
@@ -636,18 +744,25 @@ PY
       server_rollback="FAIL"
     fi
     rm -rf "$work"
-    unset enroll_secret token
+    unset enroll_secret token FRP_CLIENT_OPERATION_ID
     echo "LOCAL_ROLLBACK=${local_rollback}"
     echo "SERVER_ROLLBACK=${server_rollback}"
-    if [[ "$server_rollback" != "PASS" ]]; then
+    if [[ "$local_rollback" != "PASS" ]]; then
+      frp_emit_failure_class ROLLBACK_FAILED
+    elif [[ "$server_rollback" != "PASS" ]]; then
       echo "WARNING: server registry may not match local configuration. Reconcile with a new enrollment." >&2
+      frp_emit_failure_class RECOVERY_REQUIRED
+    else
+      frp_pending_clear
+      frp_emit_failure_class FRPC_RESTART_FAILED
     fi
     return 1
   fi
 
   frp_copy_state "$(frp_client_state_path)" "$CANDIDATE_FILE"
+  frp_pending_clear
   rm -rf "$work"
-  unset enroll_secret token
+  unset enroll_secret token FRP_CLIENT_OPERATION_ID
   echo "Applied pending changes."
   echo "LOCAL_ROLLBACK=N/A"
   echo "SERVER_ROLLBACK=N/A"
@@ -678,7 +793,8 @@ frp_client_interactive() {
   CANDIDATE_FILE="$(mktemp)"
   frp_copy_state "$current" "$CANDIDATE_FILE"
   frp_acquire_client_lock || exit 1
-  trap 'rm -f "$CANDIDATE_FILE"; unset FRP_ENROLLMENT_CODE; frp_release_client_lock' EXIT
+  trap 'rm -f "$CANDIDATE_FILE"; unset FRP_ENROLLMENT_CODE FRP_CLIENT_OPERATION_ID; frp_release_client_lock' EXIT
+  trap 'exit 130' INT TERM
 
   local choice
   while true; do
@@ -770,7 +886,8 @@ frp_client_cmd_main() {
         exit 1
       fi
       frp_acquire_client_lock || exit 1
-      trap 'unset FRP_ENROLLMENT_CODE; frp_release_client_lock' EXIT
+      trap 'unset FRP_ENROLLMENT_CODE FRP_CLIENT_OPERATION_ID; frp_release_client_lock' EXIT
+      trap 'exit 130' INT TERM
       frp_apply_candidate
       ;;
     update)
