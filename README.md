@@ -626,7 +626,7 @@ Do not read a single `ROCKY_9=PASS` (or similar) as covering both container port
 | Fedora current | Best-effort (dnf) | NOT_TESTED | NOT_TESTED | N/A | Unit tests |
 | RHEL 9 / CentOS Stream 9 | Best-effort (dnf) | NOT_TESTED | NOT_TESTED | N/A | Unit tests |
 
-**Container** means GitHub Actions (or a local Docker run) installed the mapped packages and ran systemd-free installer/CLI tests inside the vendor image. It does **not** mean `frps` / `frpc` / allocator units were started under that distro's PID 1.
+**Container** means GitHub Actions or `./tests/run-distro-matrix.sh` installed the mapped packages and ran systemd-free installer/CLI tests inside the vendor image. It does **not** mean `frps` / `frpc` / allocator units were started under that distro's PID 1. `CONTAINER_MATRIX=PASS` is not `REAL_VM=PASS`, `REAL_SYSTEMD=PASS`, or `SELINUX_ENFORCING=PASS`.
 
 **Systemd PID1 (LXD)** means a disposable LXD system container whose PID 1 is that distro's systemd. Server/client install, unit enable/start/restart, allocator `/healthz`, `frpctl`, and `lxc restart` boot persistence were exercised for Rocky 9, AlmaLinux 9, and Amazon Linux 2023. That is **not** a real VM: the kernel is the Ubuntu host kernel, and SELinux is `Disabled`.
 
@@ -1002,6 +1002,17 @@ Generated standalone installers live under `dist/`. Rebuild them after changing 
 
 The repository should never contain real FRP tokens, enrollment secrets, private keys, generated runtime configs, or allocator state.
 
+Local Linux userspace portability (Docker; not a real VM or real systemd PID 1):
+
+```bash
+./tests/run-distro-matrix.sh
+./tests/run-distro-matrix.sh --image amazonlinux:2
+```
+
+`CONTAINER_MATRIX=PASS` does **not** mean `REAL_VM`, `REAL_SYSTEMD`, `SELINUX_ENFORCING`, or real ARM validation. Those remain separate release-gate checks.
+
+For a change that touches runtime, install, client, or server code, the intended sequence is: targeted tests, the full local CI-equivalent suite, `./tests/run-distro-matrix.sh`, secret scan, real-IP scan, bundle parity, then commit. GitHub CI runs the equivalent checks. Real VM / systemd / SELinux validation is not required on every development commit.
+
 ```bash
 ./tests/test-server-migration.sh
 ./tests/test-registry-init.sh
@@ -1025,6 +1036,7 @@ python3 tests/test-mgmt-identity.py
 ./tests/test-port-architecture.sh
 ./tests/test-ca-bootstrap.sh
 python3 tests/test-pki-https.py
+./tests/test-distro-matrix.sh
 ./scripts/secret-scan.sh
 ```
 

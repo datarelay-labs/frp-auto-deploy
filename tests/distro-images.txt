@@ -1,0 +1,13 @@
+# Docker images for automated userspace portability testing.
+# Keep in sync with the GitHub Actions matrix in .github/workflows/lint.yml.
+# tests/test-distro-matrix.sh fails if those lists drift.
+#
+# These images validate package manager, Bash, Python, OpenSSL, PKI, and
+# systemd-free CLI behavior. They do NOT validate real VMs, real systemd
+# PID 1, SELinux Enforcing, or ARM hardware.
+ubuntu:22.04
+ubuntu:24.04
+rockylinux:9
+almalinux:9
+amazonlinux:2023
+amazonlinux:2

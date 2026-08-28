@@ -43,6 +43,8 @@ jobs:
           python3 tests/test-pki-https.py
       # Live distro containers cannot validate systemd unless PID 1 is systemd.
       # Package install + Bash/Python/CLI checks run in a separate matrix job.
+      - name: Distro matrix harness self-tests
+        run: ./tests/test-distro-matrix.sh
       - name: FRP update regression tests
         run: |
           ./tests/test-frp-update.sh
@@ -62,6 +64,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Keep in sync with tests/distro-images.txt (checked by tests/test-distro-matrix.sh).
         image:
           - ubuntu:22.04
           - ubuntu:24.04
@@ -72,10 +75,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Container package and CLI portability
-        run: |
-          docker run --rm \
-            -e PYTHONDONTWRITEBYTECODE=1 \
-            -v "$PWD:/src:ro" \
-            ${{ matrix.image }} \
-            bash /src/tests/run-portability-container.sh
-        # Does not start systemd. SYSTEMD_SMOKE remains NOT_TESTED for these images.
+        run: ./tests/run-distro-matrix.sh --image ${{ matrix.image }}
+        # Uses the same Docker invocation as local ./tests/run-distro-matrix.sh.
+        # Does not start systemd. SYSTEMD_SMOKE remains NOT_TESTED.

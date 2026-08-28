@@ -43,6 +43,11 @@ FRP_DEPENDENCY_ROLE=server
 ensure_dependencies
 frp_require_python
 echo "CONTAINER_PYTHON=$(python3 -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')"
+if command -v openssl >/dev/null 2>&1; then
+  echo "CONTAINER_OPENSSL=$(openssl version 2>/dev/null | tr '\n' ' ')"
+else
+  echo "CONTAINER_OPENSSL=missing"
+fi
 echo "DEPENDENCY_INSTALL=PASS"
 
 if frp_command_exists systemctl && frp_systemd_usable; then
@@ -70,6 +75,8 @@ bash -n tools/frp-server-status tools/frp-update tools/frp-client tools/frpctl
 ./tests/test-portability.sh
 ./tests/test-client-platform.sh
 ./tests/test-server-install-config.sh
+./tests/test-client-allocator-url.sh
+./tests/test-create-client.sh
 ./tests/test-client-upgrade.sh
 ./tests/test-frpctl.sh
 ./tests/test-frpctl-completion.sh
