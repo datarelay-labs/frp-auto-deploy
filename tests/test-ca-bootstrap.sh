@@ -91,22 +91,198 @@ if [[ -e "$BAD_TREE/etc/frp-auto-deploy/allocator-ca.crt" ]]; then
 fi
 pass "wrong fingerprint fails closed"
 
-# Tampered CA PEM fails.
+# Canonical fingerprint is SHA256 of openssl DER, matching frp_pki.py.
+bash_fp="$(frp_ca_fingerprint_file "$ALLOC_ROOT/pki/ca.crt")"
+der_fp="$(openssl x509 -in "$ALLOC_ROOT/pki/ca.crt" -outform DER | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
+[[ "$bash_fp" == "$CA_FP" && "$bash_fp" == "$der_fp" ]] || fail "canonical DER SHA256 mismatch"
+pass "canonical fingerprint is SHA256 of parsed DER"
+
+# Malformed (not PEM) fails.
+MALFORMED="$WORKDIR/malformed.crt"
+printf 'not-a-certificate\n' >"$MALFORMED"
+export FRP_CLIENT_TEST_ROOT="$WORKDIR/malformed-client"
+unset FRP_ALLOCATOR_CA_SHA256
+export FRP_ALLOCATOR_CA_FILE="$MALFORMED"
+if frp_bootstrap_allocator_ca "$URL" 2>"$WORKDIR/malformed.err"; then
+  fail "malformed CA should fail"
+fi
+grep -qi 'not a valid X.509' "$WORKDIR/malformed.err" || fail "malformed X.509 error"
+if [[ -e "$WORKDIR/malformed-client/etc/frp-auto-deploy/allocator-ca.crt" ]]; then
+  fail "malformed CA installed"
+fi
+pass "malformed certificate fails"
+
+# Base64 garbage wrapped as a certificate must not become trusted.
+GARBAGE="$WORKDIR/garbage.crt"
+python3 - "$GARBAGE" <<'PY'
+import base64, sys
+from pathlib import Path
+body = base64.b64encode(b'not-an-x509-certificate-' * 16).decode('ascii')
+Path(sys.argv[1]).write_text(
+    '-----BEGIN CERTIFICATE-----\n' + body + '\n-----END CERTIFICATE-----\n',
+    encoding='utf-8',
+)
+PY
+export FRP_CLIENT_TEST_ROOT="$WORKDIR/garbage-client"
+unset FRP_ALLOCATOR_CA_SHA256
+export FRP_ALLOCATOR_CA_FILE="$GARBAGE"
+if frp_bootstrap_allocator_ca "$URL" 2>"$WORKDIR/garbage.err"; then
+  fail "garbage PEM should fail"
+fi
+grep -qi 'not a valid X.509' "$WORKDIR/garbage.err" || fail "garbage X.509 error"
+if [[ -e "$WORKDIR/garbage-client/etc/frp-auto-deploy/allocator-ca.crt" ]]; then
+  fail "garbage CA installed"
+fi
+pass "base64 garbage wrapped as certificate is rejected"
+
+# Tampered valid PEM is rejected before trust.
 TAMPER="$WORKDIR/tamper.crt"
-sed 's/M/N/' "$ALLOC_ROOT/pki/ca.crt" >"$TAMPER" || true
-printf 'not-a-certificate\n' >"$TAMPER"
+python3 - "$ALLOC_ROOT/pki/ca.crt" "$TAMPER" <<'PY'
+from pathlib import Path
+src, dest = Path(__import__('sys').argv[1]), Path(__import__('sys').argv[2])
+text = src.read_text(encoding='utf-8')
+lines = text.splitlines()
+body = [ln for ln in lines if ln and not ln.startswith('-----')]
+if not body:
+    raise SystemExit('no pem body')
+# Flip one character inside the first body line so PEM markers remain.
+first = list(body[0])
+for i, ch in enumerate(first):
+    if ch.isalnum():
+        first[i] = 'A' if ch != 'A' else 'B'
+        break
+body[0] = ''.join(first)
+out = []
+in_body = False
+bi = 0
+for ln in lines:
+    if ln.startswith('-----BEGIN'):
+        out.append(ln)
+        in_body = True
+        continue
+    if ln.startswith('-----END'):
+        out.append(ln)
+        in_body = False
+        continue
+    if in_body and ln.strip():
+        out.append(body[bi])
+        bi += 1
+    else:
+        out.append(ln)
+dest.write_text('\n'.join(out) + '\n', encoding='utf-8')
+PY
 export FRP_CLIENT_TEST_ROOT="$WORKDIR/tamper-client"
 unset FRP_ALLOCATOR_CA_SHA256
 export FRP_ALLOCATOR_CA_FILE="$TAMPER"
 if frp_bootstrap_allocator_ca "$URL" 2>"$WORKDIR/tamper.err"; then
   fail "tampered CA should fail"
 fi
-grep -qi 'invalid CA PEM\|fingerprint\|invalid' "$WORKDIR/tamper.err" || fail "tamper error"
+grep -qi 'not a valid X.509\|fingerprint mismatch' "$WORKDIR/tamper.err" || fail "tamper error"
 if [[ -e "$WORKDIR/tamper-client/etc/frp-auto-deploy/allocator-ca.crt" ]]; then
   fail "tampered CA installed"
 fi
 pass "modified/tampered CA fails"
-pass "malformed certificate fails"
+
+# Downloaded garbage PEM must not contact /enroll.
+FAKEBIN="$WORKDIR/fakebin"
+mkdir -p "$FAKEBIN"
+cat >"$FAKEBIN/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${FRP_FAKE_CURL_LOG}"
+outfile=""
+url=""
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "-o" ]]; then
+    outfile="$arg"
+  fi
+  if [[ "$arg" == https://* ]]; then
+    url="$arg"
+  fi
+  prev="$arg"
+done
+if [[ "$url" == */ca.crt ]]; then
+  cat "${FRP_FAKE_CA_BODY}" >"$outfile"
+  exit 0
+fi
+if [[ "$url" == */enroll* ]]; then
+  echo ENROLL_CONTACTED >>"${FRP_FAKE_CURL_LOG}"
+  exit 0
+fi
+echo "unexpected curl: $*" >&2
+exit 1
+EOF
+chmod +x "$FAKEBIN/curl"
+export FRP_FAKE_CURL_LOG="$WORKDIR/curl-args.log"
+export FRP_FAKE_CA_BODY="$GARBAGE"
+: >"$FRP_FAKE_CURL_LOG"
+export FRP_CLIENT_TEST_ROOT="$WORKDIR/download-garbage"
+unset FRP_ALLOCATOR_CA_FILE
+export FRP_ALLOCATOR_CA_SHA256="$CA_FP"
+ORIG_PATH="$PATH"
+PATH="$FAKEBIN:$PATH"
+if frp_bootstrap_allocator_ca "https://203.0.113.10:9443/enroll" 2>"$WORKDIR/download-garbage.err"; then
+  PATH="$ORIG_PATH"
+  fail "downloaded garbage CA should fail"
+fi
+PATH="$ORIG_PATH"
+grep -qi 'not a valid X.509' "$WORKDIR/download-garbage.err" || fail "downloaded garbage X.509 error"
+if grep -q ENROLL_CONTACTED "$FRP_FAKE_CURL_LOG"; then
+  fail "garbage CA contacted /enroll"
+fi
+if [[ -e "$WORKDIR/download-garbage/etc/frp-auto-deploy/allocator-ca.crt" ]]; then
+  fail "downloaded garbage CA installed"
+fi
+pass "downloaded garbage CA is rejected before /enroll"
+
+# Pre-provisioned valid CA with matching fingerprint.
+export FRP_CLIENT_TEST_ROOT="$WORKDIR/preprov"
+unset FRP_ALLOCATOR_CA_SHA256
+export FRP_ALLOCATOR_CA_FILE="$ALLOC_ROOT/pki/ca.crt"
+export FRP_ALLOCATOR_CA_SHA256="$CA_FP"
+frp_bootstrap_allocator_ca "$URL" || fail "pre-provisioned valid CA"
+got="$(python3 "$ROOT/lib/frp_pki.py" fingerprint --cert "$WORKDIR/preprov/etc/frp-auto-deploy/allocator-ca.crt")"
+[[ "$got" == "$CA_FP" ]] || fail "pre-provisioned fingerprint"
+pass "pre-provisioned valid CA is installed"
+
+# Pre-provisioned valid CA with wrong fingerprint fails closed.
+export FRP_CLIENT_TEST_ROOT="$WORKDIR/preprov-bad-fp"
+export FRP_ALLOCATOR_CA_FILE="$ALLOC_ROOT/pki/ca.crt"
+export FRP_ALLOCATOR_CA_SHA256="$(printf '%064d' 1 | tr '0' 'a')"
+if frp_bootstrap_allocator_ca "$URL" 2>"$WORKDIR/preprov-bad-fp.err"; then
+  fail "pre-provisioned wrong fingerprint should fail"
+fi
+grep -qi 'mismatch' "$WORKDIR/preprov-bad-fp.err" || fail "pre-provisioned mismatch error"
+if [[ -e "$WORKDIR/preprov-bad-fp/etc/frp-auto-deploy/allocator-ca.crt" ]]; then
+  fail "pre-provisioned mismatch wrote trusted CA"
+fi
+pass "pre-provisioned CA requires fingerprint match"
+
+# Existing trusted CA is reused; download is not used to replace it.
+export FRP_CLIENT_TEST_ROOT="$TREE"
+unset FRP_ALLOCATOR_CA_FILE
+export FRP_ALLOCATOR_CA_SHA256="$CA_FP"
+before="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$TREE/etc/frp-auto-deploy/allocator-ca.crt")"
+: >"$FRP_FAKE_CURL_LOG"
+PATH="$FAKEBIN:$PATH"
+frp_bootstrap_allocator_ca "$URL" || { PATH="$ORIG_PATH"; fail "existing trusted CA reuse"; }
+PATH="$ORIG_PATH"
+after="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$TREE/etc/frp-auto-deploy/allocator-ca.crt")"
+[[ "$before" == "$after" ]] || fail "existing trusted CA replaced"
+if grep -q '/ca.crt' "$FRP_FAKE_CURL_LOG"; then
+  fail "existing trusted CA triggered download"
+fi
+pass "existing trusted CA is reused without replacement"
+
+# Existing trusted CA with wrong expected fingerprint fails closed and is kept.
+export FRP_ALLOCATOR_CA_SHA256="$(printf '%064d' 1 | tr '0' 'a')"
+if frp_bootstrap_allocator_ca "$URL" 2>"$WORKDIR/existing-mismatch.err"; then
+  fail "existing CA wrong fingerprint should fail"
+fi
+grep -qi 'mismatch' "$WORKDIR/existing-mismatch.err" || fail "existing mismatch error"
+after2="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$TREE/etc/frp-auto-deploy/allocator-ca.crt")"
+[[ "$before" == "$after2" ]] || fail "mismatch replaced existing trusted CA"
+pass "existing trusted CA fingerprint is verified"
 
 # Helper uses --cacert and never -k for normal calls.
 python3 - "$ROOT/lib/frp-client-common.sh" <<'PY' || fail "insecure curl policy"
@@ -144,6 +320,8 @@ pass "normal allocator calls contain no -k/--insecure"
 pass "insecure CA fetch carries no secret payload"
 
 # Verified helper succeeds against the live allocator.
+unset FRP_ALLOCATOR_CA_FILE
+export FRP_ALLOCATOR_CA_SHA256="$CA_FP"
 export FRP_CLIENT_TEST_ROOT="$TREE"
 code="$(frp_allocator_curl -fsS "https://127.0.0.1:${ALLOC_PORT}/healthz")"
 [[ "$code" == *status* ]] || fail "verified helper healthz"

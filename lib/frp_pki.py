@@ -62,40 +62,53 @@ def is_ip_address(value):
         return False
 
 
-def pem_to_der(pem_text):
-    lines = []
-    in_body = False
-    for raw in str(pem_text).splitlines():
-        line = raw.strip()
-        if line.startswith('-----BEGIN'):
-            in_body = True
-            continue
-        if line.startswith('-----END'):
-            break
-        if in_body:
-            lines.append(line)
-    if not lines:
-        raise PkiError('invalid CA PEM: missing certificate body')
+def _run_bin(args):
     try:
-        import base64
-        return base64.b64decode(''.join(lines), validate=False)
-    except Exception as exc:
-        raise PkiError('invalid CA PEM: not valid base64') from exc
+        return subprocess.run(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        err = (exc.stderr or exc.stdout or b'').decode('utf-8', 'replace').strip()
+        raise PkiError(err or 'openssl command failed') from exc
+    except FileNotFoundError as exc:
+        raise PkiError('openssl is required to manage allocator TLS certificates') from exc
+
+
+def validate_x509_cert(path, downloaded=False):
+    openssl = openssl_bin()
+    try:
+        _run([openssl, 'x509', '-in', str(path), '-noout'])
+    except PkiError as exc:
+        if downloaded:
+            raise PkiError('downloaded allocator CA is not a valid X.509 certificate') from exc
+        raise PkiError('allocator CA is not a valid X.509 certificate') from exc
+
+
+def der_from_cert_file(path, downloaded=False):
+    validate_x509_cert(path, downloaded=downloaded)
+    openssl = openssl_bin()
+    try:
+        proc = _run_bin([openssl, 'x509', '-in', str(path), '-outform', 'DER'])
+    except PkiError as exc:
+        if downloaded:
+            raise PkiError('downloaded allocator CA is not a valid X.509 certificate') from exc
+        raise PkiError('allocator CA is not a valid X.509 certificate') from exc
+    if not proc.stdout:
+        if downloaded:
+            raise PkiError('downloaded allocator CA is not a valid X.509 certificate')
+        raise PkiError('allocator CA is not a valid X.509 certificate')
+    return proc.stdout
 
 
 def fingerprint_from_der(der):
     return hashlib.sha256(der).hexdigest()
 
 
-def fingerprint_from_pem(pem_text):
-    return fingerprint_from_der(pem_to_der(pem_text))
-
-
-def fingerprint_from_cert_file(path):
-    data = Path(path).read_text(encoding='utf-8')
-    if '-----BEGIN CERTIFICATE-----' not in data:
-        raise PkiError('invalid CA PEM: not an X.509 certificate')
-    return fingerprint_from_pem(data)
+def fingerprint_from_cert_file(path, downloaded=False):
+    return fingerprint_from_der(der_from_cert_file(path, downloaded=downloaded))
 
 
 def normalize_fingerprint(value):
@@ -431,18 +444,16 @@ def ensure_pki(pki_dir, public_host, extra_hosts=None):
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def atomic_install_trusted_ca(src_pem_path, dest_path, expected_fingerprint=None):
+def atomic_install_trusted_ca(src_pem_path, dest_path, expected_fingerprint=None, downloaded=False):
     dest = Path(dest_path)
-    pem = Path(src_pem_path).read_text(encoding='utf-8')
-    if '-----BEGIN CERTIFICATE-----' not in pem:
-        raise PkiError('invalid CA PEM: not an X.509 certificate')
-    actual = fingerprint_from_pem(pem)
+    actual = fingerprint_from_cert_file(src_pem_path, downloaded=downloaded)
     if expected_fingerprint is not None:
         wanted = normalize_fingerprint(expected_fingerprint)
         if actual != wanted:
             raise PkiError('CA fingerprint mismatch')
+    pem = Path(src_pem_path).read_bytes()
     dest.parent.mkdir(parents=True, exist_ok=True)
-    _write_mode(dest, pem if pem.endswith('\n') else pem + '\n', 0o644)
+    _write_mode(dest, pem if pem.endswith(b'\n') else pem + b'\n', 0o644)
     if os.geteuid() == 0:
         os.chown(str(dest), 0, 0)
         os.chmod(str(dest.parent), stat.S_IMODE(dest.parent.stat().st_mode))

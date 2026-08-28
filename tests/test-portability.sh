@@ -283,6 +283,22 @@ frp_detect_architecture || fail "aarch64"
 unset FRP_TEST_UNAME_M
 pass "ARM64_STATIC_COMPATIBILITY"
 
+# live-distro-smoke.sh is a read-only collector; keep it non-destructive.
+SMOKE="$ROOT/tests/live-distro-smoke.sh"
+[[ -f "$SMOKE" ]] || fail "live-distro-smoke.sh missing"
+bash -n "$SMOKE" || fail "live-distro-smoke.sh syntax"
+if grep -nE -- '--insecure|(^|[[:space:]])-k([[:space:]]|$)' "$SMOKE"; then
+  fail "live-distro-smoke.sh uses insecure curl"
+fi
+if grep -nE 'frp-create-client|frp-release-|frp-revoke|systemctl (restart|enable|disable|stop)|setenforce|iptables|firewall-cmd|semanage' "$SMOKE"; then
+  fail "live-distro-smoke.sh looks destructive"
+fi
+if grep -nE 'BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY|--insecure' "$SMOKE"; then
+  fail "live-distro-smoke.sh secret/insecure pattern"
+fi
+grep -q 'NOT_INSTALLED\|NOT_APPLICABLE\|NOT_TESTED' "$SMOKE" || fail "live-distro-smoke.sh role states"
+pass "LIVE_DISTRO_SMOKE_STATIC"
+
 echo
 echo "PORTABILITY_TEST=PASS"
 echo "Note: this file does not start systemd or install packages on a live distro."

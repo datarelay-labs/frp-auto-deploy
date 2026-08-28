@@ -51,27 +51,32 @@ def cfg_frp_control_public_port(cfg):
     return coerce_port(cfg.get('control_port'))
 
 
-def fingerprint_from_pem(path):
-    import base64
-    import hashlib
-    text = Path(path).read_text(encoding='utf-8')
-    if '-----BEGIN CERTIFICATE-----' not in text:
+def load_frp_pki():
+    import importlib.util
+    here = Path(__file__).resolve()
+    candidates = [
+        here.parent.parent / 'lib' / 'frp_pki.py',
+        Path('/usr/local/lib/frp-auto-deploy/frp_pki.py'),
+    ]
+    if ROOT:
+        candidates.insert(1, Path(ROOT) / 'usr/local/lib/frp-auto-deploy/frp_pki.py')
+    for path in candidates:
+        if path.is_file():
+            spec = importlib.util.spec_from_file_location('frp_pki', str(path))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+    return None
+
+
+def fingerprint_from_cert(path):
+    pki = load_frp_pki()
+    if pki is None:
         return ''
-    lines = []
-    in_body = False
-    for raw in text.splitlines():
-        line = raw.strip()
-        if line.startswith('-----BEGIN'):
-            in_body = True
-            continue
-        if line.startswith('-----END'):
-            break
-        if in_body:
-            lines.append(line)
-    if not lines:
+    try:
+        return pki.fingerprint_from_cert_file(path)
+    except Exception:
         return ''
-    der = base64.b64decode(''.join(lines))
-    return hashlib.sha256(der).hexdigest()
 
 
 p = argparse.ArgumentParser(description='Create a short-lived FRP client enrollment code')
@@ -104,7 +109,7 @@ public_host = cfg_public_host(cfg)
 control_public = cfg_frp_control_public_port(cfg)
 allocator = str(cfg.get('allocator_public_url', '') or '').strip()
 ca_path = remap(str(cfg.get('tls_ca_cert') or '/etc/frp-auto-deploy/pki/ca.crt'))
-ca_fp = fingerprint_from_pem(ca_path) if ca_path.is_file() else ''
+ca_fp = fingerprint_from_cert(ca_path) if ca_path.is_file() else ''
 
 print()
 print('Enrollment Code:')

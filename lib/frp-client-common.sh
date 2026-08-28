@@ -95,32 +95,46 @@ sys.stdout.write('https://' + hostport)
 PY
 }
 
+frp_ca_validate_x509() {
+  local src="$1"
+  local err="${2:-allocator CA is not a valid X.509 certificate}"
+  if ! command -v openssl >/dev/null 2>&1; then
+    echo "ERROR: openssl is required to validate the allocator CA" >&2
+    return 1
+  fi
+  if ! openssl x509 -in "$src" -noout >/dev/null 2>&1; then
+    echo "ERROR: ${err}" >&2
+    return 1
+  fi
+  return 0
+}
+
 frp_ca_fingerprint_file() {
-  python3 - "$1" <<'PY'
-import base64, hashlib, re, sys
+  local src="$1" der fp
+  local err="${2:-allocator CA is not a valid X.509 certificate}"
+  frp_ca_validate_x509 "$src" "$err" || return 1
+  der="$(mktemp)"
+  if ! openssl x509 -in "$src" -outform DER -out "$der" 2>/dev/null || [[ ! -s "$der" ]]; then
+    rm -f "$der"
+    echo "ERROR: ${err}" >&2
+    return 1
+  fi
+  fp="$(python3 - "$der" <<'PY'
+import hashlib, sys
 from pathlib import Path
-text = Path(sys.argv[1]).read_text(encoding='utf-8')
-if '-----BEGIN CERTIFICATE-----' not in text:
-    raise SystemExit('invalid CA PEM')
-lines = []
-in_body = False
-for raw in text.splitlines():
-    line = raw.strip()
-    if line.startswith('-----BEGIN'):
-        in_body = True
-        continue
-    if line.startswith('-----END'):
-        break
-    if in_body:
-        lines.append(line)
-if not lines:
-    raise SystemExit('invalid CA PEM')
-try:
-    der = base64.b64decode(''.join(lines))
-except Exception:
-    raise SystemExit('invalid CA PEM')
-print(hashlib.sha256(der).hexdigest())
+print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
 PY
+)" || {
+    rm -f "$der"
+    echo "ERROR: ${err}" >&2
+    return 1
+  }
+  rm -f "$der"
+  if [[ ! "$fp" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "ERROR: ${err}" >&2
+    return 1
+  fi
+  printf '%s\n' "$fp"
 }
 
 frp_normalize_ca_fingerprint() {
@@ -147,10 +161,7 @@ frp_atomic_install_allocator_ca() {
   local src="$1" dest expected actual tmp dir
   dest="$(frp_allocator_ca_path)"
   expected="${2:-}"
-  actual="$(frp_ca_fingerprint_file "$src")" || {
-    echo "ERROR: invalid CA PEM" >&2
-    return 1
-  }
+  actual="$(frp_ca_fingerprint_file "$src")" || return 1
   if [[ -n "$expected" ]]; then
     expected="$(frp_normalize_ca_fingerprint "$expected")" || {
       echo "ERROR: invalid CA fingerprint" >&2
@@ -197,8 +208,8 @@ frp_bootstrap_allocator_ca() {
   fi
 
   if [[ -f "$dest" ]]; then
+    actual="$(frp_ca_fingerprint_file "$dest")" || return 1
     if [[ -n "$expected" ]]; then
-      actual="$(frp_ca_fingerprint_file "$dest")" || return 1
       expected="$(frp_normalize_ca_fingerprint "$expected")" || {
         echo "ERROR: invalid CA fingerprint" >&2
         return 1
@@ -237,9 +248,12 @@ frp_bootstrap_allocator_ca() {
     echo "ERROR: allocator TLS CA certificate could not be downloaded from ${ca_url}" >&2
     return 1
   fi
-  if ! actual="$(frp_ca_fingerprint_file "$tmp" 2>/dev/null)"; then
+  if ! frp_ca_validate_x509 "$tmp" "downloaded allocator CA is not a valid X.509 certificate"; then
     rm -f "$tmp"
-    echo "ERROR: invalid CA PEM" >&2
+    return 1
+  fi
+  if ! actual="$(frp_ca_fingerprint_file "$tmp" "downloaded allocator CA is not a valid X.509 certificate")"; then
+    rm -f "$tmp"
     return 1
   fi
   if [[ "$actual" != "$expected" ]]; then

@@ -27,8 +27,8 @@ fi
 if git grep -nF '221.139.249.110' -- ':!scripts/secret-scan.sh' >/dev/null; then
   fail "forbidden production public IP 221.139.249.110 is tracked"
 fi
-if git grep -nF '10.10.10.50' -- ':!scripts/secret-scan.sh' >/dev/null; then
-  fail "forbidden production internal IP 10.10.10.50 is tracked"
+if git grep -nF '10.39.163.128' -- ':!scripts/secret-scan.sh' >/dev/null; then
+  fail "forbidden LXD runtime address 10.39.163.128 is tracked"
 fi
 if git grep -nF 'RickLee-kr/frp-auto-deploy' -- ':!scripts/secret-scan.sh' >/dev/null; then
   fail "stale repository URL RickLee-kr/frp-auto-deploy is tracked"

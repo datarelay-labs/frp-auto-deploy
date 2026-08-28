@@ -646,12 +646,22 @@ Windows: FRP supports Windows, but automated PowerShell enrollment is not includ
 
 Both the FRP Auto Deploy server and client use the same dependency installer (`apt` / `dnf` / `yum`). Other systemd Linux distributions can work when the required commands are already installed.
 
-Required inbound ports on the FRP **server** (open them on the host firewall or cloud security group; the installer does not do this):
+Required inbound public ports on the FRP **server** (open them on the host firewall or cloud security group; the installer does not do this):
 
 ```text
-TCP control port     (default 443)
-TCP service range    (default 6000-6098)
-TCP allocator port   (default 6099), or TCP/80 if you reverse-proxy enrollment
+The FRP control public port chosen for this deployment
+The allocator HTTPS public port chosen for this deployment
+The published service public range
+```
+
+If the server is behind NAT, forward those public ports to the configured internal listen ports. Public port and listen port need not be the same. TCP/443 is a common default for FRP control, not a requirement. TCP/6099 is a common default for the allocator HTTPS listener, not a requirement.
+
+Defaults for a simple directly exposed server (convenience only):
+
+```text
+FRP control public/listen:     443 / 443
+Allocator HTTPS public/listen: 6099 / 6099
+Published services:            6000-6098
 ```
 
 The client needs outbound connectivity to the FRP server. Opening local inbound ports for published services remains the administrator's responsibility.
@@ -662,47 +672,94 @@ On Amazon Linux 2 (systemd 219), the installer writes an allocator unit without 
 
 Enrollment token wrap stays compatible with `openssl enc -pbkdf2` on OpenSSL 1.1.1+, and uses the same Salted__/PBKDF2-SHA256 format via Python's stdlib plus `openssl enc -K/-iv` so OpenSSL 1.0.2 still works.
 
-SELinux: default targeted policy typically allows these custom systemd units. This project does not install custom SELinux policy and does not set SELinux to permissive. If a site policy blocks the allocator HTTP port or FRP binaries, fix that policy explicitly. Enforcing-mode validation still requires a real Rocky/Alma VM; it was not closed in LXD containers.
+SELinux: this project does not disable SELinux, does not install custom SELinux policy, and does not set SELinux to permissive. Rocky Linux 9 and AlmaLinux 9 Enforcing remain `NOT_TESTED`. Do not treat LXD `getenforce=Disabled` as Enforcing validation. If a site policy blocks the allocator HTTPS port or FRP binaries, fix that policy explicitly.
 
 ---
 
 # Architecture
 
+Public endpoints and local listeners are independent. The installer does not require `public port == listen port`, and FRP does not need to own public TCP/443.
+
 ## Behind a firewall / NAT device
 
 ```text
-Remote Linux clients
-        |
-        | FRP TLS control connection :443
-        v
-203.0.113.10  (example public firewall/NAT IP)
-        |
-        +-- TCP/443       -> 192.0.2.50:443   (frps control)
-        +-- TCP/6000-6098 -> 192.0.2.50:same  (published TCP service ports)
-        +-- TCP/80        -> 192.0.2.50:6099  (enrollment allocator)
-                                |
-                                +-- frps
-                                +-- port allocator
+Internet
+
+FRP client
+    |
+    | TCP/8443
+    v
+Public NAT / Firewall
+    |
+    | 8443 -> 443
+    v
+frps
+listen TCP/443
+
+
+Management client
+    |
+    | HTTPS TCP/9443
+    v
+Public NAT / Firewall
+    |
+    | 9443 -> 6099
+    v
+allocator
+HTTPS listen TCP/6099
+
+
+Published service user
+    |
+    | TCP/6002
+    v
+Public NAT / Firewall
+    |
+    | 6002 -> 6002
+    v
+frps remote port 6002
 ```
 
-The public service port range must be DNATed to the same port range on the internal FRP server.
+Example public vs listen values:
+
+```text
+Public hostname or IP:       203.0.113.10
+Internal FRP server:         192.0.2.50
+FRP control public port:     8443
+FRP control listen port:     443
+Allocator public HTTPS port: 9443
+Allocator listen port:       6099
+Published services:          6000-6098 (1:1)
+```
+
+The public service port range must be DNATed to the same port numbers on the internal FRP server.
 
 See `examples/pfsense-firewall.md` for firewall/NAT notes.
 
 ## Direct public server
 
 ```text
-Remote Linux clients
+Internet / Remote Linux clients
         |
         v
-203.0.113.10  (FRP server)
+203.0.113.10  (FRP server public IP)
         |
-        +-- TCP/443        frps control
+        +-- TCP/443        frps control (public = listen)
         +-- TCP/6000-6098  published TCP service ports
-        +-- TCP/6099       enrollment allocator
+        +-- TCP/6099       allocator HTTPS
 ```
 
-No external DNAT device is needed. Open the required ports on the host firewall or cloud security group. For a public enrollment endpoint on port 80, use a local reverse proxy or port-forward from `80` to `6099`.
+This matching-port layout is a convenience example, not a product requirement:
+
+```text
+FRP public port:             443
+FRP listen port:             443
+Allocator public HTTPS port: 6099
+Allocator listen port:       6099
+Published services:          6000-6098
+```
+
+No external DNAT device is needed. Open the FRP control public port, the allocator HTTPS public port, and the published service range on the host firewall or cloud security group. If you already occupy TCP/443, put FRP control on another public port (for example 8443) instead. The allocator URL that clients use must still be HTTPS.
 
 ---
 
@@ -712,18 +769,15 @@ No FRP token or permanent install secret is stored in this Git repository.
 
 - A new server generates `/etc/frp/server_token` locally.
 - Installing over an existing FRP server preserves the existing authentication token rather than rotating it.
-- Client enrollment uses a short-lived enrollment code as bootstrap/recovery authorization.
-- After enrollment, each client has a local ECDSA P-256 management identity. The private key never leaves the client.
+- FRP tunnel: FRP native TLS plus the FRP token. The token authenticates the FRP tunnel only. It is not a management API credential.
+- Management transport: HTTPS only, with a project-managed private CA and allocator server certificate validation. There is no plain HTTP allocator mode and no HTTP fallback.
+- Initial bootstrap: a one-time Enrollment Code plus an HMAC-protected enrollment protocol. First install downloads `/ca.crt` once, parses it as an X.509 certificate, checks the SHA256 fingerprint of the canonical DER encoding, then stores `/etc/frp-auto-deploy/allocator-ca.crt`. Later allocator calls use verified HTTPS (`curl --cacert`).
+- Persistent management: each client has a local ECDSA P-256 identity. The private key never leaves the client. Management requests are signed.
 - The server stores only the corresponding public key, fingerprint, and revocation status.
-- Management requests are signed and bind protocol version, client identity, operation, timestamp, nonce, and payload digest. Replayed and stale requests are rejected.
-- The FRP token authenticates the FRP tunnel only. It is not a management API credential.
-- The enrollment secret itself is never sent over the enrollment HTTP request.
-- Enrollment requests and responses are HMAC authenticated.
-- The FRP token is encrypted with AES-256-CBC/PBKDF2 using the enrollment secret before crossing the enrollment HTTP path.
+- Replay protection: signed management requests bind protocol version, client identity, operation, timestamp, nonce, and payload digest. Replayed and stale requests are rejected.
+- The enrollment secret itself is never sent in the enrollment HTTPS request. Enrollment requests and responses are HMAC authenticated.
+- The FRP token is encrypted with AES-256-CBC/PBKDF2 using the enrollment secret before it is returned over the verified HTTPS enrollment path.
 - Enrollment codes are bound to the first `machine-id` that uses them and expire by default after 10 minutes.
-- FRP client-to-server control traffic uses FRP TLS on TCP/443.
-
-The enrollment endpoint uses plain HTTP in the tested topology because the original deployment environment reset TLS traffic on non-standard ports. If the environment permits it, placing the enrollment endpoint behind a normal HTTPS reverse proxy is preferable.
 
 Do not publish `/etc/frp/server_token`, enrollment files, generated `frpc.toml`, registry data, or connection-info files.
 

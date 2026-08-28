@@ -274,6 +274,70 @@ def test_partial_pki_fails():
         pass_('partial PKI fails closed')
 
 
+def test_fingerprint_is_sha256_of_openssl_der():
+    with tempfile.TemporaryDirectory() as tmp:
+        pki_dir = Path(tmp) / 'pki'
+        result = frp_pki.ensure_pki(str(pki_dir), '127.0.0.1')
+        ca = pki_dir / 'ca.crt'
+        der = subprocess.check_output(['openssl', 'x509', '-in', str(ca), '-outform', 'DER'])
+        expected = hashlib.sha256(der).hexdigest()
+        if result['fingerprint'] != expected:
+            fail('fingerprint not SHA256(DER)', result['fingerprint'])
+        if frp_pki.fingerprint_from_cert_file(ca) != expected:
+            fail('fingerprint_from_cert_file not SHA256(DER)')
+        subprocess.check_call(['openssl', 'x509', '-in', str(ca), '-noout'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        pass_('canonical fingerprint is SHA256 of openssl DER')
+
+
+def test_garbage_pem_rejected():
+    import base64
+    with tempfile.TemporaryDirectory() as tmp:
+        garbage = Path(tmp) / 'garbage.crt'
+        body = base64.b64encode(b'not-an-x509-certificate-' * 16).decode('ascii')
+        garbage.write_text(
+            '-----BEGIN CERTIFICATE-----\n' + body + '\n-----END CERTIFICATE-----\n',
+            encoding='utf-8',
+        )
+        dest = Path(tmp) / 'trusted.crt'
+        try:
+            frp_pki.fingerprint_from_cert_file(garbage)
+            fail('garbage PEM fingerprint should fail')
+        except frp_pki.PkiError as exc:
+            if 'X.509' not in str(exc):
+                fail('garbage PEM error', exc)
+        try:
+            frp_pki.atomic_install_trusted_ca(garbage, dest)
+            fail('garbage PEM should not be installed')
+        except frp_pki.PkiError:
+            pass
+        if dest.exists():
+            fail('garbage PEM was installed')
+        pass_('base64 garbage wrapped as certificate is rejected')
+
+
+def test_atomic_install_requires_x509_and_fingerprint():
+    with tempfile.TemporaryDirectory() as tmp:
+        pki_dir = Path(tmp) / 'pki'
+        result = frp_pki.ensure_pki(str(pki_dir), '127.0.0.1')
+        dest = Path(tmp) / 'trusted.crt'
+        actual = frp_pki.atomic_install_trusted_ca(pki_dir / 'ca.crt', dest, result['fingerprint'])
+        if actual != result['fingerprint'] or not dest.is_file():
+            fail('valid CA atomic install')
+        other = Path(tmp) / 'other'
+        other.mkdir()
+        frp_pki.ensure_pki(str(other), '127.0.0.1')
+        dest2 = Path(tmp) / 'trusted2.crt'
+        try:
+            frp_pki.atomic_install_trusted_ca(other / 'ca.crt', dest2, result['fingerprint'])
+            fail('wrong fingerprint should fail')
+        except frp_pki.PkiError as exc:
+            if 'mismatch' not in str(exc).lower():
+                fail('wrong fingerprint error', exc)
+        if dest2.exists():
+            fail('wrong fingerprint installed CA')
+        pass_('atomic install requires X.509 parse and fingerprint match')
+
+
 def test_fingerprint_format():
     with tempfile.TemporaryDirectory() as tmp:
         pki_dir = Path(tmp) / 'pki'
@@ -351,6 +415,9 @@ def main():
     test_refuse_plain_start()
     test_ca_preserved_on_reissue()
     test_partial_pki_fails()
+    test_fingerprint_is_sha256_of_openssl_der()
+    test_garbage_pem_rejected()
+    test_atomic_install_requires_x509_and_fingerprint()
     test_fingerprint_format()
     test_enroll_uses_public_control_port()
     print()
