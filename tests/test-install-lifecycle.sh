@@ -213,7 +213,7 @@ assert_mode "$SRV/var/lib/frp-auto-deploy/registry.json" "0o600"
 assert_mode "$SRV/etc/frp-auto-deploy/pki/ca.key" "0o600"
 assert_mode "$SRV/etc/frp-auto-deploy/pki/server.key" "0o600"
 [[ -f "$SRV/etc/frp-auto-deploy/pki/ca.crt" ]] || fail "CA missing"
-grep -q 'PROJECT_VERSION=1.8.0' "$SRV/etc/frp-auto-deploy/version" || fail "server version"
+grep -q 'PROJECT_VERSION=1.9.0' "$SRV/etc/frp-auto-deploy/version" || fail "server version"
 grep -q 'FRP_VERSION=0.70.1' "$SRV/etc/frp-auto-deploy/version" || fail "server FRP version"
 [[ ! -f "$SRV/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "stale txn marker after success"
 pass "SERVER_FRESH_INSTALL"
@@ -293,7 +293,7 @@ if grep -q 'installation complete' "$WORKDIR/start-fail.out"; then
 fi
 grep -q 'FAILURE_CLASS=SERVICE_START_FAILED' "$WORKDIR/start-fail.out" "$WORKDIR/start-fail.err" || fail "start failure class"
 if [[ -f "$FAILTREE/etc/frp-auto-deploy/version" ]]; then
-  if grep -q 'PROJECT_VERSION=1.8.0' "$FAILTREE/etc/frp-auto-deploy/version"; then
+  if grep -q 'PROJECT_VERSION=1.9.0' "$FAILTREE/etc/frp-auto-deploy/version"; then
     fail "version committed after start failure"
   fi
 fi
@@ -475,7 +475,7 @@ echo pub >"$CL/etc/frp/client-identity.pub"
 echo mac >"$CL/etc/frp/client-identity.mac"
 chmod 600 "$CL/etc/frp/client-identity.mac"
 echo ca >"$CL/etc/frp-auto-deploy/allocator-ca.crt"
-echo 'PROJECT_VERSION=1.8.0' >"$CL/etc/frp-auto-deploy/version"
+echo 'PROJECT_VERSION=1.9.0' >"$CL/etc/frp-auto-deploy/version"
 touch "$CL/etc/systemd/system/frpc.service"
 # mock release API detector
 : >"$WORKDIR/curl-wrap.log"
@@ -530,7 +530,7 @@ grep -q 'sudo frpctl update' "$WORKDIR/rerun.err" || fail "directs to update"
 pass "CLIENT_REINSTALL_SAFE"
 
 # ---------------------------------------------------------------------------
-# Project update 1.7.0 -> 1.8.0
+# Project update 1.7.0 -> 1.9.0
 # ---------------------------------------------------------------------------
 UP="$WORKDIR/client-170"
 mkdir -p "$UP/etc/frp" "$UP/etc/frp-auto-deploy" "$UP/usr/local/bin" "$UP/usr/local/lib/frp-auto-deploy"
@@ -582,15 +582,15 @@ export FRP_CLIENT_TEST_ROOT="$UP"
 export FRP_CLIENT_LIB="$ROOT/lib/frp-client-common.sh"
 if ! "$ROOT/tools/frp-client" update --source "$ROOT" >"$WORKDIR/up170.out" 2>"$WORKDIR/up170.err"; then
   cat "$WORKDIR/up170.out" "$WORKDIR/up170.err" >&2
-  fail "1.7.0 to 1.8.0 update"
+  fail "1.7.0 to 1.9.0 update"
 fi
-grep -q '1.7.0 -> 1.8.0' "$WORKDIR/up170.out" || fail "version transition 1.7.0"
+grep -q '1.7.0 -> 1.9.0' "$WORKDIR/up170.out" || fail "version transition 1.7.0"
 grep -q 'Enrollment Code : NOT REQUIRED' "$WORKDIR/up170.out" || fail "no enrollment"
 grep -q 'frpc restarted  : NO' "$WORKDIR/up170.out" || fail "no frpc restart"
 [[ "$(frp_file_sha256 "$UP/etc/frp/client-state.json")" == "$STATE_BEFORE" ]] || fail "state changed"
 [[ "$(frp_file_sha256 "$UP/etc/frp-auto-deploy/allocator-ca.crt")" == "$CA_BEFORE" ]] || fail "client CA changed"
 [[ "$(frp_file_sha256 "$UP/etc/frp/client-identity.key")" == "$KEY_BEFORE" ]] || fail "identity changed"
-grep -q 'PROJECT_VERSION=1.8.0' "$UP/etc/frp-auto-deploy/version" || fail "version not 1.8.0"
+grep -q 'PROJECT_VERSION=1.9.0' "$UP/etc/frp-auto-deploy/version" || fail "version not 1.9.0"
 [[ ! -f "$UP/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "txn marker left"
 pass "PROJECT_UPDATE_ATOMIC"
 pass "CLIENT_CA_PRESERVED"
@@ -601,7 +601,7 @@ pass "PORT_ASSIGNMENTS_PRESERVED"
 if ! "$ROOT/tools/frp-client" update --source "$ROOT" >"$WORKDIR/same.out" 2>"$WORKDIR/same.err"; then
   fail "same-version update"
 fi
-grep -q '1.8.0 -> 1.8.0' "$WORKDIR/same.out" || fail "same version line"
+grep -q '1.9.0 -> 1.9.0' "$WORKDIR/same.out" || fail "same version line"
 [[ "$(frp_file_sha256 "$UP/etc/frp/client-state.json")" == "$STATE_BEFORE" ]] || fail "same-version mutated state"
 pass "SAME_VERSION_UPDATE_IDEMPOTENT"
 
@@ -616,7 +616,7 @@ if "$ROOT/tools/frp-client" update --source "$ROOT" >"$WORKDIR/down.out" 2>"$WOR
 fi
 grep -q 'FAILURE_CLASS=DOWNGRADE_REFUSED' "$WORKDIR/down.out" "$WORKDIR/down.err" || fail "downgrade class"
 cat >"$UP/etc/frp-auto-deploy/version" <<'EOF'
-PROJECT_VERSION=1.8.0
+PROJECT_VERSION=1.9.0
 FRP_VERSION=0.70.1
 EOF
 
@@ -640,7 +640,7 @@ setup_update_tree() {
   echo '{"schema_version":2,"reserved":[6000],"clients":{}}' >"$tree/var/lib/frp-auto-deploy/registry.json"
   chmod 600 "$tree/var/lib/frp-auto-deploy/registry.json"
   cat >"$tree/etc/frp-auto-deploy/version" <<EOF
-PROJECT_VERSION=1.8.0
+PROJECT_VERSION=1.9.0
 FRP_VERSION=0.70.1
 EOF
 }

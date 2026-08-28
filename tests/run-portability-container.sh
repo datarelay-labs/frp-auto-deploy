@@ -66,6 +66,7 @@ python3 -m py_compile \
   server/migrate_token.py \
   lib/frp_mgmt_auth.py \
   lib/frp_pki.py \
+  lib/frp_doctor.py \
   scripts/build-bundles.py
 while IFS= read -r -d '' f; do
   bash -n "$f"
@@ -81,6 +82,7 @@ bash -n tools/frp-server-status tools/frp-update tools/frp-client tools/frpctl
 ./tests/test-install-lifecycle.sh
 ./tests/test-frpctl.sh
 ./tests/test-frpctl-completion.sh
+./tests/test-frpctl-doctor.sh
 python3 tests/test-allocator.py
 python3 tests/test-mgmt-identity.py
 python3 tests/test-enrollment-security.py

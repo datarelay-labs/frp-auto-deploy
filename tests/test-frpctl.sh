@@ -101,6 +101,7 @@ grep -q 'only command you need to remember' "$WORKDIR/help.out" || fail "help re
 grep -q 'sudo frpctl' "$WORKDIR/help.out" || fail "help sudo frpctl"
 grep -q 'frps' "$WORKDIR/help.out" || fail "help mentions frps"
 grep -q 'frpc' "$WORKDIR/help.out" || fail "help mentions frpc"
+grep -q 'doctor             Run read-only health and consistency checks' "$WORKDIR/help.out" || fail "help doctor"
 grep -q 'Persistent interactive CLI' "$WORKDIR/help.out" || fail "help persistent CLI"
 "$CTL" --help >"$WORKDIR/help2.out"
 grep -q 'Usage: frpctl' "$WORKDIR/help2.out" || fail "--help usage"

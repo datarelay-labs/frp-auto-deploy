@@ -168,6 +168,7 @@ allocator = 'configured' if data.get('allocator_url') else 'missing'
 print('FRP Client')
 print('==========')
 print()
+print(f"Role            : Client")
 print(f"Project version : {project_version}")
 print(f"Hostname        : {data.get('hostname', '')}")
 print(f"FRP server      : {data.get('frp_server', '')}:{data.get('frp_server_port', '')}")
@@ -189,6 +190,21 @@ for sid, item in services.items():
     print()
 PY
   frp_lifecycle_report
+  pending="$(frp_client_pending_path)"
+  if [[ -f "$pending" ]]; then
+    python3 - "$pending" <<'PY'
+import json, sys
+from pathlib import Path
+try:
+    data = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+except Exception:
+    raise SystemExit(0)
+fail = data.get('failure_class') or data.get('FAILURE_CLASS') or ''
+if fail:
+    print(f"Last failure      : {fail}")
+    print("Recovery required : yes")
+PY
+  fi
 }
 
 frp_client_info() {

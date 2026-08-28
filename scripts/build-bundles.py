@@ -12,6 +12,8 @@ files=[
  'lib/frp-common.sh',
  'lib/frp_mgmt_auth.py',
  'lib/frp_pki.py',
+ 'lib/frp-doctor-common.sh',
+ 'lib/frp_doctor.py',
  'server/frp-port-allocator.py',
  'server/migrate_token.py',
  'server/frps.service',
@@ -49,6 +51,8 @@ client_files=[
  'lib/frp-common.sh',
  'lib/frp-client-common.sh',
  'lib/frp_mgmt_auth.py',
+ 'lib/frp-doctor-common.sh',
+ 'lib/frp_doctor.py',
  'tools/frp-client',
  'tools/frpctl',
 ]

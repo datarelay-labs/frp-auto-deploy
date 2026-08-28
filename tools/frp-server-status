@@ -80,6 +80,18 @@ unit_state() {
 frps_state="$(unit_state frps)"
 allocator_state="$(unit_state frp-port-allocator)"
 
+host_role="Server"
+if type frp_detect_host_role >/dev/null 2>&1; then
+  frp_detect_host_role
+  case "${FRP_HOST_ROLE:-}" in
+    both) host_role="Server + Client" ;;
+    client) host_role="Client" ;;
+    server) host_role="Server" ;;
+    partial-server) host_role="Partial server installation" ;;
+    partial-client) host_role="Partial client installation" ;;
+  esac
+fi
+
 control_port=""
 control_listen_port=""
 port_start=""
@@ -195,10 +207,41 @@ if type frp_registry_counts >/dev/null 2>&1 && [[ -r "$registry_file" ]]; then
   reserved="${counts##* }"
 fi
 
+lifecycle="consistent"
+last_failure=""
+pending_file=""
+if type frp_txn_marker_path >/dev/null 2>&1; then
+  pending_file="$(frp_txn_marker_path)"
+elif type frp_path >/dev/null 2>&1; then
+  pending_file="$(frp_path /var/lib/frp-auto-deploy/update-pending.json)"
+else
+  pending_file=/var/lib/frp-auto-deploy/update-pending.json
+fi
+if [[ -f "$pending_file" ]]; then
+  lifecycle="RECOVERY_REQUIRED"
+  eval "$(python3 - "$pending_file" <<'PY'
+import json, shlex, sys
+from pathlib import Path
+try:
+    data = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+except Exception:
+    raise SystemExit(0)
+phase = data.get('phase') or 'unknown'
+op = data.get('operation') or ''
+fail = data.get('failure_class') or data.get('FAILURE_CLASS') or ''
+print('pending_phase=' + shlex.quote(str(phase)))
+print('pending_op=' + shlex.quote(str(op)))
+if fail:
+    print('last_failure=' + shlex.quote(str(fail)))
+PY
+)" 2>/dev/null || true
+fi
+
 cat <<EOF
 FRP Auto Deploy
 ===============
 
+Role            : ${host_role}
 Project version : ${project_version}
 Installed FRP   : ${installed_frp}
 Tested FRP      : ${tested_frp}
@@ -212,7 +255,16 @@ Public host     : ${public_host_state}
 
 frps            : ${frps_state}
 allocator       : ${allocator_state}
+Lifecycle       : ${lifecycle}
 EOF
+
+if [[ -n "${last_failure:-}" ]]; then
+  echo "Last failure    : ${last_failure}"
+  echo "Recovery required : yes"
+fi
+if [[ -n "${pending_phase:-}" ]]; then
+  echo "Pending phase   : ${pending_phase}"
+fi
 
 if [[ "$registry_state" == "incompatible" || "$registry_state" == "invalid" ]]; then
   echo "Action required : backup/reset/redeploy before using generic multi-service enrollment"
@@ -221,7 +273,9 @@ fi
 
 if [[ -n "${control_port:-}" ]]; then
   echo
-  echo "Public host     : ${public_host:-unknown}"
+  echo "FRP control"
+  echo "  Public endpoint : ${public_host:-unknown}:${control_port}"
+  echo "  Local listener  : 0.0.0.0:${control_listen_port:-$control_port}"
   echo "FRP public      : TCP/${control_port}"
   if [[ -n "${control_listen_port:-}" && "${control_listen_port}" != "${control_port}" ]]; then
     echo "FRP listen      : TCP/${control_listen_port}"
@@ -229,10 +283,17 @@ if [[ -n "${control_port:-}" ]]; then
     echo "FRP listen      : TCP/${control_listen_port:-$control_port}"
   fi
   echo "Service range   : TCP/${port_start}-${port_end}"
+  echo
+  echo "Allocator"
   if [[ -n "${allocator_url:-}" ]]; then
+    echo "  Public endpoint : ${allocator_url}"
     echo "Allocator URL   : ${allocator_url}"
   fi
+  echo "  Local listener  : 0.0.0.0:${allocator_port}"
   echo "Allocator listen: TCP/${allocator_port}"
+  if [[ -n "${allocator_public:-}" && "${allocator_public}" != "${allocator_port}" ]]; then
+    echo "Allocator public: TCP/${allocator_public}"
+  fi
   if [[ -n "${ca_fingerprint:-}" ]]; then
     echo "TLS CA SHA256   : ${ca_fingerprint}"
   fi

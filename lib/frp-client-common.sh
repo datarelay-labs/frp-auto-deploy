@@ -13,7 +13,7 @@ FRP_CLIENT_UPGRADE_BACKUP_KEEP="${FRP_CLIENT_UPGRADE_BACKUP_KEEP:-5}"
 FRP_CLIENT_UPDATE_URL="${FRP_CLIENT_UPDATE_URL:-https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh}"
 
 # Defaults match VERSION. A sibling VERSION file overrides project/FRP versions.
-PROJECT_VERSION="${PROJECT_VERSION:-1.8.0}"
+PROJECT_VERSION="${PROJECT_VERSION:-1.9.0}"
 FRP_VERSION="${FRP_VERSION:-0.70.1}"
 _FRP_CLIENT_COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${_FRP_CLIENT_COMMON_DIR}/../VERSION" ]]; then
@@ -2724,6 +2724,14 @@ frp_client_install_management_files() {
     echo "ERROR: missing ${source}/lib/frp_mgmt_auth.py" >&2
     return 1
   }
+  [[ -f "${source}/lib/frp-doctor-common.sh" ]] || {
+    echo "ERROR: missing ${source}/lib/frp-doctor-common.sh" >&2
+    return 1
+  }
+  [[ -f "${source}/lib/frp_doctor.py" ]] || {
+    echo "ERROR: missing ${source}/lib/frp_doctor.py" >&2
+    return 1
+  }
   [[ -f "${source}/tools/frp-client" ]] || {
     echo "ERROR: missing ${source}/tools/frp-client" >&2
     return 1
@@ -2735,6 +2743,8 @@ frp_client_install_management_files() {
   install -m 0644 "${source}/lib/frp-client-common.sh" "${libdir}/frp-client-common.sh"
   install -m 0644 "${source}/lib/frp-common.sh" "${libdir}/frp-common.sh"
   install -m 0644 "${source}/lib/frp_mgmt_auth.py" "${libdir}/frp_mgmt_auth.py"
+  install -m 0644 "${source}/lib/frp-doctor-common.sh" "${libdir}/frp-doctor-common.sh"
+  install -m 0644 "${source}/lib/frp_doctor.py" "${libdir}/frp_doctor.py"
   install -m 0755 "${source}/tools/frp-client" "${bindir}/frp-client"
   install -m 0755 "${source}/tools/frpctl" "${bindir}/frpctl"
   frp_client_upgrade_source_version "$source"
@@ -2747,6 +2757,8 @@ frp_client_upgrade_destinations() {
     "usr/local/lib/frp-auto-deploy/frp-client-common.sh:0644:lib/frp-client-common.sh" \
     "usr/local/lib/frp-auto-deploy/frp-common.sh:0644:lib/frp-common.sh" \
     "usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py:0644:lib/frp_mgmt_auth.py" \
+    "usr/local/lib/frp-auto-deploy/frp-doctor-common.sh:0644:lib/frp-doctor-common.sh" \
+    "usr/local/lib/frp-auto-deploy/frp_doctor.py:0644:lib/frp_doctor.py" \
     "usr/local/bin/frp-client:0755:tools/frp-client" \
     "usr/local/bin/frpctl:0755:tools/frpctl"
 }
@@ -2786,7 +2798,9 @@ frp_client_upgrade_validate_staged() {
   bash -n "${staged}/usr/local/bin/frpctl" || return 1
   bash -n "${staged}/usr/local/lib/frp-auto-deploy/frp-client-common.sh" || return 1
   bash -n "${staged}/usr/local/lib/frp-auto-deploy/frp-common.sh" || return 1
+  bash -n "${staged}/usr/local/lib/frp-auto-deploy/frp-doctor-common.sh" || return 1
   python3 -m py_compile "${staged}/usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py" || return 1
+  python3 -m py_compile "${staged}/usr/local/lib/frp-auto-deploy/frp_doctor.py" || return 1
   rm -rf "${staged}/usr/local/lib/frp-auto-deploy/__pycache__" \
     "${staged}/usr/local/lib/frp-auto-deploy/"*.pyc 2>/dev/null || true
   [[ -x "${staged}/usr/local/bin/frp-client" ]] || {

@@ -15,6 +15,8 @@ for f in \
   "$BASE_DIR/server/frp-port-allocator.service" \
   "$BASE_DIR/lib/frp_mgmt_auth.py" \
   "$BASE_DIR/lib/frp_pki.py" \
+  "$BASE_DIR/lib/frp-doctor-common.sh" \
+  "$BASE_DIR/lib/frp_doctor.py" \
   "$BASE_DIR/tools/frp-create-client" \
   "$BASE_DIR/tools/frp-clients" \
   "$BASE_DIR/tools/frp-client-info" \
@@ -914,6 +916,8 @@ EOF2
   install -m 0644 "$BASE_DIR/lib/frp_mgmt_auth.py" "${lib_dir}/frp_mgmt_auth.py"
   install -m 0644 "$BASE_DIR/lib/frp_pki.py" "${lib_dir}/frp_pki.py"
   install -m 0644 "$BASE_DIR/lib/frp-common.sh" "${lib_dir}/frp-common.sh"
+  install -m 0644 "$BASE_DIR/lib/frp-doctor-common.sh" "${lib_dir}/frp-doctor-common.sh"
+  install -m 0644 "$BASE_DIR/lib/frp_doctor.py" "${lib_dir}/frp_doctor.py"
   install -m 0644 "$BASE_DIR/server/frps.service" "$unit_frps"
   frp_write_compatible_systemd_unit \
     "$BASE_DIR/server/frp-port-allocator.service" \

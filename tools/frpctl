@@ -4,6 +4,15 @@
 # client-state mutations.
 set -euo pipefail
 
+_FRPCTL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${_FRPCTL_DIR}/../lib/frp-doctor-common.sh" ]]; then
+  # shellcheck source=../lib/frp-doctor-common.sh
+  . "${_FRPCTL_DIR}/../lib/frp-doctor-common.sh"
+elif [[ -f /usr/local/lib/frp-auto-deploy/frp-doctor-common.sh ]]; then
+  # shellcheck disable=SC1091
+  . /usr/local/lib/frp-auto-deploy/frp-doctor-common.sh
+fi
+
 frpctl_path() {
   local p="$1"
   local root="${FRP_CTL_TEST_ROOT:-${FRP_CLIENT_TEST_ROOT:-${FRP_DEPLOY_TEST_ROOT:-${FRP_UPDATE_ROOT:-}}}}"
@@ -176,7 +185,8 @@ Direct commands remain available for scripts, automation, and advanced use.
 Common commands:
   (no args)          Persistent interactive CLI (requires a TTY)
   menu               Open the guided numbered menu
-  status             Show status for this host's role
+  status             Show a quick operational summary for this host's role
+  doctor             Run read-only health and consistency checks
   version            Show installed versions (no network)
   update             Upgrade this host's frp-auto-deploy software
   help               Show this help
@@ -228,8 +238,9 @@ frpctl_print_client_menu() {
   echo "2) Status"
   echo "3) Connection information"
   echo "4) Update FRP Auto Deploy"
-  echo "5) Help"
-  echo "6) Exit"
+  echo "5) System diagnostics"
+  echo "6) Help"
+  echo "7) Exit"
 }
 
 frpctl_print_server_menu() {
@@ -241,8 +252,9 @@ frpctl_print_server_menu() {
   echo "6) Release service"
   echo "7) Release client"
   echo "8) Update"
-  echo "9) Help"
-  echo "10) Exit"
+  echo "9) System diagnostics"
+  echo "10) Help"
+  echo "11) Exit"
 }
 
 frpctl_print_both_menu() {
@@ -251,8 +263,9 @@ frpctl_print_both_menu() {
   echo "1) Client operations"
   echo "2) Server operations"
   echo "3) Status (both)"
-  echo "4) Help"
-  echo "5) Exit"
+  echo "4) System diagnostics"
+  echo "5) Help"
+  echo "6) Exit"
 }
 
 frpctl_input_init() {
@@ -327,12 +340,13 @@ frpctl_client_menu() {
       2) frpctl_run frp-client status ;;
       3) frpctl_run frp-client info ;;
       4) frpctl_client_update ;;
-      5) frpctl_usage ;;
-      6)
+      5) frpctl_dispatch doctor || true ;;
+      6) frpctl_usage ;;
+      7)
         echo "Exit."
         return 0
         ;;
-      *) echo "ERROR: select 1-6" >&2 ;;
+      *) echo "ERROR: select 1-7" >&2 ;;
     esac
   done
 }
@@ -386,12 +400,13 @@ frpctl_server_menu() {
         frpctl_run frp-release-client "$client"
         ;;
       8) frpctl_run frp-update ;;
-      9) frpctl_usage ;;
-      10)
+      9) frpctl_dispatch doctor || true ;;
+      10) frpctl_usage ;;
+      11)
         echo "Exit."
         return 0
         ;;
-      *) echo "ERROR: select 1-10" >&2 ;;
+      *) echo "ERROR: select 1-11" >&2 ;;
     esac
   done
 }
@@ -411,12 +426,13 @@ frpctl_both_menu() {
       1) frpctl_client_menu ;;
       2) frpctl_server_menu ;;
       3) frpctl_status_both ;;
-      4) frpctl_usage ;;
-      5)
+      4) frpctl_dispatch doctor || true ;;
+      5) frpctl_usage ;;
+      6)
         echo "Exit."
         return 0
         ;;
-      *) echo "ERROR: select 1-5" >&2 ;;
+      *) echo "ERROR: select 1-6" >&2 ;;
     esac
   done
 }
@@ -534,6 +550,7 @@ Service management
 
 System
   status                Show client status
+  doctor                Run read-only health and consistency checks
   update                Update frp-auto-deploy
   version               Show installed versions
 EOF
@@ -557,6 +574,7 @@ Reservations
 
 System
   status                Show server status
+  doctor                Run read-only health and consistency checks
   update                Update the tested FRP binary on this server
   version               Show installed versions
 EOF
@@ -593,6 +611,7 @@ frpctl_repl_help() {
     echo "Common commands"
     echo "---------------"
     echo "  status                Show client and server status"
+    echo "  doctor                Run read-only health and consistency checks"
     echo "  client-status         Show client status only"
     echo "  server-status         Show server status only"
     echo "  update                Update client tools, then the tested FRP server binary"
@@ -635,7 +654,7 @@ frpctl_known_commands() {
   local client=0 server=0
   frpctl_is_client && client=1
   frpctl_is_server && server=1
-  printf '%s\n' help menu status version update clear exit quit q
+  printf '%s\n' help menu status doctor version update clear exit quit q
   if [[ "$client" == "1" ]]; then
     printf '%s\n' services manage info client-status client-update
   fi
@@ -756,6 +775,13 @@ PY
 frpctl_complete_arg_stage() {
   local cmd="$1" argn="$2"
   case "$cmd" in
+    doctor)
+      if [[ "$argn" == "1" ]]; then
+        printf '%s' "doctor-flag"
+      else
+        printf '%s' "none"
+      fi
+      ;;
     client|client-info|revoke|revoke-client|release-client)
       if [[ "$argn" == "1" ]]; then
         printf '%s' "client"
@@ -842,6 +868,9 @@ frpctl_completion_candidates() {
   case "${_FRP_CTL_COMP_STAGE}" in
     command)
       frpctl_completable_commands | sort -u | frpctl_filter_prefix "${_FRP_CTL_COMP_PREFIX}"
+      ;;
+    doctor-flag)
+      printf '%s\n' --json --verbose --quiet | frpctl_filter_prefix "${_FRP_CTL_COMP_PREFIX}"
       ;;
     client)
       if ! frpctl_is_server; then
@@ -1087,6 +1116,13 @@ frpctl_dispatch() {
       ;;
     status)
       frpctl_status "$@"
+      ;;
+    doctor)
+      if ! type frp_doctor_main >/dev/null 2>&1; then
+        echo "ERROR: doctor diagnostics are not installed on this host." >&2
+        return 2
+      fi
+      frp_doctor_main "$@"
       ;;
     client-status)
       frpctl_require_client || return 1

@@ -78,7 +78,7 @@ cands() {
 
 has_line() {
   local needle="$1"
-  grep -qx "$needle"
+  grep -qx -- "$needle"
 }
 
 CLIENT="$WORKDIR/client"
@@ -92,6 +92,7 @@ write_server_tree "$BOTH"
 # --- Single match
 export FRP_CTL_TEST_ROOT="$SERVER"
 [[ "$(cands sta)" == "status" ]] || fail "sta -> status"
+[[ "$(cands doc)" == "doctor" ]] || fail "doc -> doctor"
 [[ "$(frpctl_complete_line sta)" == "status " ]] || fail "sta complete line"
 [[ "$(cands upd)" == "update" ]] || fail "upd -> update"
 [[ "$(cands ver)" == "version" ]] || fail "ver -> version"
@@ -126,6 +127,7 @@ all_client="$(cands "")"
 echo "$all_client" | has_line services || fail "client list services"
 echo "$all_client" | has_line manage || fail "client list manage"
 echo "$all_client" | has_line status || fail "client list status"
+echo "$all_client" | has_line doctor || fail "client list doctor"
 if echo "$all_client" | has_line enroll; then fail "client offered enroll"; fi
 if echo "$all_client" | has_line clients; then fail "client offered clients"; fi
 if echo "$all_client" | has_line revoke; then fail "client offered revoke"; fi
@@ -137,6 +139,7 @@ pass "FRPCTL_TAB_SERVER_COMMAND_NOT_ON_CLIENT"
 export FRP_CTL_TEST_ROOT="$SERVER"
 all_server="$(cands "")"
 echo "$all_server" | has_line enroll || fail "server list enroll"
+echo "$all_server" | has_line doctor || fail "server list doctor"
 echo "$all_server" | has_line clients || fail "server list clients"
 echo "$all_server" | has_line revoke || fail "server list revoke"
 echo "$all_server" | has_line create-client || fail "server list create-client"
@@ -155,9 +158,17 @@ echo "$all_both" | has_line clients || fail "dual missing clients"
 echo "$all_both" | has_line manage || fail "dual missing manage"
 echo "$all_both" | has_line client-status || fail "dual missing client-status"
 echo "$all_both" | has_line server-update || fail "dual missing server-update"
+echo "$all_both" | has_line doctor || fail "dual missing doctor"
 pass "FRPCTL_TAB_DUAL_ROLE_COMMANDS"
 
-# --- Client name / service id completion (read-only registry)
+# --- doctor flags
+export FRP_CTL_TEST_ROOT="$CLIENT"
+[[ "$(cands "doctor --j")" == "--json" ]] || fail "doctor --j -> --json"
+flags="$(cands "doctor --")"
+echo "$flags" | has_line --json || fail "doctor flags missing --json"
+echo "$flags" | has_line --verbose || fail "doctor flags missing --verbose"
+echo "$flags" | has_line --quiet || fail "doctor flags missing --quiet"
+pass "FRPCTL_TAB_DOCTOR_FLAGS"
 export FRP_CTL_TEST_ROOT="$SERVER"
 [[ "$(cands "client d")" == "dp-os-upgrade" ]] || fail "client d -> dp-os-upgrade"
 [[ "$(frpctl_complete_line "client d")" == "client dp-os-upgrade " ]] || fail "client d complete line"

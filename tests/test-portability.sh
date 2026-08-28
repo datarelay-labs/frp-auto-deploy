@@ -134,6 +134,7 @@ python3 -m py_compile \
   "$ROOT/server/migrate_token.py" \
   "$ROOT/lib/frp_mgmt_auth.py" \
   "$ROOT/lib/frp_pki.py" \
+  "$ROOT/lib/frp_doctor.py" \
   "$ROOT/scripts/build-bundles.py"
 pass "PYTHON_MIN_VERSION"
 
@@ -242,6 +243,8 @@ grep -q 'sbin_dir' "$ROOT/install-server.sh" || fail "server tools in sbin"
 grep -q '/usr/local/bin/frpc' "$ROOT/install-client.sh" || fail "client frpc path"
 grep -q 'frp_client_path /usr/local/bin' "$ROOT/lib/frp-client-common.sh" || fail "client tools in bin"
 grep -q 'lib/frp-common.sh' "$ROOT/scripts/build-bundles.py" || fail "client bundle missing common lib"
+grep -q 'lib/frp_doctor.py' "$ROOT/scripts/build-bundles.py" || fail "bundle missing doctor engine"
+grep -q 'lib/frp-doctor-common.sh' "$ROOT/scripts/build-bundles.py" || fail "bundle missing doctor lib"
 if grep -q 'Debian/Ubuntu only' "$ROOT/install-server.sh"; then
   fail "server installer still apt-only"
 fi

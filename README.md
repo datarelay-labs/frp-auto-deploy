@@ -8,7 +8,7 @@ It automates FRP server/client installation, persistent public port assignment f
 > The IP addresses `203.0.113.10` and `192.0.2.50` used in this README are documentation-only example addresses (RFC 5737). Replace them with your own public and internal addresses when deploying.
 
 Current pinned FRP version: **v0.70.1**
-Current project version: **1.8.0**
+Current project version: **1.9.0**
 
 ---
 
@@ -29,7 +29,7 @@ FRP Auto Deploy CLI
 ===================
 
 Role            : Server
-Project version : 1.8.0
+Project version : 1.9.0
 FRP version     : 0.70.1
 
 Type 'help' or '?' for available commands.
@@ -53,7 +53,7 @@ FRP Auto Deploy CLI
 ===================
 
 Role            : Client
-Project version : 1.8.0
+Project version : 1.9.0
 FRP version     : 0.70.1
 
 frpctl> status
@@ -71,9 +71,12 @@ Direct commands remain available for automation, scripts, and advanced users:
 ```bash
 sudo frpctl status
 sudo frpctl clients
+sudo frpctl doctor
 sudo frpctl update
 sudo frpctl help
 ```
+
+`status` is a fast operational snapshot. `doctor` runs deeper read-only diagnostics. Mutation stays on explicit commands such as `manage`, `update`, `enroll`, `revoke`, and `release-*`.
 
 Official upstream FRP binaries are:
 
@@ -934,6 +937,37 @@ sudo frp-server-status --check
 The status command reports the installed FRP binary version, the FRP version tested by this `frp-auto-deploy` release, registry schema readiness, public host / allocator URL configuration, service state, and client/port counts.
 
 `--check` exits non-zero when the registry is not schema v2 or required runtime values are missing. It does not change any files.
+
+## Diagnose a host without changing it
+
+```bash
+sudo frpctl doctor
+sudo frpctl doctor --json
+```
+
+`doctor` is read-only. It does not restart services, rewrite configuration, release ports, revoke clients, re-enroll, consume a management nonce, or update software.
+
+Use `frpctl status` for a fast snapshot. Use `frpctl doctor` when you need to know whether state is corrupt, merely unreachable, or waiting on recovery. Then run an existing mutation command only if doctor recommends it.
+
+Typical recovery examples:
+
+```text
+FRP binary version mismatch
+  sudo frpctl update
+
+Missing generated frpc.toml
+  sudo frp-client manage
+  Apply the current configuration
+
+Allocator TLS certificate hostname mismatch
+  Re-run the server installer so the existing CA is preserved and only
+  the allocator server certificate is reissued.
+
+Interrupted project update
+  sudo frpctl update
+```
+
+Machine-readable mode prints a versioned JSON report with stable check IDs. Exit code 0 means no FAIL findings (warnings are allowed). Exit code 1 means one or more FAIL findings. Exit code 2 means doctor itself could not complete.
 
 ## Update FRP
 
