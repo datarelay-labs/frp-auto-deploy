@@ -401,7 +401,69 @@ def test_enroll_uses_public_control_port():
             fail('enroll public port', result)
         if result.get('frp_server') != '203.0.113.10' or int(result.get('frp_server_port')) != 8443:
             fail('enroll returned listen port', result)
+        if result.get('frp_transport') != 'tcp':
+            fail('enroll default transport', result)
         pass_('enroll response uses FRP public control port')
+    finally:
+        env_tmp.cleanup()
+
+
+def test_enroll_single443_transport():
+    env_tmp = tempfile.TemporaryDirectory()
+    try:
+        tmp = Path(env_tmp.name)
+        cfg = {
+            'public_host': '203.0.113.10',
+            'frp_control_public_port': 443,
+            'frp_control_listen_port': 7000,
+            'deployment_mode': 'single443',
+            'port_start': 19100,
+            'port_end': 19110,
+            'listen_port': 6099,
+            'registry_file': str(tmp / 'registry.json'),
+            'enrollments_dir': str(tmp / 'enrollments'),
+            'token_file': str(tmp / 'token'),
+        }
+        Path(cfg['enrollments_dir']).mkdir()
+        Path(cfg['token_file']).write_text('test-frp-token-do-not-use\n')
+        Path(cfg['registry_file']).write_text(json.dumps({
+            'schema_version': 2, 'reserved': [], 'clients': {},
+        }) + '\n')
+        cfg_path = tmp / 'config.json'
+        cfg_path.write_text(json.dumps(cfg) + '\n')
+        alloc = MOD.Allocator(str(cfg_path))
+        MOD.port_is_available = lambda port: True
+        now = int(time.time())
+        rec = {
+            'id': 'aabbccddeeff0011',
+            'secret': 'secret-aabbccddeeff0011',
+            'expires_at': now + 600,
+            'bound_machine_id': None,
+            'used_at': None,
+        }
+        Path(cfg['enrollments_dir'], 'aabbccddeeff0011.json').write_text(json.dumps(rec) + '\n')
+        body = json.dumps({
+            'machine_id': 'machine-a',
+            'hostname': 'host-a',
+            'services': [{
+                'id': 'ssh', 'name': 'SSH', 'protocol': 'tcp',
+                'local_ip': '127.0.0.1', 'local_port': 22, 'preset': 'ssh',
+                'ssh_user': 'aella',
+            }],
+        }, separators=(',', ':')).encode()
+        import hmac
+        ts = str(now)
+        sig = hmac.new(rec['secret'].encode(), (ts + '\n' + body.decode()).encode(), hashlib.sha256).hexdigest()
+        code, result = alloc.enroll('aabbccddeeff0011', ts, sig, body)
+        if code != 200:
+            fail('enroll single443', result)
+        if result.get('frp_transport') != 'wss' or int(result.get('frp_server_port')) != 443:
+            fail('enroll single443 transport', result)
+        received = result.pop('response_hmac')
+        expected = MOD.hmac_hex(rec['secret'], MOD.canonical_json(result))
+        if received != expected:
+            fail('enroll single443 hmac', result)
+        pass_('enroll single443 returns wss and HMAC covers transport')
     finally:
         env_tmp.cleanup()
 
@@ -420,6 +482,7 @@ def main():
     test_atomic_install_requires_x509_and_fingerprint()
     test_fingerprint_format()
     test_enroll_uses_public_control_port()
+    test_enroll_single443_transport()
     print()
     print('PKI_HTTPS_TEST=PASS')
 

@@ -36,13 +36,14 @@ QEMU TCG into `REAL_VM=PASS`.
 
 - [ ] `RELEASE_CANDIDATE_READY=YES` only if the automated gate PASS
 - [ ] `STABLE_TAG_READY=YES` only if the chosen required real gates PASS
-- [ ] Do **not** create `v2.0.0` automatically while required real gates are `NOT_TESTED`
+- [ ] Do **not** create `v2.1.0` automatically while required real gates are `NOT_TESTED`
 
-For 2.0.0, Ubuntu real-VM live baseline is already recorded. Remaining real
-gates are **recommended** (support text says container-tested / pending), not
-claimed as fully certified. Until those recommended gates pass:
+For 2.1.0, automated gates can make a **release candidate**. Remaining real
+gates are **required** before a stable tag. Until those gates pass:
 
 ```text
-RELEASE_CANDIDATE_READY=YES
+RELEASE_CANDIDATE_READY=YES   # only if the automated gate PASS
 STABLE_TAG_READY=NO
 ```
+
+Do not create `v2.1.0` in the same task that only lands the RC commit.

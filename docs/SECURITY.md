@@ -1,6 +1,8 @@
 # Security architecture
 
-This document describes the security model of `frp-auto-deploy` **2.0.0**.
+This document describes the security model of `frp-auto-deploy` **2.1.0**
+(current source version / release candidate; `v2.1.0` is not tagged until
+real-environment gates pass).
 It is not a certification, audit report, or guarantee against a compromised
 root account.
 
@@ -11,8 +13,14 @@ management protocol version (`schema: 1` in signed requests) and of FRP.
 
 The FRP control/data tunnel uses:
 
-- FRP native TLS
+- FRP native TLS on Direct mode (`transport.protocol = tcp`, `transport.tls.enable = true`)
+- FRP WSS on Enterprise single-443 (`transport.protocol = wss` plus `trustedCaFile` pinning the allocator CA)
 - the FRP server token (`/etc/frp/server_token`)
+
+In single-443 mode nginx terminates TLS on public TCP/443 with the project
+leaf certificate. The frps backend on localhost does not use `tls.force`;
+authentication remains the FRP token. Plain WebSocket (`websocket` without
+TLS) is not a supported production transport.
 
 The FRP token authenticates the **tunnel only**. It is not a management API
 credential, not an Enrollment Code, and not a Bootstrap Ticket.
@@ -49,10 +57,13 @@ rotation.
 ## 4. CA fingerprint bootstrap
 
 First client install downloads `/ca.crt` once over the configured HTTPS
-allocator URL, parses it as X.509, and checks the SHA256 fingerprint of the
-**canonical DER** encoding against `FRP_ALLOCATOR_CA_SHA256`. On success it
-stores `/etc/frp-auto-deploy/allocator-ca.crt`. Later allocator calls use
-verified HTTPS (`curl --cacert`).
+allocator URL **without** using a `--cacert` file that does not exist yet.
+It parses the body as X.509 and checks the SHA256 fingerprint of the
+**canonical DER** encoding against `FRP_ALLOCATOR_CA_SHA256`. That hash is the
+**CA** certificate, not the nginx/allocator leaf. On success it stores
+`/etc/frp-auto-deploy/allocator-ca.crt`. Later allocator calls use
+verified HTTPS (`curl --cacert` with that stored CA). This is not TOFU and not
+self-verification of a file against itself.
 
 The fingerprint is public trust metadata. It does **not** prove that a
 `curl | sudo bash` bootstrap script from GitHub is authentic. Those are
@@ -265,7 +276,12 @@ Token rotation is not automatic. Reinstall preserves the existing FRP token.
 
 ## 16. Mixed product versions
 
-Project **2.0.0** does not change management protocol schema `1`. An already
-enrolled **1.9.1** client is expected to keep its tunnel and signed management
-against a **2.0.0** server. Product version is not management protocol version.
-There is no forced client re-enrollment on this upgrade.
+Project **2.1.0** does not change management protocol schema `1`. An already
+enrolled **1.9.1** or **2.0.0** client is expected to keep its tunnel and signed
+management against a **2.1.0** Direct-mode server. Product version is not
+management protocol version. There is no forced client re-enrollment on this
+upgrade.
+
+A **2.0.0** client cannot speak FRP WSS. Switching the server to single-443
+requires **2.1.0+** clients and an Apply after cutover; it is not a silent
+transport upgrade.

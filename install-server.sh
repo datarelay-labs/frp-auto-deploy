@@ -13,8 +13,10 @@ for f in \
   "$BASE_DIR/server/migrate_token.py" \
   "$BASE_DIR/server/frps.service" \
   "$BASE_DIR/server/frp-port-allocator.service" \
+  "$BASE_DIR/server/frp-frontend.service" \
   "$BASE_DIR/lib/frp_mgmt_auth.py" \
   "$BASE_DIR/lib/frp_pki.py" \
+  "$BASE_DIR/lib/frp_frontend.py" \
   "$BASE_DIR/lib/frp-doctor-common.sh" \
   "$BASE_DIR/lib/frp_doctor.py" \
   "$BASE_DIR/tools/frp-create-client" \
@@ -109,6 +111,159 @@ frp_pki_dir() {
   else
     frp_server_fs /etc/frp-auto-deploy/pki
   fi
+}
+
+frp_normalize_deployment_mode() {
+  local raw="${1:-direct}"
+  raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
+  raw="${raw//-/}"
+  raw="${raw//_/}"
+  case "$raw" in
+    single443|enterprise|enterprisesingle443)
+      printf '%s' 'single443'
+      ;;
+    direct|'')
+      printf '%s' 'direct'
+      ;;
+    *)
+      echo "ERROR: FRP_DEPLOYMENT_MODE must be direct or single443" >&2
+      return 1
+      ;;
+  esac
+}
+
+frp_mode_is_single443() {
+  [[ "${FRP_DEPLOYMENT_MODE:-direct}" == "single443" ]]
+}
+
+frp_confirm_mode_switch() {
+  local from_mode="$1" to_mode="$2"
+  echo
+  echo "WARNING: switching deployment mode from ${from_mode} to ${to_mode} is a cutover." >&2
+  echo "WARNING: existing clients using the previous FRP control transport will disconnect" >&2
+  echo "WARNING: until they run a 2.1.0+ client apply against the new server." >&2
+  echo "WARNING: this is not a zero-downtime migration." >&2
+  if frp_has_tty; then
+    local answer=""
+    read -r -p "Type SWITCH to confirm this maintenance-window cutover: " answer </dev/tty || true
+    if [[ "$answer" != "SWITCH" ]]; then
+      echo "ERROR: mode switch was not confirmed" >&2
+      return 1
+    fi
+    return 0
+  fi
+  case "${FRP_CONFIRM_MODE_SWITCH:-}" in
+    1|yes|YES|true|TRUE) return 0 ;;
+  esac
+  echo "ERROR: set FRP_CONFIRM_MODE_SWITCH=yes for a non-interactive mode switch" >&2
+  return 1
+}
+
+frp_nginx_bin() {
+  if [[ -n "${FRP_NGINX_BIN:-}" && -x "${FRP_NGINX_BIN}" ]]; then
+    printf '%s' "$FRP_NGINX_BIN"
+    return 0
+  fi
+  if [[ -x /usr/sbin/nginx ]]; then
+    printf '%s' /usr/sbin/nginx
+    return 0
+  fi
+  command -v nginx 2>/dev/null || true
+}
+
+frp_tcp_port_is_listening() {
+  local port="$1" raw=""
+  [[ "$port" =~ ^[1-9][0-9]*$ ]] || return 1
+  if ! command -v ss >/dev/null 2>&1; then
+    return 1
+  fi
+  raw="$(ss -H -lnt 2>/dev/null || ss -lnt 2>/dev/null || true)"
+  printf '%s\n' "$raw" | awk -v p="$port" '
+    $1 ~ /^(State|Netid)$/ { next }
+    {
+      addr=$4
+      gsub(/\]$/, "", addr)
+      sub(/^.*:/, "", addr)
+      if (addr == p) found=1
+    }
+    END { exit found ? 0 : 1 }
+  '
+}
+
+frp_frontend_port_preflight() {
+  local port occupant_ok=0
+  frp_mode_is_single443 || return 0
+  port="${FRP_CONTROL_PUBLIC_PORT:-}"
+  if [[ "${FRP_INSTALL_HOOK_FRONTEND_PORT_BUSY:-}" == "1" ]]; then
+    echo "ERROR: TCP/${port} is already in use by another service." >&2
+    echo "ERROR: Enterprise single-443 needs this public port for the HTTPS/WSS frontend." >&2
+    echo "ERROR: existing Direct deployment was not modified." >&2
+    return 1
+  fi
+  if frp_server_skip_systemd; then
+    return 0
+  fi
+  if ! frp_tcp_port_is_listening "$port"; then
+    return 0
+  fi
+  # Direct frps already bound on this local port: cutover will restart it onto the backend port.
+  if [[ "$(frp_normalize_deployment_mode "${EXISTING_DEPLOYMENT_MODE:-direct}")" == "direct" && \
+        "${EXISTING_CONTROL_LISTEN_PORT:-}" == "$port" ]]; then
+    occupant_ok=1
+  fi
+  # Reinstall of an existing single-443 frontend that already owns the port.
+  if [[ "$(frp_normalize_deployment_mode "${EXISTING_DEPLOYMENT_MODE:-direct}")" == "single443" ]]; then
+    occupant_ok=1
+  fi
+  if [[ "$occupant_ok" == "1" ]]; then
+    return 0
+  fi
+  echo "ERROR: TCP/${port} is already in use by another service." >&2
+  echo "ERROR: Enterprise single-443 needs this public port for the HTTPS/WSS frontend." >&2
+  if [[ -n "${EXISTING_DEPLOYMENT_MODE:-}" ]]; then
+    echo "ERROR: existing Direct deployment was not modified." >&2
+  fi
+  if command -v systemctl >/dev/null 2>&1 && frp_server_systemctl is-active --quiet nginx 2>/dev/null; then
+    echo "ERROR: distro nginx.service is active; stop or rebind it before using frp-frontend.service." >&2
+  fi
+  return 1
+}
+
+frp_ensure_nginx() {
+  local bin
+  bin="$(frp_nginx_bin)"
+  if [[ -n "$bin" && -x "$bin" ]]; then
+    FRP_NGINX_BIN="$bin"
+    return 0
+  fi
+  if frp_server_test_mode; then
+    FRP_NGINX_BIN="${FRP_NGINX_BIN:-/usr/sbin/nginx}"
+    return 0
+  fi
+  MISSING_COMMANDS=(nginx)
+  if [[ -z "${PACKAGE_MANAGER:-}" ]]; then
+    frp_detect_package_manager
+  fi
+  if [[ -z "${PACKAGE_MANAGER:-}" ]]; then
+    echo "ERROR: nginx is required for Enterprise single-443 mode" >&2
+    return 1
+  fi
+  frp_packages_for_missing "$PACKAGE_MANAGER"
+  case "$PACKAGE_MANAGER" in
+    apt) install_dependencies_apt "${PACKAGES[@]}" ;;
+    dnf) install_dependencies_dnf "${PACKAGES[@]}" ;;
+    yum) install_dependencies_yum "${PACKAGES[@]}" ;;
+    *)
+      echo "ERROR: unsupported package manager: ${PACKAGE_MANAGER}" >&2
+      return 1
+      ;;
+  esac
+  bin="$(frp_nginx_bin)"
+  if [[ -z "$bin" || ! -x "$bin" ]]; then
+    echo "ERROR: nginx was installed but the nginx binary was not found" >&2
+    return 1
+  fi
+  FRP_NGINX_BIN="$bin"
 }
 
 frp_valid_public_host() {
@@ -292,6 +447,7 @@ load_existing_server_config() {
   EXISTING_ALLOCATOR_LISTEN_PORT=""
   EXISTING_ALLOCATOR_URL=""
   EXISTING_CLIENT_INSTALLER_URL=""
+  EXISTING_DEPLOYMENT_MODE=""
   [[ -r "$path" ]] || return 0
   eval "$(python3 - "$path" <<'PY'
 import json, shlex, sys
@@ -315,6 +471,7 @@ mapping = {
     'allocator_listen_port': 'EXISTING_ALLOCATOR_LISTEN_PORT',
     'allocator_public_port': 'EXISTING_ALLOCATOR_PUBLIC_PORT',
     'client_installer_url': 'EXISTING_CLIENT_INSTALLER_URL',
+    'deployment_mode': 'EXISTING_DEPLOYMENT_MODE',
 }
 # public_host wins over public_ip when both exist.
 order = [
@@ -323,6 +480,7 @@ order = [
     'port_start', 'port_end',
     'listen_port', 'allocator_listen_port', 'allocator_public_port',
     'client_installer_url',
+    'deployment_mode',
 ]
 seen = {}
 for key in order:
@@ -341,6 +499,33 @@ PY
 }
 
 resolve_server_settings() {
+  local user_set_mode=0 user_control_public=0 user_control_listen=0
+  local user_alloc_public=0 user_alloc_listen=0 user_alloc_url=0
+  local existing_mode="" choice=""
+
+  if [[ -n "${FRP_DEPLOYMENT_MODE:-}" ]]; then
+    user_set_mode=1
+  fi
+  if [[ -n "${FRP_CONTROL_PUBLIC_PORT:-}" || -n "${FRP_CONTROL_PORT:-}" ]]; then
+    user_control_public=1
+  fi
+  if [[ -n "${FRP_CONTROL_LISTEN_PORT:-}" ]]; then
+    user_control_listen=1
+  fi
+  # A single FRP_CONTROL_PORT sets both public and listen (legacy).
+  if [[ -n "${FRP_CONTROL_PORT:-}" && -z "${FRP_CONTROL_LISTEN_PORT:-}" && -z "${FRP_CONTROL_PUBLIC_PORT:-}" ]]; then
+    user_control_listen=1
+  fi
+  if [[ -n "${FRP_ALLOCATOR_PUBLIC_PORT:-}" ]]; then
+    user_alloc_public=1
+  fi
+  if [[ -n "${FRP_ALLOCATOR_LISTEN_PORT:-}" || -n "${FRP_ALLOCATOR_PORT:-}" ]]; then
+    user_alloc_listen=1
+  fi
+  if [[ -n "${FRP_ALLOCATOR_PUBLIC_URL:-}" || -n "${FRP_ALLOCATOR_URL:-}" ]]; then
+    user_alloc_url=1
+  fi
+
   if [[ -z "${FRP_PUBLIC_IP:-}" && -n "${FRP_PUBLIC_HOST:-}" ]]; then
     FRP_PUBLIC_IP="$FRP_PUBLIC_HOST"
   fi
@@ -355,6 +540,7 @@ resolve_server_settings() {
   FRP_PORT_END="${FRP_PORT_END:-${EXISTING_PORT_END:-}}"
   CLIENT_INSTALLER_URL="${FRP_CLIENT_INSTALLER_URL:-${EXISTING_CLIENT_INSTALLER_URL:-$DEFAULT_CLIENT_INSTALLER_URL}}"
   frp_migrate_legacy_client_installer_url
+  FRP_MODE_SWITCH=0
 
   # Public vs listen: dedicated vars win; a single legacy FRP_CONTROL_PORT or
   # existing control_port is used for both only when the split was never set
@@ -406,17 +592,87 @@ resolve_server_settings() {
   local internal_default="${FRP_INTERNAL_IP:-${detected_internal:-}}"
   prompt "Internal FRP server IP (display only)" "$internal_default" FRP_INTERNAL_IP
 
+  existing_mode="$(frp_normalize_deployment_mode "${EXISTING_DEPLOYMENT_MODE:-direct}")" || exit 1
+  if [[ "$user_set_mode" != "1" ]]; then
+    FRP_DEPLOYMENT_MODE="$existing_mode"
+    if frp_has_tty && [[ -z "${EXISTING_DEPLOYMENT_MODE:-}" ]]; then
+      echo
+      echo "Deployment mode"
+      echo "---------------"
+      echo "  1) Direct — FRP control and allocator HTTPS on separate public ports [default]"
+      echo "  2) Enterprise single-443 — HTTPS allocator + FRP control over WSS on one public TCP port"
+      choice=""
+      prompt "Select 1 or 2" "1" choice
+      case "$choice" in
+        2|single443|SINGLE443) FRP_DEPLOYMENT_MODE=single443 ;;
+        *) FRP_DEPLOYMENT_MODE=direct ;;
+      esac
+    fi
+  fi
+  FRP_DEPLOYMENT_MODE="$(frp_normalize_deployment_mode "$FRP_DEPLOYMENT_MODE")" || exit 1
+  if [[ -n "${EXISTING_DEPLOYMENT_MODE:-}" && "$existing_mode" != "$FRP_DEPLOYMENT_MODE" ]]; then
+    frp_confirm_mode_switch "$existing_mode" "$FRP_DEPLOYMENT_MODE" || exit 1
+    FRP_MODE_SWITCH=1
+  fi
+
+  if [[ "$FRP_MODE_SWITCH" == "1" && "$user_alloc_url" != "1" ]]; then
+    FRP_ALLOCATOR_PUBLIC_URL=""
+    EXISTING_ALLOCATOR_URL=""
+  fi
+
+  if frp_mode_is_single443; then
+    if [[ "$user_control_public" != "1" && -z "${FRP_CONTROL_PUBLIC_PORT:-}" ]]; then
+      FRP_CONTROL_PUBLIC_PORT=443
+    fi
+    if [[ "$user_alloc_public" != "1" ]]; then
+      if [[ -z "${FRP_ALLOCATOR_PUBLIC_PORT:-}" || "$FRP_MODE_SWITCH" == "1" ]]; then
+        FRP_ALLOCATOR_PUBLIC_PORT="${FRP_CONTROL_PUBLIC_PORT:-443}"
+      fi
+    fi
+    if [[ "$user_control_listen" != "1" ]]; then
+      if [[ -z "${FRP_CONTROL_LISTEN_PORT:-}" || "$FRP_MODE_SWITCH" == "1" || \
+            "${FRP_CONTROL_LISTEN_PORT}" == "${FRP_CONTROL_PUBLIC_PORT:-443}" ]]; then
+        FRP_CONTROL_LISTEN_PORT="${FRP_SINGLE443_BACKEND_PORT}"
+      fi
+    fi
+    if [[ "$user_alloc_listen" != "1" && -z "${FRP_ALLOCATOR_LISTEN_PORT:-}" ]]; then
+      FRP_ALLOCATOR_LISTEN_PORT=6099
+    fi
+  elif [[ "$FRP_MODE_SWITCH" == "1" ]]; then
+    if [[ "$user_control_public" != "1" ]]; then
+      FRP_CONTROL_PUBLIC_PORT=443
+    fi
+    if [[ "$user_control_listen" != "1" ]]; then
+      FRP_CONTROL_LISTEN_PORT="${FRP_CONTROL_PUBLIC_PORT:-443}"
+    fi
+    if [[ "$user_alloc_public" != "1" ]]; then
+      FRP_ALLOCATOR_PUBLIC_PORT=6099
+    fi
+    if [[ "$user_alloc_listen" != "1" ]]; then
+      FRP_ALLOCATOR_LISTEN_PORT=6099
+    fi
+  fi
+
   echo
   echo "FRP Control"
   echo "-----------"
   prompt "Public control port" "${FRP_CONTROL_PUBLIC_PORT:-443}" FRP_CONTROL_PUBLIC_PORT
-  prompt "Internal listen port" "${FRP_CONTROL_LISTEN_PORT:-${FRP_CONTROL_PUBLIC_PORT:-443}}" FRP_CONTROL_LISTEN_PORT
+  if frp_mode_is_single443; then
+    prompt "Internal FRP backend port" "${FRP_CONTROL_LISTEN_PORT:-${FRP_SINGLE443_BACKEND_PORT}}" FRP_CONTROL_LISTEN_PORT
+  else
+    prompt "Internal listen port" "${FRP_CONTROL_LISTEN_PORT:-${FRP_CONTROL_PUBLIC_PORT:-443}}" FRP_CONTROL_LISTEN_PORT
+  fi
 
   echo
   echo "Enrollment / Management HTTPS"
   echo "-----------------------------"
-  prompt "Public HTTPS port" "${FRP_ALLOCATOR_PUBLIC_PORT:-${FRP_ALLOCATOR_LISTEN_PORT:-6099}}" FRP_ALLOCATOR_PUBLIC_PORT
-  prompt "Internal listen port" "${FRP_ALLOCATOR_LISTEN_PORT:-${FRP_ALLOCATOR_PUBLIC_PORT:-6099}}" FRP_ALLOCATOR_LISTEN_PORT
+  if frp_mode_is_single443; then
+    prompt "Public HTTPS port" "${FRP_ALLOCATOR_PUBLIC_PORT:-${FRP_CONTROL_PUBLIC_PORT:-443}}" FRP_ALLOCATOR_PUBLIC_PORT
+    prompt "Internal allocator backend port" "${FRP_ALLOCATOR_LISTEN_PORT:-6099}" FRP_ALLOCATOR_LISTEN_PORT
+  else
+    prompt "Public HTTPS port" "${FRP_ALLOCATOR_PUBLIC_PORT:-${FRP_ALLOCATOR_LISTEN_PORT:-6099}}" FRP_ALLOCATOR_PUBLIC_PORT
+    prompt "Internal listen port" "${FRP_ALLOCATOR_LISTEN_PORT:-${FRP_ALLOCATOR_PUBLIC_PORT:-6099}}" FRP_ALLOCATOR_LISTEN_PORT
+  fi
 
   echo
   echo "Published Service Ports"
@@ -431,6 +687,23 @@ resolve_server_settings() {
   fi
   if [[ -z "${FRP_ALLOCATOR_LISTEN_PORT:-}" ]]; then
     FRP_ALLOCATOR_LISTEN_PORT="$FRP_ALLOCATOR_PUBLIC_PORT"
+  fi
+
+  if frp_mode_is_single443; then
+    FRP_LISTEN_HOST=127.0.0.1
+    FRP_CONTROL_BIND_ADDR=127.0.0.1
+    FRP_TRANSPORT=wss
+    if [[ "$FRP_CONTROL_PUBLIC_PORT" != "$FRP_ALLOCATOR_PUBLIC_PORT" ]]; then
+      echo "ERROR: Enterprise single-443 mode requires FRP control and allocator to share the same public TCP port" >&2
+      exit 1
+    fi
+    if [[ "$FRP_CONTROL_PUBLIC_PORT" != "443" ]]; then
+      echo "WARNING: Enterprise firewalls that allow TLS only on TCP/443 may still reset TLS on ${FRP_CONTROL_PUBLIC_PORT}." >&2
+    fi
+  else
+    FRP_LISTEN_HOST=0.0.0.0
+    FRP_CONTROL_BIND_ADDR=0.0.0.0
+    FRP_TRANSPORT=tcp
   fi
 
   local derived_url
@@ -458,6 +731,20 @@ resolve_server_settings() {
     echo "ERROR: Allocator public URL must be an https:// URL with a host" >&2
     exit 1
   fi
+  if frp_mode_is_single443; then
+    local url_port
+    url_port="$(python3 - "$FRP_ALLOCATOR_PUBLIC_URL" <<'PY'
+from urllib.parse import urlparse
+import sys
+parsed = urlparse(sys.argv[1])
+print(parsed.port or (443 if parsed.scheme == 'https' else 80))
+PY
+)"
+    if [[ "$url_port" != "$FRP_ALLOCATOR_PUBLIC_PORT" ]]; then
+      echo "ERROR: single-443 allocator public URL port (${url_port}) must match public port ${FRP_ALLOCATOR_PUBLIC_PORT}" >&2
+      exit 1
+    fi
+  fi
 
   local port_name
   for port_name in FRP_CONTROL_PUBLIC_PORT FRP_CONTROL_LISTEN_PORT \
@@ -483,7 +770,16 @@ resolve_server_settings() {
     echo "ERROR: FRP control listen port must be outside the FRP service port range" >&2
     exit 1
   fi
-  if [[ "$FRP_CONTROL_PUBLIC_PORT" == "$FRP_ALLOCATOR_PUBLIC_PORT" ]]; then
+  if frp_mode_is_single443; then
+    if (( 10#$FRP_CONTROL_LISTEN_PORT == 10#$FRP_CONTROL_PUBLIC_PORT )); then
+      echo "ERROR: FRP control backend port cannot be the public frontend port ${FRP_CONTROL_PUBLIC_PORT}" >&2
+      exit 1
+    fi
+    if (( 10#$FRP_ALLOCATOR_LISTEN_PORT == 10#$FRP_ALLOCATOR_PUBLIC_PORT )); then
+      echo "ERROR: allocator backend port cannot be the public frontend port ${FRP_ALLOCATOR_PUBLIC_PORT}" >&2
+      exit 1
+    fi
+  elif [[ "$FRP_CONTROL_PUBLIC_PORT" == "$FRP_ALLOCATOR_PUBLIC_PORT" ]]; then
     echo "WARNING: FRP control and allocator public ports are both ${FRP_CONTROL_PUBLIC_PORT}." >&2
     echo "WARNING: two distinct raw TCP services cannot normally share the same public IP:port without an external proxy." >&2
   fi
@@ -494,6 +790,11 @@ write_server_config() {
   path="$(frp_server_config_path)"
   pki="$(frp_pki_dir)"
   mkdir -p "$(dirname "$path")"
+  FRP_DEPLOYMENT_MODE="${FRP_DEPLOYMENT_MODE:-direct}"
+  FRP_LISTEN_HOST="${FRP_LISTEN_HOST:-0.0.0.0}"
+  FRP_CONTROL_BIND_ADDR="${FRP_CONTROL_BIND_ADDR:-0.0.0.0}"
+  FRP_TRANSPORT="${FRP_TRANSPORT:-tcp}"
+  export FRP_DEPLOYMENT_MODE FRP_LISTEN_HOST FRP_CONTROL_BIND_ADDR FRP_TRANSPORT
   python3 - "$path" \
     "$FRP_PUBLIC_HOST" \
     "$FRP_CONTROL_PUBLIC_PORT" \
@@ -505,7 +806,7 @@ write_server_config() {
     "$FRP_ALLOCATOR_PUBLIC_URL" \
     "$CLIENT_INSTALLER_URL" \
     "$pki" <<'PY'
-import json, sys
+import json, os, sys
 from pathlib import Path
 path = Path(sys.argv[1])
 pki = sys.argv[11]
@@ -517,7 +818,11 @@ cfg = {
     'frp_control_listen_port': int(sys.argv[4]),
     'port_start': int(sys.argv[5]),
     'port_end': int(sys.argv[6]),
-    'listen_host': '0.0.0.0',
+    'listen_host': os.environ.get('FRP_LISTEN_HOST') or '0.0.0.0',
+    'frp_control_bind_addr': os.environ.get('FRP_CONTROL_BIND_ADDR') or '0.0.0.0',
+    'frp_proxy_bind_addr': '0.0.0.0',
+    'deployment_mode': os.environ.get('FRP_DEPLOYMENT_MODE') or 'direct',
+    'frp_transport': os.environ.get('FRP_TRANSPORT') or 'tcp',
     'allocator_public_port': int(sys.argv[7]),
     'allocator_listen_port': int(sys.argv[8]),
     'listen_port': int(sys.argv[8]),
@@ -534,6 +839,143 @@ cfg = {
 path.write_text(json.dumps(cfg, indent=2, sort_keys=True) + '\n', encoding='utf-8')
 PY
   chmod 600 "$path"
+}
+
+write_frps_toml() {
+  local dest="$1"
+  if frp_mode_is_single443; then
+    frp_atomic_write "$dest" 0600 <<EOF2
+bindAddr = "${FRP_CONTROL_BIND_ADDR:-127.0.0.1}"
+bindPort = ${FRP_CONTROL_LISTEN_PORT}
+proxyBindAddr = "0.0.0.0"
+
+auth.method = "token"
+auth.tokenSource.type = "file"
+auth.tokenSource.file.path = "/etc/frp/server_token"
+
+transport.tls.force = false
+
+allowPorts = [
+  { start = ${FRP_PORT_START}, end = ${FRP_PORT_END} }
+]
+EOF2
+  else
+    frp_atomic_write "$dest" 0600 <<EOF2
+bindPort = ${FRP_CONTROL_LISTEN_PORT}
+
+auth.method = "token"
+auth.tokenSource.type = "file"
+auth.tokenSource.file.path = "/etc/frp/server_token"
+
+transport.tls.force = true
+
+allowPorts = [
+  { start = ${FRP_PORT_START}, end = ${FRP_PORT_END} }
+]
+EOF2
+  fi
+}
+
+write_frontend_config() {
+  local dest="$1" pki run_dir log_dir temp_root
+  pki="$(frp_pki_dir)"
+  run_dir="$(frp_server_fs /run/frp-auto-deploy)"
+  log_dir="$(frp_server_fs /var/log/frp-auto-deploy)"
+  temp_root="$(frp_server_fs /var/lib/frp-auto-deploy/nginx)"
+  mkdir -p "$run_dir" "$log_dir" "$temp_root/body" "$temp_root/proxy" \
+    "$temp_root/fastcgi" "$temp_root/uwsgi" "$temp_root/scgi"
+  chmod 700 "$run_dir" "$log_dir" "$temp_root"
+  python3 "$BASE_DIR/lib/frp_frontend.py" \
+    --dest "$dest" \
+    --public-host "$FRP_PUBLIC_HOST" \
+    --frontend-port "$FRP_CONTROL_PUBLIC_PORT" \
+    --allocator-listen-port "$FRP_ALLOCATOR_LISTEN_PORT" \
+    --control-listen-port "$FRP_CONTROL_LISTEN_PORT" \
+    --ca-cert "${pki}/ca.crt" \
+    --server-cert "${pki}/server.crt" \
+    --server-key "${pki}/server.key" \
+    --pid-path "${run_dir}/nginx.pid" \
+    --error-log "${log_dir}/frontend.error.log" \
+    --temp-root "$temp_root"
+}
+
+write_frontend_unit() {
+  local dest="$1" src bin unit
+  src="$BASE_DIR/server/frp-frontend.service"
+  bin="$(frp_nginx_bin)"
+  [[ -n "$bin" ]] || bin=/usr/sbin/nginx
+  unit="$(mktemp)"
+  python3 - "$src" "$unit" "$bin" <<'PY'
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text(encoding='utf-8')
+bin_path = sys.argv[3]
+text = text.replace('ExecStart=/usr/sbin/nginx', 'ExecStart=' + bin_path)
+Path(sys.argv[2]).write_text(text, encoding='utf-8')
+PY
+  frp_write_compatible_systemd_unit "$unit" "$dest"
+  rm -f "$unit"
+}
+
+frp_frontend_validate_config() {
+  local conf bin check port py
+  conf="$(frp_server_fs /etc/frp-auto-deploy/frontend.conf)"
+  if [[ ! -f "$conf" ]]; then
+    echo "ERROR: nginx frontend configuration is missing" >&2
+    return 1
+  fi
+  py="$BASE_DIR/lib/frp_frontend.py"
+  if [[ ! -f "$py" ]]; then
+    py="$(frp_server_fs /usr/local/lib/frp-auto-deploy/frp_frontend.py)"
+  fi
+  bin="$(frp_nginx_bin)"
+  if [[ -z "$bin" || ! -x "$bin" ]]; then
+    if frp_server_skip_systemd; then
+      return 0
+    fi
+    echo "ERROR: nginx is required to validate the single-443 frontend" >&2
+    return 1
+  fi
+  # nginx -t binds listen sockets. Never target production TCP/443: isolated
+  # tests get EACCES, and live reinstall/migration hit EADDRINUSE while frps
+  # or the running frontend still owns the public port.
+  check="$(mktemp)"
+  port=$((49152 + RANDOM % 14000))
+  if ! python3 "$py" --syntax-check-from "$conf" --dest "$check" --syntax-check-port "$port"; then
+    rm -f "$check"
+    echo "ERROR: nginx frontend configuration could not be prepared for validation" >&2
+    return 1
+  fi
+  chmod 600 "$check"
+  if ! "$bin" -t -c "$check" >/dev/null 2>&1; then
+    echo "ERROR: nginx frontend configuration is invalid" >&2
+    "$bin" -t -c "$check" >&2 || true
+    rm -f "$check"
+    return 1
+  fi
+  rm -f "$check"
+  return 0
+}
+
+frp_server_restore_frps_backup() {
+  local backup="$1" dest="$2"
+  if [[ -z "$backup" || ! -f "$backup" || -z "$dest" ]]; then
+    return 0
+  fi
+  cp "$backup" "$dest"
+  chmod 600 "$dest"
+}
+
+frp_server_health_frontend() {
+  if [[ "${FRP_INSTALL_HOOK_HEALTH_FAIL:-}" == "1" ]]; then
+    echo "ERROR: simulated health check failure" >&2
+    return 1
+  fi
+  frp_frontend_validate_config || return 1
+  if frp_server_skip_systemd; then
+    return 0
+  fi
+  frp_wait_unit_active frp-frontend
 }
 
 frp_ensure_server_pki() {
@@ -574,13 +1016,36 @@ PY
 }
 
 frp_print_nat_summary() {
-  local control_target alloc_target
+  local control_target alloc_target frontend_note=""
   if [[ -n "${FRP_INTERNAL_IP:-}" ]]; then
     control_target="${FRP_INTERNAL_IP}:${FRP_CONTROL_LISTEN_PORT}"
     alloc_target="${FRP_INTERNAL_IP}:${FRP_ALLOCATOR_LISTEN_PORT}"
   else
     control_target="this FRP server (TCP/${FRP_CONTROL_LISTEN_PORT})"
     alloc_target="this FRP server (TCP/${FRP_ALLOCATOR_LISTEN_PORT})"
+  fi
+  if frp_mode_is_single443; then
+    cat <<EOF2
+
+Network / firewall requirements (Enterprise single-443)
+=======================================================
+
+Public inbound:
+  TCP/${FRP_CONTROL_PUBLIC_PORT}  HTTPS allocator + FRP control over WSS
+  TCP/${FRP_PORT_START}-${FRP_PORT_END}  published services (1:1)
+
+Do not expose the allocator backend (TCP/${FRP_ALLOCATOR_LISTEN_PORT}) or
+the FRP control backend (TCP/${FRP_CONTROL_LISTEN_PORT}) on the public interface.
+
+This installer does not change cloud security lists, host iptables, or UFW.
+Open the public ports above on the network path to this server.
+
+TCP connect succeeding while TLS ClientHello is reset on a non-443 port is a
+common enterprise DPI symptom. Do not downgrade the allocator to HTTP; use
+this single-443 mode instead.
+
+EOF2
+    return 0
   fi
   cat <<EOF2
 
@@ -656,14 +1121,24 @@ frp_server_record_action() {
 
 frp_server_enable_units() {
   if frp_server_skip_systemd; then
-    frp_server_record_action "enable frps frp-port-allocator"
+    if frp_mode_is_single443; then
+      frp_server_record_action "enable frps frp-port-allocator frp-frontend"
+    else
+      frp_server_record_action "enable frps frp-port-allocator"
+      frp_server_record_action "disable frp-frontend"
+    fi
     if [[ "${FRP_INSTALL_HOOK_ENABLE_FAIL:-}" == "1" ]]; then
       echo "ERROR: simulated systemctl enable failure" >&2
       return 1
     fi
     return 0
   fi
-  frp_server_systemctl enable frps frp-port-allocator >/dev/null
+  if frp_mode_is_single443; then
+    frp_server_systemctl enable frps frp-port-allocator frp-frontend >/dev/null
+  else
+    frp_server_systemctl enable frps frp-port-allocator >/dev/null
+    frp_server_systemctl disable --now frp-frontend >/dev/null 2>&1 || true
+  fi
 }
 
 frp_server_restart_unit() {
@@ -784,23 +1259,37 @@ frp_server_main() {
   load_existing_server_config
   resolve_server_settings
 
+  if frp_mode_is_single443; then
+    if ! frp_ensure_nginx; then
+      frp_emit_failure_class DEPENDENCY_INSTALL_FAILED
+      return 1
+    fi
+    if ! frp_frontend_port_preflight; then
+      frp_emit_failure_class INSTALL_PRECHECK_FAILED
+      return 1
+    fi
+  fi
+
   if [[ -z "${FRP_ARCH:-}" ]]; then
     frp_detect_architecture || return 1
   fi
 
   local etc_frp etc_proj var_lib version_file token_file frps_toml
-  local registry_file backups_dir lib_dir unit_frps unit_alloc sbin_dir
+  local registry_file backups_dir lib_dir unit_frps unit_alloc unit_frontend sbin_dir
+  local frontend_conf toml_backup
   etc_frp="$(frp_server_fs /etc/frp)"
   etc_proj="$(frp_server_fs /etc/frp-auto-deploy)"
   var_lib="$(frp_server_fs /var/lib/frp-auto-deploy)"
   version_file="$(frp_server_fs /etc/frp-auto-deploy/version)"
   token_file="$(frp_server_fs /etc/frp/server_token)"
   frps_toml="$(frp_server_fs /etc/frp/frps.toml)"
+  frontend_conf="$(frp_server_fs /etc/frp-auto-deploy/frontend.conf)"
   registry_file="$(frp_server_fs /var/lib/frp-auto-deploy/registry.json)"
   backups_dir="$(frp_server_fs /var/lib/frp-auto-deploy/backups)"
   lib_dir="$(frp_server_fs /usr/local/lib/frp-auto-deploy)"
   unit_frps="$(frp_server_fs /etc/systemd/system/frps.service)"
   unit_alloc="$(frp_server_fs /etc/systemd/system/frp-port-allocator.service)"
+  unit_frontend="$(frp_server_fs /etc/systemd/system/frp-frontend.service)"
   sbin_dir="$(frp_server_fs /usr/local/sbin)"
 
   local existing_install=0
@@ -820,12 +1309,14 @@ frp_server_main() {
   fi
 
   local hash_frps_before hash_toml_before hash_unit_frps_before hash_unit_alloc_before
-  local hash_alloc_py_before
+  local hash_alloc_py_before hash_frontend_conf_before hash_unit_frontend_before
   hash_frps_before="$(frp_file_sha256 "$(frp_server_fs /usr/local/bin/frps)")"
   hash_toml_before="$(frp_file_sha256 "$frps_toml")"
   hash_unit_frps_before="$(frp_file_sha256 "$unit_frps")"
   hash_unit_alloc_before="$(frp_file_sha256 "$unit_alloc")"
   hash_alloc_py_before="$(frp_file_sha256 "${lib_dir}/frp-port-allocator.py")"
+  hash_frontend_conf_before="$(frp_file_sha256 "$frontend_conf")"
+  hash_unit_frontend_before="$(frp_file_sha256 "$unit_frontend")"
 
   # Capture existing listeners before restarting an existing frps. On first migration,
   # this preserves ports such as 6000/6001 already used by unmanaged clients.
@@ -861,21 +1352,20 @@ frp_server_main() {
   [[ -s "$token_file" ]] || { echo "ERROR: FRP server token is missing after migration" >&2; frp_emit_failure_class FILE_COMMIT_FAILED; frp_server_end_tmp; return 1; }
   chmod 600 "$token_file"
 
-  frp_atomic_write "$frps_toml" 0600 <<EOF2
-bindPort = ${FRP_CONTROL_LISTEN_PORT}
+  toml_backup=""
+  if [[ -f "$frps_toml" ]]; then
+    toml_backup="${backups_dir}/frps.toml.pre-install"
+    cp "$frps_toml" "$toml_backup"
+    chmod 600 "$toml_backup"
+  fi
 
-auth.method = "token"
-auth.tokenSource.type = "file"
-auth.tokenSource.file.path = "/etc/frp/server_token"
-
-transport.tls.force = true
-
-allowPorts = [
-  { start = ${FRP_PORT_START}, end = ${FRP_PORT_END} }
-]
-EOF2
+  write_frps_toml "$frps_toml"
   "$(frp_server_fs /usr/local/bin/frps)" verify -c "$frps_toml" || {
     echo "ERROR: generated frps.toml failed verification" >&2
+    if [[ -n "$toml_backup" && -f "$toml_backup" ]]; then
+      cp "$toml_backup" "$frps_toml"
+      chmod 600 "$frps_toml"
+    fi
     frp_emit_failure_class STAGING_FAILED
     frp_server_end_tmp
     return 1
@@ -916,6 +1406,7 @@ EOF2
   install -m 0700 "$BASE_DIR/server/frp-port-allocator.py" "${lib_dir}/frp-port-allocator.py"
   install -m 0644 "$BASE_DIR/lib/frp_mgmt_auth.py" "${lib_dir}/frp_mgmt_auth.py"
   install -m 0644 "$BASE_DIR/lib/frp_pki.py" "${lib_dir}/frp_pki.py"
+  install -m 0644 "$BASE_DIR/lib/frp_frontend.py" "${lib_dir}/frp_frontend.py"
   install -m 0644 "$BASE_DIR/lib/frp-common.sh" "${lib_dir}/frp-common.sh"
   install -m 0644 "$BASE_DIR/lib/frp-doctor-common.sh" "${lib_dir}/frp-doctor-common.sh"
   install -m 0644 "$BASE_DIR/lib/frp_doctor.py" "${lib_dir}/frp_doctor.py"
@@ -923,14 +1414,23 @@ EOF2
   frp_write_compatible_systemd_unit \
     "$BASE_DIR/server/frp-port-allocator.service" \
     "$unit_alloc"
+  if frp_mode_is_single443; then
+    write_frontend_config "$frontend_conf"
+    write_frontend_unit "$unit_frontend"
+  else
+    rm -f "$unit_frontend" "$frontend_conf"
+  fi
   for tool in frp-create-client frp-clients frp-client-info frp-release-client frp-release-service frp-revoke-client frp-set-client-installer-url frp-server-status frp-update frpctl; do
     install -m 0755 "$BASE_DIR/tools/$tool" "${sbin_dir}/$tool"
   done
 
-  local need_frps_restart=0 need_alloc_restart=0
+  local need_frps_restart=0 need_alloc_restart=0 need_frontend_restart=0
   if [[ "$existing_install" != "1" ]]; then
     need_frps_restart=1
     need_alloc_restart=1
+    if frp_mode_is_single443; then
+      need_frontend_restart=1
+    fi
   else
     if [[ "$(frp_file_sha256 "$(frp_server_fs /usr/local/bin/frps)")" != "$hash_frps_before" ]]; then
       need_frps_restart=1
@@ -949,6 +1449,24 @@ EOF2
     fi
     if [[ "${PKI_ACTION:-}" == "reissued-server" || "${PKI_ACTION:-}" == "generated" ]]; then
       need_alloc_restart=1
+      if frp_mode_is_single443; then
+        need_frontend_restart=1
+      fi
+    fi
+    if frp_mode_is_single443; then
+      if [[ "$(frp_file_sha256 "$frontend_conf")" != "$hash_frontend_conf_before" ]]; then
+        need_frontend_restart=1
+      fi
+      if [[ "$(frp_file_sha256 "$unit_frontend")" != "$hash_unit_frontend_before" ]]; then
+        need_frontend_restart=1
+      fi
+    fi
+    if [[ "${FRP_MODE_SWITCH:-0}" == "1" ]]; then
+      need_frps_restart=1
+      need_alloc_restart=1
+      if frp_mode_is_single443; then
+        need_frontend_restart=1
+      fi
     fi
   fi
 
@@ -969,10 +1487,21 @@ EOF2
     return 1
   fi
 
+  if frp_mode_is_single443; then
+    if ! frp_frontend_validate_config; then
+      echo "ERROR: frontend configuration is invalid; FRP listeners were not restarted." >&2
+      frp_server_restore_frps_backup "${toml_backup:-}" "$frps_toml"
+      frp_emit_failure_class STAGING_FAILED
+      frp_server_end_tmp
+      return 1
+    fi
+  fi
+
   if [[ "$need_frps_restart" == "1" ]]; then
     if ! frp_server_restart_unit frps; then
       frp_emit_failure_class SERVICE_START_FAILED
       echo "ERROR: frps failed to start; installation is not complete." >&2
+      frp_server_restore_frps_backup "${toml_backup:-}" "$frps_toml"
       frp_server_end_tmp
       return 1
     fi
@@ -980,7 +1509,19 @@ EOF2
   if [[ "$need_alloc_restart" == "1" ]]; then
     if ! frp_server_restart_unit frp-port-allocator; then
       frp_emit_failure_class SERVICE_START_FAILED
-      echo "ERROR: frp-port-allocator failed to start; installation is not complete." >&2
+      echo "ERROR: frp-port-allocator failed to start; restoring previous FRP control config if available." >&2
+      frp_server_restore_frps_backup "${toml_backup:-}" "$frps_toml"
+      frp_server_restart_unit frps || true
+      frp_server_end_tmp
+      return 1
+    fi
+  fi
+  if [[ "$need_frontend_restart" == "1" ]]; then
+    if ! frp_server_restart_unit frp-frontend; then
+      echo "ERROR: frp-frontend failed to start; restoring previous FRP control config if available." >&2
+      frp_server_restore_frps_backup "${toml_backup:-}" "$frps_toml"
+      frp_server_restart_unit frps || true
+      frp_emit_failure_class SERVICE_START_FAILED
       frp_server_end_tmp
       return 1
     fi
@@ -988,6 +1529,9 @@ EOF2
 
   if [[ "$need_frps_restart" == "1" ]] || [[ "$existing_install" != "1" ]]; then
     if ! frp_server_health_frps; then
+      echo "ERROR: frps health check failed; restoring previous FRP control config if available." >&2
+      frp_server_restore_frps_backup "${toml_backup:-}" "$frps_toml"
+      frp_server_restart_unit frps || true
       frp_emit_failure_class HEALTH_CHECK_FAILED
       frp_server_end_tmp
       return 1
@@ -995,6 +1539,19 @@ EOF2
   fi
   if [[ "$need_alloc_restart" == "1" ]] || [[ "$existing_install" != "1" ]]; then
     if ! frp_server_health_allocator "$FRP_ALLOCATOR_LISTEN_PORT"; then
+      echo "ERROR: allocator health check failed; restoring previous FRP control config if available." >&2
+      frp_server_restore_frps_backup "${toml_backup:-}" "$frps_toml"
+      frp_server_restart_unit frps || true
+      frp_emit_failure_class HEALTH_CHECK_FAILED
+      frp_server_end_tmp
+      return 1
+    fi
+  fi
+  if frp_mode_is_single443 && { [[ "$need_frontend_restart" == "1" ]] || [[ "$existing_install" != "1" ]]; }; then
+    if ! frp_server_health_frontend; then
+      echo "ERROR: frontend health check failed; restoring previous FRP control config if available." >&2
+      frp_server_restore_frps_backup "${toml_backup:-}" "$frps_toml"
+      frp_server_restart_unit frps || true
       frp_emit_failure_class HEALTH_CHECK_FAILED
       frp_server_end_tmp
       return 1
@@ -1015,11 +1572,13 @@ EOF2
 
 Project version   : ${PROJECT_VERSION}
 FRP version       : ${FRP_VERSION}
+Deployment mode   : ${FRP_DEPLOYMENT_MODE}
 Public host       : ${FRP_PUBLIC_HOST}
 FRP control public: TCP/${FRP_CONTROL_PUBLIC_PORT}
-FRP control listen: TCP/${FRP_CONTROL_LISTEN_PORT}
+FRP transport     : ${FRP_TRANSPORT}
+FRP control listen: TCP/${FRP_CONTROL_LISTEN_PORT} (${FRP_CONTROL_BIND_ADDR})
 Allocator public  : ${FRP_ALLOCATOR_PUBLIC_URL}
-Allocator listen  : TCP/${FRP_ALLOCATOR_LISTEN_PORT}
+Allocator listen  : TCP/${FRP_ALLOCATOR_LISTEN_PORT} (${FRP_LISTEN_HOST})
 Service range     : TCP/${FRP_PORT_START}-${FRP_PORT_END}
 TLS CA SHA256     : ${CA_FINGERPRINT}
 EOF2
@@ -1041,7 +1600,7 @@ EOF2
   elif [[ "${PKI_ACTION:-}" == "generated" ]]; then
     echo "Generated a new allocator private CA and server certificate."
   fi
-  if [[ "$existing_install" == "1" && "$need_frps_restart" != "1" && "$need_alloc_restart" != "1" ]]; then
+  if [[ "$existing_install" == "1" && "$need_frps_restart" != "1" && "$need_alloc_restart" != "1" && "$need_frontend_restart" != "1" ]]; then
     echo "Runtime services were not restarted (project files only)."
   fi
   frp_print_nat_summary

@@ -141,5 +141,31 @@ fi
 grep -qi 'duplicate' "$WORKDIR/dup.err" || fail "duplicate error message"
 pass "duplicate service id rejected"
 
+# WSS frpc.toml uses the stored allocator CA; TCP remains unchanged.
+WSS_ROOT="$WORKDIR/wss-client"
+mkdir -p "$WSS_ROOT/etc/frp-auto-deploy"
+printf '%s\n' '-----BEGIN CERTIFICATE-----' 'MIIBdummy' '-----END CERTIFICATE-----' \
+  >"$WSS_ROOT/etc/frp-auto-deploy/allocator-ca.crt"
+export FRP_CLIENT_TEST_ROOT="$WSS_ROOT"
+WSS_TOML="$WORKDIR/frpc-wss.toml"
+render_frpc_toml "$WSS_TOML" "203.0.113.10" "443" "dummy-token" "host-a" "$WORKDIR/services.json" wss
+python3 - "$WSS_TOML" "$WSS_ROOT/etc/frp-auto-deploy/allocator-ca.crt" <<'PY' || fail "wss toml"
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text()
+assert 'transport.protocol = "wss"' in text
+assert 'transport.tls.trustedCaFile = "%s"' % sys.argv[2] in text
+assert 'transport.tls.enable = true' in text
+assert 'serverPort = 443' in text
+PY
+if render_frpc_toml "$WORKDIR/frpc-bad.toml" "203.0.113.10" "443" "dummy-token" "host-a" "$WORKDIR/services.json" websocket \
+  2>"$WORKDIR/bad-transport.err"; then
+  fail "plain websocket transport should be rejected"
+fi
+grep -qi 'unsupported FRP transport' "$WORKDIR/bad-transport.err" || fail "unsupported transport message"
+unset FRP_CLIENT_TEST_ROOT
+pass "wss frpc.toml pins allocator CA and rejects insecure transport"
+pass "SINGLE443_WSS_CONFIG"
+
 echo
 echo "CLIENT_CONFIG_TEST=PASS"

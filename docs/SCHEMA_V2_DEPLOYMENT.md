@@ -154,6 +154,7 @@ Re-running the installer reuses existing runtime config when present. It preserv
 sudo frp-server-status --check
 sudo systemctl status frps --no-pager
 sudo systemctl status frp-port-allocator --no-pager
+# Post-install on the server (CA file already exists after install-server.sh):
 curl -fsS --cacert /etc/frp-auto-deploy/pki/ca.crt https://127.0.0.1:6099/healthz
 ```
 

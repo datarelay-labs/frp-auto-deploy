@@ -351,6 +351,7 @@ reset_pm_isolation
 [[ "$(frp_package_for_command ss apt)" == iproute2 ]] || fail "ss apt -> iproute2"
 [[ "$(frp_package_for_command ss dnf)" == iproute ]] || fail "ss dnf -> iproute"
 [[ "$(frp_package_for_command ip yum)" == iproute ]] || fail "ip yum -> iproute"
+[[ "$(frp_package_for_command nginx apt)" == nginx ]] || fail "nginx package"
 reset_pm_isolation
 FRP_DEPENDENCY_ROLE=client
 frp_required_commands | grep -qx curl || fail "client requires curl"

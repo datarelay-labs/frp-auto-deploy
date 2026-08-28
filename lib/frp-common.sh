@@ -8,8 +8,11 @@ fi
 FRP_COMMON_LOADED=1
 
 # Defaults match VERSION. A sibling VERSION file overrides project/FRP versions.
-PROJECT_VERSION="${PROJECT_VERSION:-2.0.0}"
+PROJECT_VERSION="${PROJECT_VERSION:-2.1.0}"
 FRP_VERSION="${FRP_VERSION:-0.70.1}"
+# FRP 0.70.1 pkg/util/net/websocket.go FrpWebsocketPath. Not configurable.
+FRP_WEBSOCKET_PATH="${FRP_WEBSOCKET_PATH:-/~!frp}"
+FRP_SINGLE443_BACKEND_PORT="${FRP_SINGLE443_BACKEND_PORT:-7000}"
 FRP_SHA256_AMD64="${FRP_SHA256_AMD64:-333da23d1b9009d7c01638e9ba38cf4600f7d37d393f854e96ee1396adefa9a6}"
 FRP_SHA256_ARM64="${FRP_SHA256_ARM64:-3990f396a9a490ee7f0e5f355287750ed41520064ed999eab443b5e9a78d773d}"
 
@@ -569,6 +572,7 @@ frp_package_for_command() {
         printf 'iproute'
       fi
       ;;
+    nginx) printf 'nginx' ;;
     *)
       echo "ERROR: no package mapping for command: ${cmd}" >&2
       return 1

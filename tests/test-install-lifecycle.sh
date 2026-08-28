@@ -215,6 +215,20 @@ assert_mode "$SRV/etc/frp-auto-deploy/pki/server.key" "0o600"
 [[ -f "$SRV/etc/frp-auto-deploy/pki/ca.crt" ]] || fail "CA missing"
 grep -q "PROJECT_VERSION=${PROJECT_VERSION}" "$SRV/etc/frp-auto-deploy/version" || fail "server version"
 grep -q 'FRP_VERSION=0.70.1' "$SRV/etc/frp-auto-deploy/version" || fail "server FRP version"
+grep -q 'transport.tls.force = true' "$SRV/etc/frp/frps.toml" || fail "direct tls.force"
+grep -q 'bindPort = 443' "$SRV/etc/frp/frps.toml" || fail "direct bindPort"
+if grep -q 'bindAddr' "$SRV/etc/frp/frps.toml"; then
+  fail "direct mode should not set bindAddr"
+fi
+[[ ! -f "$SRV/etc/frp-auto-deploy/frontend.conf" ]] || fail "direct mode wrote frontend.conf"
+python3 - "$SRV/etc/frp-auto-deploy/config.json" <<'PY' || fail "direct config mode"
+import json,sys
+from pathlib import Path
+cfg=json.loads(Path(sys.argv[1]).read_text())
+assert cfg.get('deployment_mode')=='direct'
+assert cfg.get('frp_transport')=='tcp'
+assert cfg.get('listen_host')=='0.0.0.0'
+PY
 [[ ! -f "$SRV/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "stale txn marker after success"
 pass "SERVER_FRESH_INSTALL"
 pass "TEMP_FILE_SECURITY"
@@ -278,6 +292,164 @@ pass "SERVER_REINSTALL_IDEMPOTENT"
 pass "SERVER_CA_PRESERVED"
 pass "SERVER_TOKEN_PRESERVED"
 pass "SERVER_REGISTRY_PRESERVED"
+
+S443="$WORKDIR/server-s443"
+mkdir -p "$S443"
+export FRP_SERVER_TEST_ROOT="$S443"
+export FRP_DEPLOYMENT_MODE=single443
+unset FRP_CONTROL_PUBLIC_PORT FRP_CONTROL_LISTEN_PORT \
+  FRP_ALLOCATOR_PUBLIC_PORT FRP_ALLOCATOR_LISTEN_PORT FRP_CONTROL_PORT FRP_ALLOCATOR_PORT \
+  FRP_ALLOCATOR_URL FRP_ALLOCATOR_PUBLIC_URL FRP_LISTEN_HOST FRP_CONTROL_BIND_ADDR \
+  FRP_TRANSPORT FRP_MODE_SWITCH EXISTING_DEPLOYMENT_MODE EXISTING_ALLOCATOR_URL \
+  FRP_SERVER_CONFIG FRP_PKI_DIR || true
+if ! frp_server_main >"$WORKDIR/s443.out" 2>"$WORKDIR/s443.err"; then
+  cat "$WORKDIR/s443.out" "$WORKDIR/s443.err" >&2
+  fail "single443 server install"
+fi
+assert_no_leak "$WORKDIR/s443.out"
+assert_no_leak "$WORKDIR/s443.err"
+grep -q 'bindAddr = "127.0.0.1"' "$S443/etc/frp/frps.toml" || fail "s443 bindAddr"
+grep -q 'bindPort = 7000' "$S443/etc/frp/frps.toml" || fail "s443 bindPort"
+grep -q 'proxyBindAddr = "0.0.0.0"' "$S443/etc/frp/frps.toml" || fail "s443 proxyBind"
+grep -q 'transport.tls.force = false' "$S443/etc/frp/frps.toml" || fail "s443 tls.force"
+[[ -f "$S443/etc/frp-auto-deploy/frontend.conf" ]] || fail "s443 frontend.conf"
+[[ -f "$S443/etc/systemd/system/frp-frontend.service" ]] || fail "s443 frontend unit"
+grep -q 'location = "/~!frp"' "$S443/etc/frp-auto-deploy/frontend.conf" || fail "s443 websocket path"
+python3 - "$S443/etc/frp-auto-deploy/config.json" <<'PY' || fail "s443 config"
+import json,sys
+from pathlib import Path
+cfg=json.loads(Path(sys.argv[1]).read_text())
+assert cfg['deployment_mode']=='single443'
+assert cfg['frp_transport']=='wss'
+assert cfg['listen_host']=='127.0.0.1'
+assert cfg['frp_control_public_port']==443
+assert cfg['frp_control_listen_port']==7000
+assert cfg['allocator_public_port']==443
+assert cfg['allocator_listen_port']==6099
+assert cfg['allocator_public_url']=='https://203.0.113.10/enroll'
+PY
+grep -q 'Deployment mode   : single443' "$WORKDIR/s443.out" || fail "s443 summary mode"
+grep -q 'healthz|enroll|bootstrap/redeem' "$S443/etc/frp-auto-deploy/frontend.conf" \
+  || fail "s443 allocator path allowlist"
+grep -q 'return 404;' "$S443/etc/frp-auto-deploy/frontend.conf" || fail "s443 default 404"
+grep -q 'proxy_ssl_verify on' "$S443/etc/frp-auto-deploy/frontend.conf" || fail "s443 proxy_ssl_verify"
+assert_mode "$S443/etc/frp-auto-deploy/pki/ca.key" "0o600"
+assert_mode "$S443/etc/frp-auto-deploy/pki/server.key" "0o600"
+pass "SERVER_SINGLE443_INSTALL"
+pass "SINGLE443_CA_PIN"
+pass "SINGLE443_FRONTEND_CONFIG"
+
+# Direct -> single443 preserves CA/token/registry and requires confirmation.
+SWITCH="$WORKDIR/server-switch"
+cp -a "$SRV" "$SWITCH"
+export FRP_SERVER_TEST_ROOT="$SWITCH"
+export FRP_DEPLOYMENT_MODE=single443
+unset FRP_CONTROL_PUBLIC_PORT FRP_CONTROL_LISTEN_PORT \
+  FRP_ALLOCATOR_PUBLIC_PORT FRP_ALLOCATOR_LISTEN_PORT FRP_CONTROL_PORT FRP_ALLOCATOR_PORT \
+  FRP_ALLOCATOR_URL FRP_ALLOCATOR_PUBLIC_URL FRP_LISTEN_HOST FRP_CONTROL_BIND_ADDR \
+  FRP_TRANSPORT FRP_MODE_SWITCH EXISTING_DEPLOYMENT_MODE EXISTING_ALLOCATOR_URL \
+  FRP_SERVER_CONFIG FRP_PKI_DIR FRP_CONFIRM_MODE_SWITCH || true
+if (
+  frp_server_main
+) >"$WORKDIR/switch-no.out" 2>"$WORKDIR/switch-no.err"; then
+  fail "mode switch without confirmation should fail"
+fi
+grep -qi 'FRP_CONFIRM_MODE_SWITCH' "$WORKDIR/switch-no.err" || fail "switch confirmation message"
+grep -q 'bindPort = 443' "$SWITCH/etc/frp/frps.toml" || fail "unconfirmed switch rewrote toml"
+export FRP_CONFIRM_MODE_SWITCH=yes
+if ! frp_server_main >"$WORKDIR/switch-yes.out" 2>"$WORKDIR/switch-yes.err"; then
+  cat "$WORKDIR/switch-yes.out" "$WORKDIR/switch-yes.err" >&2
+  fail "confirmed mode switch"
+fi
+[[ "$(python3 - "$SWITCH/etc/frp-auto-deploy/pki/ca.crt" <<'PY'
+import hashlib, subprocess, sys, tempfile
+from pathlib import Path
+src = Path(sys.argv[1])
+der = tempfile.NamedTemporaryFile(delete=False)
+der.close()
+subprocess.check_call(["openssl", "x509", "-in", str(src), "-outform", "DER", "-out", der.name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+print(hashlib.sha256(Path(der.name).read_bytes()).hexdigest())
+Path(der.name).unlink()
+PY
+)" == "$CA_FP" ]] || fail "mode switch rotated CA"
+[[ "$(frp_file_sha256 "$SWITCH/etc/frp/server_token")" == "$TOKEN_SHA" ]] || fail "mode switch rotated token"
+[[ "$(frp_file_sha256 "$SWITCH/var/lib/frp-auto-deploy/registry.json")" == "$REG_SHA" ]] || fail "mode switch rewrote registry"
+grep -q 'bindAddr = "127.0.0.1"' "$SWITCH/etc/frp/frps.toml" || fail "switch bindAddr"
+grep -q 'bindPort = 7000' "$SWITCH/etc/frp/frps.toml" || fail "switch bindPort"
+[[ -f "$SWITCH/etc/systemd/system/frp-frontend.service" ]] || fail "switch frontend unit"
+pass "SINGLE443_MODE_SWITCH_GUARD"
+
+# Occupied public 443 must fail before rewriting a working Direct tree.
+BUSY="$WORKDIR/server-busy443"
+cp -a "$SRV" "$BUSY"
+export FRP_SERVER_TEST_ROOT="$BUSY"
+export FRP_DEPLOYMENT_MODE=single443
+export FRP_CONFIRM_MODE_SWITCH=yes
+export FRP_INSTALL_HOOK_FRONTEND_PORT_BUSY=1
+unset FRP_CONTROL_PUBLIC_PORT FRP_CONTROL_LISTEN_PORT \
+  FRP_ALLOCATOR_PUBLIC_PORT FRP_ALLOCATOR_LISTEN_PORT FRP_CONTROL_PORT FRP_ALLOCATOR_PORT \
+  FRP_ALLOCATOR_URL FRP_ALLOCATOR_PUBLIC_URL FRP_LISTEN_HOST FRP_CONTROL_BIND_ADDR \
+  FRP_TRANSPORT FRP_MODE_SWITCH EXISTING_DEPLOYMENT_MODE EXISTING_ALLOCATOR_URL \
+  FRP_SERVER_CONFIG FRP_PKI_DIR || true
+if frp_server_main >"$WORKDIR/busy443.out" 2>"$WORKDIR/busy443.err"; then
+  fail "occupied 443 should fail before cutover"
+fi
+unset FRP_INSTALL_HOOK_FRONTEND_PORT_BUSY
+grep -q 'FAILURE_CLASS=INSTALL_PRECHECK_FAILED' "$WORKDIR/busy443.out" "$WORKDIR/busy443.err" \
+  || fail "occupied 443 failure class"
+grep -q 'existing Direct deployment was not modified' "$WORKDIR/busy443.err" \
+  || fail "occupied 443 preserve message"
+grep -q 'bindPort = 443' "$BUSY/etc/frp/frps.toml" || fail "occupied 443 rewrote Direct toml"
+[[ "$(frp_file_sha256 "$BUSY/etc/frp/server_token")" == "$TOKEN_SHA" ]] || fail "occupied 443 rotated token"
+pass "SINGLE443_PORT_BUSY_PRECHECK"
+
+# Failed cutover (frontend start) must restore previous frps.toml.
+RB="$WORKDIR/server-s443-rollback"
+cp -a "$SRV" "$RB"
+export FRP_SERVER_TEST_ROOT="$RB"
+export FRP_DEPLOYMENT_MODE=single443
+export FRP_CONFIRM_MODE_SWITCH=yes
+export FRP_INSTALL_HOOK_START_FAIL=1
+unset FRP_CONTROL_PUBLIC_PORT FRP_CONTROL_LISTEN_PORT \
+  FRP_ALLOCATOR_PUBLIC_PORT FRP_ALLOCATOR_LISTEN_PORT FRP_CONTROL_PORT FRP_ALLOCATOR_PORT \
+  FRP_ALLOCATOR_URL FRP_ALLOCATOR_PUBLIC_URL FRP_LISTEN_HOST FRP_CONTROL_BIND_ADDR \
+  FRP_TRANSPORT FRP_MODE_SWITCH EXISTING_DEPLOYMENT_MODE EXISTING_ALLOCATOR_URL \
+  FRP_SERVER_CONFIG FRP_PKI_DIR || true
+if frp_server_main >"$WORKDIR/s443-rb.out" 2>"$WORKDIR/s443-rb.err"; then
+  fail "single443 start failure should not succeed"
+fi
+unset FRP_INSTALL_HOOK_START_FAIL
+grep -q 'FAILURE_CLASS=SERVICE_START_FAILED' "$WORKDIR/s443-rb.out" "$WORKDIR/s443-rb.err" \
+  || fail "single443 rollback class"
+grep -q 'bindPort = 443' "$RB/etc/frp/frps.toml" || fail "rollback did not restore Direct toml"
+[[ "$(frp_file_sha256 "$RB/etc/frp/server_token")" == "$TOKEN_SHA" ]] || fail "rollback rotated token"
+pass "SINGLE443_ROLLBACK_TEST"
+
+# Single-443 uninstall removes the project unit/config and does not purge nginx.
+export FRP_UNINSTALL_TEST_ROOT="$SWITCH"
+if ! "$ROOT/uninstall-server.sh" >"$WORKDIR/s443-un.out" 2>"$WORKDIR/s443-un.err"; then
+  cat "$WORKDIR/s443-un.out" "$WORKDIR/s443-un.err" >&2
+  fail "single443 uninstall"
+fi
+[[ ! -f "$SWITCH/etc/systemd/system/frp-frontend.service" ]] || fail "frontend unit left after uninstall"
+[[ ! -f "$SWITCH/etc/frp-auto-deploy/frontend.conf" ]] || fail "frontend.conf left after uninstall"
+[[ -s "$SWITCH/etc/frp/server_token" ]] || fail "single443 uninstall dropped token"
+[[ -f "$SWITCH/etc/frp-auto-deploy/pki/ca.key" ]] || fail "single443 uninstall dropped CA"
+if grep -nE '(^|[[:space:]])(apt-get|apt|dnf|yum)[[:space:]]+(remove|purge)([[:space:]]|$)' "$ROOT/uninstall-server.sh"; then
+  fail "uninstall removes packages"
+fi
+if grep -nE 'apt-get remove|dnf remove|yum remove|nginx package' "$WORKDIR/s443-un.out" "$WORKDIR/s443-un.err"; then
+  fail "uninstall output purges nginx"
+fi
+pass "SINGLE443_UNINSTALL"
+
+unset FRP_UNINSTALL_TEST_ROOT
+unset FRP_DEPLOYMENT_MODE FRP_CONFIRM_MODE_SWITCH
+export FRP_CONTROL_PUBLIC_PORT=443
+export FRP_CONTROL_LISTEN_PORT=443
+export FRP_ALLOCATOR_PUBLIC_PORT=6099
+export FRP_ALLOCATOR_LISTEN_PORT=6099
+pass "DIRECT_MODE_REGRESSION"
 
 # Start / health / enable failures must use empty trees so runtime apply runs.
 FAILTREE="$WORKDIR/server-start-fail"

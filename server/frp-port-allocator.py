@@ -401,6 +401,25 @@ def cfg_allocator_listen_port(cfg):
     return coerce_port(cfg.get('listen_port'))
 
 
+def cfg_deployment_mode(cfg):
+    raw = str(cfg.get('deployment_mode') or 'direct').strip().lower()
+    compact = raw.replace('-', '').replace('_', '')
+    if compact in ('single443', 'enterprise', 'enterprisesingle443'):
+        return 'single443'
+    return 'direct'
+
+
+def cfg_frp_transport(cfg):
+    explicit = str(cfg.get('frp_transport') or '').strip().lower()
+    if explicit == 'wss':
+        return 'wss'
+    if explicit == 'tcp':
+        return 'tcp'
+    if cfg_deployment_mode(cfg) == 'single443':
+        return 'wss'
+    return 'tcp'
+
+
 def coerce_port(value):
     if value is None or isinstance(value, bool):
         return None
@@ -1243,6 +1262,7 @@ class Allocator:
         response_payload = {
             'frp_server': cfg_public_host(self.cfg),
             'frp_server_port': cfg_frp_control_public_port(self.cfg),
+            'frp_transport': cfg_frp_transport(self.cfg),
             'services': allocated,
         }
         if identity_auth:

@@ -79,6 +79,7 @@ unit_state() {
 
 frps_state="$(unit_state frps)"
 allocator_state="$(unit_state frp-port-allocator)"
+frontend_state="$(unit_state frp-frontend)"
 
 host_role="Server"
 if type frp_detect_host_role >/dev/null 2>&1; then
@@ -101,6 +102,10 @@ allocator_public=""
 public_host=""
 allocator_url=""
 ca_fingerprint=""
+deployment_mode=""
+frp_transport=""
+control_bind=""
+allocator_bind=""
 if [[ -r "$config_file" ]]; then
   eval "$(python3 - "$config_file" <<'PY'
 import json, shlex, sys, base64, hashlib
@@ -174,6 +179,23 @@ ca = cfg.get('tls_ca_cert') or str(root / 'pki' / 'ca.crt')
 fp = fingerprint(ca)
 if fp:
     print('ca_fingerprint=' + shlex.quote(fp))
+mode = str(cfg.get('deployment_mode') or 'direct').strip().lower()
+compact = mode.replace('-', '').replace('_', '')
+if compact in ('single443', 'enterprise', 'enterprisesingle443'):
+    mode = 'single443'
+else:
+    mode = 'direct'
+print('deployment_mode=' + shlex.quote(mode))
+transport = str(cfg.get('frp_transport') or '').strip().lower()
+if not transport:
+    transport = 'wss' if mode == 'single443' else 'tcp'
+print('frp_transport=' + shlex.quote(transport))
+bind = str(cfg.get('frp_control_bind_addr') or cfg.get('listen_host') or '')
+if bind:
+    print('control_bind=' + shlex.quote(bind))
+listen_host = str(cfg.get('listen_host') or '')
+if listen_host:
+    print('allocator_bind=' + shlex.quote(listen_host))
 PY
 )" 2>/dev/null || true
 fi
@@ -255,6 +277,7 @@ Public host     : ${public_host_state}
 
 frps            : ${frps_state}
 allocator       : ${allocator_state}
+frontend        : ${frontend_state}
 Lifecycle       : ${lifecycle}
 EOF
 
@@ -273,9 +296,12 @@ fi
 
 if [[ -n "${control_port:-}" ]]; then
   echo
+  echo "Deployment mode : ${deployment_mode:-direct}"
+  echo
   echo "FRP control"
   echo "  Public endpoint : ${public_host:-unknown}:${control_port}"
-  echo "  Local listener  : 0.0.0.0:${control_listen_port:-$control_port}"
+  echo "  Transport       : ${frp_transport:-tcp}"
+  echo "  Local listener  : ${control_bind:-0.0.0.0}:${control_listen_port:-$control_port}"
   echo "FRP public      : TCP/${control_port}"
   if [[ -n "${control_listen_port:-}" && "${control_listen_port}" != "${control_port}" ]]; then
     echo "FRP listen      : TCP/${control_listen_port}"
@@ -289,7 +315,7 @@ if [[ -n "${control_port:-}" ]]; then
     echo "  Public endpoint : ${allocator_url}"
     echo "Allocator URL   : ${allocator_url}"
   fi
-  echo "  Local listener  : 0.0.0.0:${allocator_port}"
+  echo "  Local listener  : ${allocator_bind:-0.0.0.0}:${allocator_port}"
   echo "Allocator listen: TCP/${allocator_port}"
   if [[ -n "${allocator_public:-}" && "${allocator_public}" != "${allocator_port}" ]]; then
     echo "Allocator public: TCP/${allocator_public}"

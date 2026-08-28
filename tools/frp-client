@@ -626,13 +626,18 @@ PY
     fi
   fi
 
-  python3 - "$candidate" "$server" "$port" <<'PY'
+  python3 - "$candidate" "$server" "$port" "$meta" <<'PY'
 import json,sys
 from pathlib import Path
 p=Path(sys.argv[1])
 s=json.loads(p.read_text())
 s['frp_server']=sys.argv[2]
 s['frp_server_port']=int(sys.argv[3])
+meta=json.loads(Path(sys.argv[4]).read_text())
+transport=str(meta.get('frp_transport') or s.get('frp_transport') or 'tcp').strip().lower() or 'tcp'
+if transport not in ('tcp', 'wss'):
+    raise SystemExit('ERROR: allocator returned an unsupported FRP transport')
+s['frp_transport']=transport
 p.write_text(json.dumps(s, indent=2, sort_keys=True)+'\n')
 PY
   if ! frp_merge_ports_into_state "$candidate" "$allocated"; then
@@ -656,12 +661,13 @@ PY
     return 1
   fi
 
-  local tmp_toml tmp_access tmp_state enabled_list
+  local tmp_toml tmp_access tmp_state enabled_list transport
   tmp_toml="$work/frpc.toml"
   tmp_access="$work/access-info.txt"
   tmp_state="$work/client-state.json"
   enabled_list="$work/enabled.json"
   frp_enabled_services_list "$candidate" >"$enabled_list"
+  transport="$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1],encoding="utf-8")).get("frp_transport") or "tcp"))' "$candidate")"
   if ! frp_client_test_hook CONFIG_GENERATION; then
     echo "ERROR: generated frpc configuration failed verification." >&2
     if frp_compensate_previous "$allocator_url" "$enroll_id" "$enroll_secret" \
@@ -682,7 +688,7 @@ PY
     fi
     return 1
   fi
-  render_frpc_toml "$tmp_toml" "$server" "$port" "$token" "$host_id" "$enabled_list"
+  render_frpc_toml "$tmp_toml" "$server" "$port" "$token" "$host_id" "$enabled_list" "$transport"
   if ! frp_client_verify_config "$tmp_toml"; then
     echo "ERROR: generated frpc configuration failed verification." >&2
     if frp_compensate_previous "$allocator_url" "$enroll_id" "$enroll_secret" \

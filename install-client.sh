@@ -399,6 +399,7 @@ frp_client_main() {
     || exit 1
   FRP_SERVER="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["frp_server"])' "$ENROLL_META_FILE")"
   FRP_SERVER_PORT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["frp_server_port"])' "$ENROLL_META_FILE")"
+  FRP_TRANSPORT="$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1],encoding="utf-8")).get("frp_transport") or "tcp"))' "$ENROLL_META_FILE")"
   TOKEN_CIPHERTEXT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["token_ciphertext"])' "$ENROLL_META_FILE")"
   merge_allocated_services
   FRP_TOKEN="$(frp_decrypt_token "$TOKEN_CIPHERTEXT" "$ENROLL_SECRET")" || exit 1
@@ -446,7 +447,7 @@ frp_client_main() {
   ACCESS_INFO="$(frp_client_path /etc/frp/access-info.txt)"
   mkdir -p "$(dirname "$FRPC_TOML")"
   echo "Validating configuration ..."
-  render_frpc_toml "$FRPC_TOML" "$FRP_SERVER" "$FRP_SERVER_PORT" "$FRP_TOKEN" "$HOST_ID" "$SERVICES_FILE"
+  render_frpc_toml "$FRPC_TOML" "$FRP_SERVER" "$FRP_SERVER_PORT" "$FRP_TOKEN" "$HOST_ID" "$SERVICES_FILE" "${FRP_TRANSPORT:-tcp}"
   frp_client_verify_config "$FRPC_TOML" || exit 1
 
   if [[ "${FRP_SKIP_SYSTEMD:-}" != "1" && -z "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
@@ -494,7 +495,8 @@ EOF2
 
   render_access_info "$ACCESS_INFO" "$FRP_SERVER" "$SERVICES_FILE"
   frp_write_client_state "$(frp_client_state_path)" "$ALLOCATOR_URL" "$FRP_SERVER" \
-    "$FRP_SERVER_PORT" "$HOSTNAME_VALUE" "$MACHINE_ID" "$HOST_ID" "$SERVICES_FILE"
+    "$FRP_SERVER_PORT" "$HOSTNAME_VALUE" "$MACHINE_ID" "$HOST_ID" "$SERVICES_FILE" \
+    "${FRP_TRANSPORT:-tcp}"
   frp_state_has_secrets "$(frp_client_state_path)" || {
     echo "ERROR: client-state.json must not contain secrets" >&2
     exit 1

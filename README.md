@@ -11,11 +11,15 @@ over HTTPS, and provides `frpctl` for day-to-day operations.
 > are documentation-only (RFC 5737). Replace them with your own public and
 > internal addresses.
 
-Current project version: **2.0.0**
+Current project version: **2.1.0**
 Current pinned FRP version: **v0.70.1**
 
-2.0.0 is a stable product milestone, not an upstream FRP change. See
-[CHANGELOG.md](CHANGELOG.md). Security details: [docs/SECURITY.md](docs/SECURITY.md).
+2.1.0 is the **current source version (release candidate)**. Direct mode remains
+the default. Optional Enterprise single-443 mode is included. FRP stays at
+**0.70.1**. The `v2.1.0` git tag is not created until real-environment gates
+pass. See [CHANGELOG.md](CHANGELOG.md),
+[docs/DEPLOYMENT_MODES.md](docs/DEPLOYMENT_MODES.md), and
+[docs/SECURITY.md](docs/SECURITY.md).
 
 ---
 
@@ -30,7 +34,9 @@ Current pinned FRP version: **v0.70.1**
 
 FRP tunnel: native TLS + FRP token.
 Management: HTTPS only + private CA + ECDSA client identity.
-There is no mTLS, no plain HTTP enrollment, and no requirement that FRP own public TCP/443.
+There is no mTLS, no plain HTTP enrollment, and Direct mode does not require
+FRP to own public TCP/443. Enterprise networks that reset TLS on non-standard
+ports should use [single-443 mode](docs/DEPLOYMENT_MODES.md) instead of HTTP.
 
 ---
 
@@ -47,13 +53,17 @@ Operator path:
 6. Connect using the public host and public service port
 ```
 
-Two network models:
+Two network models for Direct mode, plus an optional Enterprise mode:
 
 1. **Behind NAT/firewall** — public ports may differ from local listen ports
 2. **Direct public IP** — public and listen ports are usually the same
+3. **Enterprise single-443** — public TCP/443 carries allocator HTTPS and FRP
+   control over WSS; published services stay 6000-6098
 
-TCP/443 is a convenience default, not a requirement. Published service ports use
-1:1 public/internal port numbers (public 6002 → FRP remote port 6002).
+In Direct mode, TCP/443 is a convenience default, not a requirement. Published
+service ports use 1:1 public/internal port numbers (public 6002 → FRP remote
+port 6002). If `curl` can TCP-connect to the allocator port but TLS ClientHello
+is reset, see [docs/DEPLOYMENT_MODES.md](docs/DEPLOYMENT_MODES.md).
 
 ## 1. Choose ports
 
@@ -98,6 +108,26 @@ Open those ports on the host firewall or cloud security group. The installer
 does not configure firewalls. If 443 is already taken, put FRP control on 8443
 (or any free port).
 
+### Enterprise single-443
+
+Use this when a corporate filter allows TCP to a non-standard port but resets
+TLS ClientHello there. Do not switch the allocator to HTTP.
+
+```text
+Public host:                 203.0.113.10
+Public TCP/443:              nginx (allocator HTTPS + FRP control over WSS)
+Allocator backend:           127.0.0.1:6099 (not published)
+FRP control backend:         127.0.0.1:7000 (not published)
+Published services:          6000-6098
+```
+
+```bash
+FRP_PUBLIC_HOST=203.0.113.10 FRP_DEPLOYMENT_MODE=single443 sudo bash install-server.sh
+```
+
+Inbound: TCP/443 and TCP/6000-6098. Details, migration, and rollback:
+[docs/DEPLOYMENT_MODES.md](docs/DEPLOYMENT_MODES.md).
+
 ## 2. Install the FRP server
 
 ```bash
@@ -112,6 +142,8 @@ Non-interactive variables:
 
 ```text
 FRP_PUBLIC_HOST
+FRP_DEPLOYMENT_MODE              (direct | single443; default direct)
+FRP_CONFIRM_MODE_SWITCH          (yes; required for a non-interactive mode cutover)
 FRP_CONTROL_PUBLIC_PORT          (alias: FRP_CONTROL_PORT when both public and listen are unset)
 FRP_CONTROL_LISTEN_PORT
 FRP_ALLOCATOR_PUBLIC_PORT
@@ -121,27 +153,75 @@ FRP_PORT_END
 FRP_ALLOCATOR_PUBLIC_URL         (alias: FRP_ALLOCATOR_URL; HTTPS required)
 ```
 
-Defaults for a simple directly exposed server: control 443/443, allocator
-6099/6099, services 6000-6098. Re-running the installer reuses the existing
-runtime config unless those variables are set. An existing private CA, FRP
-token, registry, and reservations are preserved. A public-host change may
-reissue the **leaf** server certificate from the same CA. Pre-P2.8 `http://`
-allocator URLs are not reused.
+Direct-mode defaults for a simple exposed server: control 443/443, allocator
+6099/6099, services 6000-6098. Single-443 defaults: public 443 for both
+allocator HTTPS and FRP WSS, allocator backend 127.0.0.1:6099, FRP backend
+127.0.0.1:7000. Re-running the installer reuses the existing runtime config
+unless those variables are set. An existing private CA, FRP token, registry,
+and reservations are preserved. Switching Direct ↔ single-443 is a
+maintenance-window cutover; see [docs/DEPLOYMENT_MODES.md](docs/DEPLOYMENT_MODES.md).
 
 `curl | sudo bash` fetches the installer bundle from GitHub. That is a separate
 trust domain from allocator CA pinning. See [docs/SECURITY.md](docs/SECURITY.md).
 
-Verify:
+### Verify the server (after install)
+
+The project CA exists on the **server** only after `install-server.sh` finishes.
+Use `--cacert /etc/frp-auto-deploy/pki/ca.crt` for those post-install checks.
+Do not use `curl -k` as a production verification flow. Do not download
+`/ca.crt` with `--cacert` pointing at a file that does not exist yet
+(that is not first-trust bootstrap; see B below).
+
+**A. Pre-enrollment diagnostic (transport only, not a trust test)**
+
+From an operator workstation, TCP reachability is a connectivity check only:
+
+```bash
+nc -vz 203.0.113.10 6099    # Direct allocator port; omit for single-443
+nc -vz 203.0.113.10 443
+```
+
+If TCP connects but TLS ClientHello is reset, that is the enterprise DPI
+pattern. Use [single-443 mode](docs/DEPLOYMENT_MODES.md). Do not disable TLS,
+do not switch the allocator to HTTP, and do not treat `curl -k` as validation.
+
+**B. First bootstrap fingerprint verification**
+
+The client installer (not a manual `curl --cacert`) does this:
+
+1. GET `/ca.crt` over HTTPS (the local CA file does not exist yet)
+2. Parse it as X.509 and SHA256 the **canonical DER** of the **CA**
+3. Compare that fingerprint to `FRP_ALLOCATOR_CA_SHA256`
+4. Store `/etc/frp-auto-deploy/allocator-ca.crt` only on match
+
+Operators copy the install command printed by `frp-create-client`, which already
+sets `FRP_ALLOCATOR_CA_SHA256`. There is no TOFU and no self-signed
+`--cacert /tmp/ca.crt https://host/ca.crt -o /tmp/ca.crt` loop.
+
+**C. Post-enrollment / post-install verified HTTPS**
+
+On the **server**, after install (CA file is present):
 
 ```bash
 sudo frpctl status
 sudo frp-server-status --check
 sudo systemctl status frps --no-pager
 sudo systemctl status frp-port-allocator --no-pager
+# Direct mode (allocator listen default 6099):
 curl -fsS --cacert /etc/frp-auto-deploy/pki/ca.crt https://127.0.0.1:6099/healthz
+# Single-443: public frontend is TCP/443; allocator backend stays localhost:6099
+curl -fsS --cacert /etc/frp-auto-deploy/pki/ca.crt https://127.0.0.1:6099/healthz
+curl -fsS --cacert /etc/frp-auto-deploy/pki/ca.crt https://127.0.0.1/healthz
+sudo systemctl status frp-frontend --no-pager
 ```
 
-Adjust the healthz port if the allocator listen port is not 6099.
+On the **client**, after enrollment, later allocator calls use the stored CA:
+
+```text
+/etc/frp-auto-deploy/allocator-ca.crt
+```
+
+Adjust the Direct-mode healthz port if the allocator listen port is not 6099.
 
 ## 3. Create a client — zero-touch SSH (recommended)
 
@@ -231,10 +311,11 @@ sudo env \
 Run that install command on the client. Enter the Enrollment Code interactively,
 select services, confirm, install.
 
-`FRP_ALLOCATOR_URL` must be HTTPS. First install downloads `/ca.crt`, checks the
-SHA256 fingerprint, and stores `/etc/frp-auto-deploy/allocator-ca.crt`. Later
-calls use `curl --cacert`. The CA fingerprint does not validate the GitHub
-bootstrap script.
+`FRP_ALLOCATOR_URL` must be HTTPS. First install is sequence **B** above: download
+`/ca.crt`, check the SHA256 fingerprint, store
+`/etc/frp-auto-deploy/allocator-ca.crt`. Later calls are sequence **C**
+(`curl --cacert` with that stored CA). The CA fingerprint does not validate the
+GitHub bootstrap script.
 
 Built-in TCP presets (passthrough, not FRP virtual hosts): SSH `127.0.0.1:22`,
 HTTP `127.0.0.1:80`, HTTPS `127.0.0.1:443`, custom TCP.
@@ -429,14 +510,16 @@ Primary recovery: run doctor, then the recommended action.
 | Rollback failure / `RECOVERY_REQUIRED` | Follow the printed `FAILURE_CLASS`; doctor for state |
 | Registry corruption | Restore `registry.json` from backup; doctor does not repair it |
 | Allocator unreachable | Check public HTTPS URL, NAT, firewall, `frp-port-allocator` unit |
+| TCP connect works, TLS ClientHello reset | Enterprise DPI on a non-standard TLS port; use single-443 mode, not HTTP |
 | `frpc` / `frps` inactive | `systemctl status`; then doctor |
 
 ---
 
 # Architecture
 
-Public endpoints and local listeners are independent. The installer does not
-require `public port == listen port`. FRP does not need to own public TCP/443.
+Public endpoints and local listeners are independent. Direct mode does not
+need FRP to own public TCP/443. Enterprise single-443 shares one public TLS
+port; see [docs/DEPLOYMENT_MODES.md](docs/DEPLOYMENT_MODES.md).
 
 ```text
 FRP control:     public port  may differ from  listen port

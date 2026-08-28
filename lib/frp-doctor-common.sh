@@ -183,7 +183,7 @@ PY
 frp_doctor_collect_facts() {
   local facts_file="$1"
   local root py_ver openssl_ver systemd_ver kernel arch os_name os_id
-  local frps_a frps_e alloc_a alloc_e frpc_a frpc_e
+  local frps_a frps_e alloc_a alloc_e frpc_a frpc_e frontend_a frontend_e
   local clock_status clock_detail disk_mb
   local systemd_usable=0 skip_net=0 expect_root=1 have_systemctl=0
   root="$(frp_doctor_root)"
@@ -210,15 +210,17 @@ frp_doctor_collect_facts() {
     systemd_ver="$(frp_systemd_version 2>/dev/null || true)"
   fi
 
-  if frp_doctor_systemd_usable; then
+  if type frp_doctor_systemd_usable >/dev/null 2>&1 && frp_doctor_systemd_usable; then
     systemd_usable=1
     read -r frps_a frps_e <<<"$(frp_doctor_unit_state frps)"
     read -r alloc_a alloc_e <<<"$(frp_doctor_unit_state frp-port-allocator)"
     read -r frpc_a frpc_e <<<"$(frp_doctor_unit_state frpc)"
+    read -r frontend_a frontend_e <<<"$(frp_doctor_unit_state frp-frontend)"
   else
     frps_a=unknown; frps_e=unknown
     alloc_a=unknown; alloc_e=unknown
     frpc_a=unknown; frpc_e=unknown
+    frontend_a=unknown; frontend_e=unknown
   fi
 
   IFS=$'\t' read -r clock_status clock_detail <<<"$(frp_doctor_clock_status)"
@@ -230,6 +232,7 @@ frp_doctor_collect_facts() {
   python3 - "$facts_file" \
     "$expect_root" "$systemd_usable" "$have_systemctl" "$skip_net" \
     "$frps_a" "$frps_e" "$alloc_a" "$alloc_e" "$frpc_a" "$frpc_e" \
+    "$frontend_a" "$frontend_e" \
     "$clock_status" "$clock_detail" \
     "$os_name" "$os_id" "$kernel" "$arch" "$BASH_VERSION" "$py_ver" "$openssl_ver" "$systemd_ver" \
     "$disk_mb" <<'PY'
@@ -237,9 +240,9 @@ import json, sys
 from pathlib import Path
 path = Path(sys.argv[1])
 expect_root, systemd_usable, have_systemctl, skip_net = (sys.argv[i] == "1" for i in range(2, 6))
-(frps_a, frps_e, alloc_a, alloc_e, frpc_a, frpc_e,
+(frps_a, frps_e, alloc_a, alloc_e, frpc_a, frpc_e, frontend_a, frontend_e,
  clock_status, clock_detail, os_name, os_id, kernel, arch,
- bash, py_ver, openssl_ver, systemd_ver, disk_mb) = sys.argv[6:23]
+ bash, py_ver, openssl_ver, systemd_ver, disk_mb) = sys.argv[6:25]
 avail = int(disk_mb) if disk_mb.isdigit() else None
 facts = {
     "expect_root_owner": expect_root,
@@ -250,6 +253,7 @@ facts = {
         "frps": {"active": frps_a, "enabled": frps_e},
         "frp-port-allocator": {"active": alloc_a, "enabled": alloc_e},
         "frpc": {"active": frpc_a, "enabled": frpc_e},
+        "frp-frontend": {"active": frontend_a, "enabled": frontend_e},
     },
     "clock": {"status": clock_status, "detail": clock_detail},
     "platform": {
@@ -271,7 +275,7 @@ path.write_text(json.dumps(facts) + "\n", encoding="utf-8")
 PY
 
   # Local listen probes for configured server ports. Read-only TCP connect.
-  local cfg listen_frp listen_alloc
+  local cfg listen_frp listen_alloc listen_frontend
   cfg="$(frp_doctor_fs /etc/frp-auto-deploy/config.json)"
   if [[ -f "$cfg" ]]; then
     eval "$(python3 - "$cfg" <<'PY'
@@ -289,13 +293,19 @@ def port(v):
     return n if 1 <= n <= 65535 else None
 frp = port(cfg.get('frp_control_listen_port')) or port(cfg.get('control_port'))
 alloc = port(cfg.get('allocator_listen_port')) or port(cfg.get('listen_port'))
+frontend = None
+mode = str(cfg.get('deployment_mode') or 'direct').strip().lower().replace('-', '').replace('_', '')
+if mode in ('single443', 'enterprise', 'enterprisesingle443'):
+    frontend = port(cfg.get('frp_control_public_port')) or port(cfg.get('control_port'))
 if frp:
     print('listen_frp=%s' % frp)
 if alloc:
     print('listen_alloc=%s' % alloc)
+if frontend:
+    print('listen_frontend=%s' % frontend)
 PY
 )"
-    python3 - "$facts_file" "${listen_frp:-}" "${listen_alloc:-}" <<'PY'
+    python3 - "$facts_file" "${listen_frp:-}" "${listen_alloc:-}" "${listen_frontend:-}" <<'PY'
 import json, socket, sys
 from pathlib import Path
 path = Path(sys.argv[1])

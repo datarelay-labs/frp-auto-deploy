@@ -91,13 +91,17 @@ if [[ -n "${FRP_UNINSTALL_TEST_ROOT:-}" || "${FRP_UNINSTALL_HOOK_SKIP_SYSTEMD:-}
 fi
 
 if [[ "$SKIP_SYSTEMD" != "1" ]] && command -v systemctl >/dev/null 2>&1; then
-  systemctl stop frp-port-allocator frps 2>/dev/null || true
-  systemctl disable frp-port-allocator frps 2>/dev/null || true
+  systemctl stop frp-frontend frp-port-allocator frps 2>/dev/null || true
+  systemctl disable frp-frontend frp-port-allocator frps 2>/dev/null || true
 fi
 
 frp_u_rm_file "$(frp_u_path /etc/systemd/system/frps.service)"
 frp_u_rm_file "$(frp_u_path /etc/systemd/system/frp-port-allocator.service)"
+frp_u_rm_file "$(frp_u_path /etc/systemd/system/frp-frontend.service)"
+frp_u_rm_file "$(frp_u_path /etc/frp-auto-deploy/frontend.conf)"
 frp_u_rm_file "$(frp_u_path /usr/local/bin/frps)"
+# Keep any distro-installed nginx package; only the project frontend unit
+# and project-owned frontend.conf are removed.
 for tool in frp-create-client frp-clients frp-client-info frp-release-client \
   frp-release-service frp-revoke-client frp-set-client-installer-url \
   frp-server-status frp-update; do
@@ -110,6 +114,7 @@ libdir="$(frp_u_path /usr/local/lib/frp-auto-deploy)"
 if [[ -d "$libdir" && ! -L "$libdir" ]]; then
   frp_u_rm_file "${libdir}/frp-port-allocator.py"
   frp_u_rm_file "${libdir}/frp_pki.py"
+  frp_u_rm_file "${libdir}/frp_frontend.py"
   if [[ ! -f "$(frp_u_path /etc/frp/client-state.json)" && ! -x "$(frp_u_path /usr/local/bin/frp-client)" ]]; then
     frp_u_rm_file "${libdir}/frp-common.sh"
     frp_u_rm_file "${libdir}/frp_mgmt_auth.py"

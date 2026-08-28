@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.1.0 — 2026-08-28 (release candidate / current source version)
+
+This is the current source version. It is **not** a tagged stable release until
+`v2.1.0` exists after real-environment gates.
+
+Optional **Enterprise single-443** mode: public TCP/443 carries allocator HTTPS
+and FRP control over WSS (nginx frontend, project CA). Direct mode (443 frps +
+6099 allocator HTTPS) remains the default. Published services stay TCP/6000-6098.
+FRP remains pinned at **0.70.1**.
+
+- Installer: `FRP_DEPLOYMENT_MODE=direct|single443` and TTY mode prompt
+- Enrollment returns `frp_transport` (`tcp` or `wss`); clients pin the stored CA for WSS
+- `frpctl status` / `frpctl doctor` show topology and TLS-reset vs closed-port
+- Mode switch is an explicit maintenance-window cutover (`FRP_CONFIRM_MODE_SWITCH`)
+- HTTP allocator, `curl -k`, and plaintext WebSocket are not used
+
+See [docs/DEPLOYMENT_MODES.md](docs/DEPLOYMENT_MODES.md).
+
 ## 2.0.0 — 2026-08-28
 
 Stable product milestone for `frp-auto-deploy`. This is **not** an upstream FRP

@@ -51,7 +51,8 @@ pass "DISTRO_AMAZON_2"
 [[ "$(frp_package_for_command ss apt)" == iproute2 ]] || fail "ss apt"
 [[ "$(frp_package_for_command ss dnf)" == iproute ]] || fail "ss dnf"
 [[ "$(frp_package_for_command ip yum)" == iproute ]] || fail "ip yum"
-[[ "$(frp_package_for_command sha256sum apt)" == coreutils ]] || fail "sha256sum"
+[[ "$(frp_package_for_command nginx apt)" == nginx ]] || fail "nginx apt"
+[[ "$(frp_package_for_command nginx dnf)" == nginx ]] || fail "nginx dnf"
 PACKAGES=()
 MISSING_COMMANDS=(curl openssl)
 frp_packages_for_missing apt
@@ -113,6 +114,19 @@ frp_write_compatible_systemd_unit \
   "$ROOT/server/frp-port-allocator.service" \
   "$WORKDIR/allocator-252.service"
 grep -q '^ProtectSystem=strict' "$WORKDIR/allocator-252.service" || fail "modern unit lost strict"
+frp_write_compatible_systemd_unit \
+  "$ROOT/server/frp-frontend.service" \
+  "$WORKDIR/frontend-252.service"
+grep -q '^ProtectSystem=strict' "$WORKDIR/frontend-252.service" || fail "frontend modern unit lost strict"
+export FRP_TEST_SYSTEMD_VERSION=219
+frp_write_compatible_systemd_unit \
+  "$ROOT/server/frp-frontend.service" \
+  "$WORKDIR/frontend-219.service"
+if grep -q '^ProtectSystem=' "$WORKDIR/frontend-219.service"; then
+  fail "old systemd frontend unit still has ProtectSystem"
+fi
+grep -q '^RuntimeDirectory=frp-auto-deploy' "$WORKDIR/frontend-219.service" \
+  || fail "frontend unit lost RuntimeDirectory on old systemd"
 unset FRP_TEST_SYSTEMD_VERSION
 pass "SYSTEMD_OLD_UNIT_COMPAT"
 
@@ -134,6 +148,7 @@ python3 -m py_compile \
   "$ROOT/server/migrate_token.py" \
   "$ROOT/lib/frp_mgmt_auth.py" \
   "$ROOT/lib/frp_pki.py" \
+  "$ROOT/lib/frp_frontend.py" \
   "$ROOT/lib/frp_doctor.py" \
   "$ROOT/scripts/build-bundles.py"
 pass "PYTHON_MIN_VERSION"

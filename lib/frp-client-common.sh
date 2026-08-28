@@ -13,7 +13,7 @@ FRP_CLIENT_UPGRADE_BACKUP_KEEP="${FRP_CLIENT_UPGRADE_BACKUP_KEEP:-5}"
 FRP_CLIENT_UPDATE_URL="${FRP_CLIENT_UPDATE_URL:-https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh}"
 
 # Defaults match VERSION. A sibling VERSION file overrides project/FRP versions.
-PROJECT_VERSION="${PROJECT_VERSION:-2.0.0}"
+PROJECT_VERSION="${PROJECT_VERSION:-2.1.0}"
 FRP_VERSION="${FRP_VERSION:-0.70.1}"
 _FRP_CLIENT_COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${_FRP_CLIENT_COMMON_DIR}/../VERSION" ]]; then
@@ -1338,12 +1338,15 @@ PY
 }
 
 frp_write_client_state() {
-  python3 - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$FRP_CLIENT_STATE_SCHEMA" "$8" <<'PY'
+  python3 - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$FRP_CLIENT_STATE_SCHEMA" "$8" "${9:-tcp}" <<'PY'
 import json, os, sys, tempfile
 from pathlib import Path
 dest, allocator_url, server, server_port, hostname, machine_id, host_id = sys.argv[1:8]
 schema = int(sys.argv[8])
 services_raw = json.loads(Path(sys.argv[9]).read_text(encoding='utf-8'))
+transport = str(sys.argv[10] if len(sys.argv) > 10 else 'tcp').strip().lower() or 'tcp'
+if transport not in ('tcp', 'wss'):
+    raise SystemExit('ERROR: unsupported FRP transport')
 services = {}
 if isinstance(services_raw, list):
     items = services_raw
@@ -1375,6 +1378,7 @@ state = {
     'allocator_url': allocator_url,
     'frp_server': server,
     'frp_server_port': int(server_port),
+    'frp_transport': transport,
     'hostname': hostname,
     'machine_id': machine_id,
     'host_id': host_id,
@@ -1598,10 +1602,30 @@ PY
 
 render_frpc_toml() {
   local dest="$1" server="$2" server_port="$3" token="$4" host_id="$5" services_json_file="$6"
-  python3 - "$dest" "$server" "$server_port" "$token" "$host_id" "$services_json_file" <<'PY'
+  local transport="${7:-}"
+  local ca_file=""
+  if [[ -z "$transport" ]]; then
+    transport=tcp
+  fi
+  transport="$(printf '%s' "$transport" | tr '[:upper:]' '[:lower:]')"
+  case "$transport" in
+    tcp|wss) ;;
+    *)
+      echo "ERROR: unsupported FRP transport ${transport}" >&2
+      return 1
+      ;;
+  esac
+  if [[ "$transport" == "wss" ]]; then
+    ca_file="$(frp_allocator_ca_path)"
+    if [[ ! -f "$ca_file" ]]; then
+      echo "ERROR: allocator CA is required for WSS FRP control" >&2
+      return 1
+    fi
+  fi
+  python3 - "$dest" "$server" "$server_port" "$token" "$host_id" "$services_json_file" "$transport" "$ca_file" <<'PY'
 import json, sys
 from pathlib import Path
-dest, server, server_port, token, host_id, svc_path = sys.argv[1:7]
+dest, server, server_port, token, host_id, svc_path, transport, ca_file = sys.argv[1:9]
 raw = json.loads(Path(svc_path).read_text(encoding='utf-8'))
 if isinstance(raw, dict) and 'services' in raw:
     services = []
@@ -1620,6 +1644,11 @@ lines = [
     '',
     'transport.tls.enable = true',
 ]
+if transport == 'wss':
+    lines.extend([
+        'transport.protocol = "wss"',
+        f'transport.tls.trustedCaFile = "{ca_file}"',
+    ])
 for item in services:
     if item.get('enabled', True) is False:
         continue
@@ -2125,10 +2154,14 @@ if 'token_ciphertext' in d or 'mgmt_mac_key' in d or d.get('token'):
 services=d.get('services')
 if not isinstance(services, list) or not services:
     raise SystemExit('ERROR: allocator response is missing services')
+transport=str(d.get('frp_transport') or 'tcp').strip().lower() or 'tcp'
+if transport not in ('tcp', 'wss'):
+    raise SystemExit('ERROR: allocator returned an unsupported FRP transport')
 Path(os.environ['ALLOCATED_FILE']).write_text(json.dumps(services)+'\n', encoding='utf-8')
 meta={
     'frp_server': str(d['frp_server']),
     'frp_server_port': str(d['frp_server_port']),
+    'frp_transport': transport,
     'token_ciphertext': '',
 }
 Path(os.environ['META_FILE']).write_text(json.dumps(meta)+'\n', encoding='utf-8')
@@ -2182,6 +2215,9 @@ if 'mgmt_mac_key' in d:
 services=d.get('services')
 if not isinstance(services, list) or not services:
     raise SystemExit('ERROR: allocator response is missing services')
+transport=str(d.get('frp_transport') or 'tcp').strip().lower() or 'tcp'
+if transport not in ('tcp', 'wss'):
+    raise SystemExit('ERROR: allocator returned an unsupported FRP transport')
 Path(os.environ['ALLOCATED_FILE']).write_text(json.dumps(services)+'\n', encoding='utf-8')
 token=str(d.get('token_ciphertext') or '')
 if not token:
@@ -2189,6 +2225,7 @@ if not token:
 meta={
     'frp_server': str(d['frp_server']),
     'frp_server_port': str(d['frp_server_port']),
+    'frp_transport': transport,
     'token_ciphertext': token,
     'mgmt_status': str(d.get('mgmt_status') or ''),
 }
@@ -2379,7 +2416,7 @@ import json, sys
 from pathlib import Path
 cand = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
 cur = json.loads(Path(sys.argv[2]).read_text(encoding='utf-8'))
-for key in ('allocator_url', 'frp_server', 'frp_server_port', 'hostname', 'machine_id', 'host_id', 'schema_version'):
+for key in ('allocator_url', 'frp_server', 'frp_server_port', 'frp_transport', 'hostname', 'machine_id', 'host_id', 'schema_version'):
     if key in cur and key not in cand:
         cand[key] = cur[key]
     elif key in cur:
@@ -2669,9 +2706,10 @@ frp_regenerate_toml_from_state() {
   server="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["frp_server"])' "$state")"
   port="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["frp_server_port"])' "$state")"
   host_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["host_id"])' "$state")"
+  transport="$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1],encoding="utf-8")).get("frp_transport") or "tcp"))' "$state")"
   enabled_list="$(mktemp)"
   frp_enabled_services_list "$state" >"$enabled_list"
-  if ! render_frpc_toml "$(frp_client_toml_path)" "$server" "$port" "$token" "$host_id" "$enabled_list"; then
+  if ! render_frpc_toml "$(frp_client_toml_path)" "$server" "$port" "$token" "$host_id" "$enabled_list" "$transport"; then
     rm -f "$enabled_list"
     return 1
   fi

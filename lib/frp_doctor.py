@@ -685,6 +685,8 @@ def classify_ssl_error(exc):
         return 'EXPIRED_CERT'
     if 'unknown ca' in text or 'unable to get local issuer' in text or 'certificate_verify_failed' in text:
         return 'UNKNOWN_CA'
+    if 'reset' in text or 'connection reset' in text:
+        return 'TLS_RESET'
     return 'TLS_ERROR'
 
 
@@ -735,10 +737,17 @@ def https_healthz(url, ca_path, timeout=NETWORK_TIMEOUT):
             cls = 'connection_refused'
         elif 'name or service' in text or 'not known' in text:
             cls = 'dns'
+        elif 'reset' in text:
+            cls = 'TLS_RESET'
         else:
             cls = 'unreachable'
         return {'ok': False, 'error_class': cls, 'detail': str(reason), 'url': health}
+    except ConnectionResetError as exc:
+        return {'ok': False, 'error_class': 'TLS_RESET', 'detail': str(exc), 'url': health}
     except OSError as exc:
+        text = str(exc).lower()
+        if 'reset' in text:
+            return {'ok': False, 'error_class': 'TLS_RESET', 'detail': str(exc), 'url': health}
         return {'ok': False, 'error_class': 'unreachable', 'detail': str(exc), 'url': health}
 
 
@@ -780,6 +789,16 @@ def server_config_ports(cfg):
     port_start = coerce_port(cfg.get('port_start'))
     port_end = coerce_port(cfg.get('port_end'))
     listen_host = str(cfg.get('listen_host') or '0.0.0.0')
+    bind_addr = str(cfg.get('frp_control_bind_addr') or listen_host or '0.0.0.0')
+    mode = str(cfg.get('deployment_mode') or 'direct').strip().lower()
+    compact = mode.replace('-', '').replace('_', '')
+    if compact in ('single443', 'enterprise', 'enterprisesingle443'):
+        mode = 'single443'
+    else:
+        mode = 'direct'
+    transport = str(cfg.get('frp_transport') or '').strip().lower()
+    if not transport:
+        transport = 'wss' if mode == 'single443' else 'tcp'
     alloc_url = str(cfg.get('allocator_public_url') or '')
     return {
         'public_host': public_host,
@@ -790,6 +809,9 @@ def server_config_ports(cfg):
         'port_start': port_start,
         'port_end': port_end,
         'listen_host': listen_host,
+        'frp_bind_addr': bind_addr,
+        'deployment_mode': mode,
+        'frp_transport': transport,
         'allocator_url': alloc_url,
     }
 
@@ -1442,6 +1464,37 @@ def check_server(report, paths, facts, skip_network):
         ports = server_config_ports(cfg)
         check_port_collision(report, facts, ports.get('frp_listen'), frps_state, 'frps_listen_port', 'frps')
         check_port_collision(report, facts, ports.get('alloc_listen'), alloc_state, 'allocator_listen_port', 'allocator')
+        if ports.get('deployment_mode') == 'single443':
+            frontend_state = check_unit(report, facts, 'frp-frontend', 'frontend_service', 'frp-frontend.service')
+            check_port_collision(report, facts, ports.get('frp_public'), frontend_state, 'frontend_listen_port', 'frontend')
+            conf = paths.p('/etc/frp-auto-deploy/frontend.conf')
+            if conf.is_file():
+                text = conf.read_text(encoding='utf-8', errors='replace')
+                missing = []
+                if 'location = "/~!frp"' not in text:
+                    missing.append('WSS path /~!frp')
+                if 'proxy_ssl_verify on' not in text:
+                    missing.append('proxy_ssl_verify')
+                if 'listen' not in text or 'ssl' not in text:
+                    missing.append('TLS listen')
+                if missing:
+                    report.add(
+                        'frontend_config', FAIL,
+                        'single-443 frontend config is missing required directives',
+                        ', '.join(missing),
+                        're-run the server installer',
+                        'installation',
+                    )
+                else:
+                    report.add(
+                        'frontend_config', PASS,
+                        'single-443 frontend config routes HTTPS allocator and WSS control',
+                        str(conf), '', 'installation',
+                    )
+            else:
+                report.add('frontend_config', FAIL, 'single-443 frontend config is missing', '', 're-run the server installer', 'installation')
+        else:
+            report.add('frontend_service', INFO, 'Direct mode does not use the HTTPS/WSS frontend', '', '', 'installation')
 
     net = (facts.get('network') or {}).get('allocator_healthz')
     if net is None and not skip_network and cfg:
@@ -1460,6 +1513,12 @@ def check_server(report, paths, facts, skip_network):
         rec = 'inspect frp-port-allocator.service; doctor does not restart it'
         if cls in ('UNKNOWN_CA', 'HOSTNAME_MISMATCH', 'EXPIRED_CERT'):
             rec = 're-run the server installer to reissue the allocator certificate under the existing CA'
+            status = FAIL
+        elif cls == 'TLS_RESET':
+            rec = (
+                'TCP connected but TLS was reset. Some enterprise firewalls reset TLS on '
+                'non-standard ports. Use Enterprise single-443 mode; do not downgrade to HTTP.'
+            )
             status = FAIL
         report.add('allocator_health', status, 'allocator HTTPS health check failed (%s)' % cls, net.get('detail') or '', rec, 'network')
 
@@ -1527,8 +1586,10 @@ def check_server(report, paths, facts, skip_network):
     if cfg:
         ports = server_config_ports(cfg)
         report.display['server_endpoints'] = {
+            'deployment_mode': ports.get('deployment_mode') or 'direct',
+            'frp_transport': ports.get('frp_transport') or 'tcp',
             'frp_public': '%s:%s' % (ports.get('public_host') or 'unknown', ports.get('frp_public') or '?'),
-            'frp_listen': '%s:%s' % (ports.get('listen_host') or '0.0.0.0', ports.get('frp_listen') or '?'),
+            'frp_listen': '%s:%s' % (ports.get('frp_bind_addr') or ports.get('listen_host') or '0.0.0.0', ports.get('frp_listen') or '?'),
             'allocator_public': ports.get('allocator_url') or '',
             'allocator_listen': '%s:%s' % (ports.get('listen_host') or '0.0.0.0', ports.get('alloc_listen') or '?'),
             'service_range': '%s-%s' % (ports.get('port_start') or '?', ports.get('port_end') or '?'),
@@ -1863,8 +1924,10 @@ def render_human(report, quiet=False, verbose=False):
             lines.extend([
                 'Installation / endpoints',
                 '------------------------',
+                'Deployment mode : %s' % (ep.get('deployment_mode') or 'direct'),
                 'FRP control',
                 '  Public endpoint : %s' % ep.get('frp_public'),
+                '  Transport       : %s' % (ep.get('frp_transport') or 'tcp'),
                 '  Local listener  : %s' % ep.get('frp_listen'),
                 'Allocator',
                 '  Public endpoint : %s' % ep.get('allocator_public'),
