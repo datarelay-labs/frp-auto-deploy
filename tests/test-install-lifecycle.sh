@@ -348,6 +348,7 @@ unset FRP_CONTROL_PUBLIC_PORT FRP_CONTROL_LISTEN_PORT \
   FRP_ALLOCATOR_PUBLIC_PORT FRP_ALLOCATOR_LISTEN_PORT FRP_CONTROL_PORT FRP_ALLOCATOR_PORT \
   FRP_ALLOCATOR_URL FRP_ALLOCATOR_PUBLIC_URL FRP_LISTEN_HOST FRP_CONTROL_BIND_ADDR \
   FRP_TRANSPORT FRP_MODE_SWITCH EXISTING_DEPLOYMENT_MODE EXISTING_ALLOCATOR_URL \
+  EXISTING_SERVER_CONFIG \
   FRP_SERVER_CONFIG FRP_PKI_DIR FRP_CONFIRM_MODE_SWITCH || true
 if (
   frp_server_main
@@ -378,6 +379,74 @@ grep -q 'bindAddr = "127.0.0.1"' "$SWITCH/etc/frp/frps.toml" || fail "switch bin
 grep -q 'bindPort = 7000' "$SWITCH/etc/frp/frps.toml" || fail "switch bindPort"
 [[ -f "$SWITCH/etc/systemd/system/frp-frontend.service" ]] || fail "switch frontend unit"
 pass "SINGLE443_MODE_SWITCH_GUARD"
+
+# Pre-2.1 config.json without deployment_mode is still Direct → single443.
+LEGACY19="$WORKDIR/server-legacy-19"
+cp -a "$SRV" "$LEGACY19"
+python3 - "$LEGACY19/etc/frp-auto-deploy/config.json" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+cfg = json.loads(path.read_text())
+cfg.pop('deployment_mode', None)
+cfg.pop('frp_transport', None)
+cfg.pop('listen_host', None)
+cfg.pop('frp_control_bind_addr', None)
+cfg.pop('frp_proxy_bind_addr', None)
+path.write_text(json.dumps(cfg, indent=2) + '\n')
+PY
+export FRP_SERVER_TEST_ROOT="$LEGACY19"
+export FRP_DEPLOYMENT_MODE=single443
+unset FRP_CONTROL_PUBLIC_PORT FRP_CONTROL_LISTEN_PORT \
+  FRP_ALLOCATOR_PUBLIC_PORT FRP_ALLOCATOR_LISTEN_PORT FRP_CONTROL_PORT FRP_ALLOCATOR_PORT \
+  FRP_ALLOCATOR_URL FRP_ALLOCATOR_PUBLIC_URL FRP_LISTEN_HOST FRP_CONTROL_BIND_ADDR \
+  FRP_TRANSPORT FRP_MODE_SWITCH EXISTING_DEPLOYMENT_MODE EXISTING_ALLOCATOR_URL \
+  EXISTING_SERVER_CONFIG \
+  FRP_SERVER_CONFIG FRP_PKI_DIR FRP_CONFIRM_MODE_SWITCH || true
+if (
+  frp_server_main
+) >"$WORKDIR/legacy-no.out" 2>"$WORKDIR/legacy-no.err"; then
+  fail "legacy Direct to single443 without confirmation should fail"
+fi
+grep -qi 'FRP_CONFIRM_MODE_SWITCH' "$WORKDIR/legacy-no.err" || fail "legacy confirmation message"
+grep -q 'bindPort = 443' "$LEGACY19/etc/frp/frps.toml" || fail "unconfirmed legacy switch rewrote toml"
+[[ "$(frp_file_sha256 "$LEGACY19/etc/frp/server_token")" == "$TOKEN_SHA" ]] || fail "unconfirmed legacy rotated token"
+export FRP_CONFIRM_MODE_SWITCH=yes
+if ! frp_server_main >"$WORKDIR/legacy-yes.out" 2>"$WORKDIR/legacy-yes.err"; then
+  cat "$WORKDIR/legacy-yes.out" "$WORKDIR/legacy-yes.err" >&2
+  fail "confirmed legacy mode switch"
+fi
+python3 - "$LEGACY19/etc/frp-auto-deploy/config.json" <<'PY' || fail "legacy switch config"
+import json, sys
+from pathlib import Path
+cfg = json.loads(Path(sys.argv[1]).read_text())
+assert cfg['deployment_mode'] == 'single443'
+assert cfg['frp_transport'] == 'wss'
+assert cfg['frp_control_public_port'] == 443
+assert cfg['frp_control_listen_port'] == 7000
+assert cfg['allocator_public_port'] == 443
+assert cfg['allocator_listen_port'] == 6099
+assert cfg['allocator_public_url'] == 'https://203.0.113.10/enroll'
+assert cfg['listen_host'] == '127.0.0.1'
+assert cfg['frp_control_bind_addr'] == '127.0.0.1'
+assert cfg['frp_proxy_bind_addr'] == '0.0.0.0'
+PY
+grep -q 'bindAddr = "127.0.0.1"' "$LEGACY19/etc/frp/frps.toml" || fail "legacy switch bindAddr"
+grep -q 'bindPort = 7000' "$LEGACY19/etc/frp/frps.toml" || fail "legacy switch bindPort"
+[[ "$(frp_file_sha256 "$LEGACY19/etc/frp/server_token")" == "$TOKEN_SHA" ]] || fail "legacy switch rotated token"
+[[ "$(frp_file_sha256 "$LEGACY19/var/lib/frp-auto-deploy/registry.json")" == "$REG_SHA" ]] || fail "legacy switch rewrote registry"
+[[ "$(python3 - "$LEGACY19/etc/frp-auto-deploy/pki/ca.crt" <<'PY'
+import hashlib, subprocess, sys, tempfile
+from pathlib import Path
+src = Path(sys.argv[1])
+der = tempfile.NamedTemporaryFile(delete=False)
+der.close()
+subprocess.check_call(["openssl", "x509", "-in", str(src), "-outform", "DER", "-out", der.name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+print(hashlib.sha256(Path(der.name).read_bytes()).hexdigest())
+Path(der.name).unlink()
+PY
+)" == "$CA_FP" ]] || fail "legacy switch rotated CA"
+pass "LEGACY_DIRECT_TO_SINGLE443_REGRESSION"
 
 # Occupied public 443 must fail before rewriting a working Direct tree.
 BUSY="$WORKDIR/server-busy443"

@@ -448,6 +448,7 @@ load_existing_server_config() {
   EXISTING_ALLOCATOR_URL=""
   EXISTING_CLIENT_INSTALLER_URL=""
   EXISTING_DEPLOYMENT_MODE=""
+  EXISTING_SERVER_CONFIG=""
   [[ -r "$path" ]] || return 0
   eval "$(python3 - "$path" <<'PY'
 import json, shlex, sys
@@ -459,6 +460,7 @@ except Exception:
     raise SystemExit(0)
 if not isinstance(cfg, dict):
     raise SystemExit(0)
+print('EXISTING_SERVER_CONFIG=1')
 mapping = {
     'public_host': 'EXISTING_PUBLIC_IP',
     'public_ip': 'EXISTING_PUBLIC_IP',
@@ -489,6 +491,9 @@ for key in order:
     if value is None or value == '':
         continue
     seen[envname] = str(value)
+if 'EXISTING_DEPLOYMENT_MODE' not in seen:
+    # Pre-2.1 configs omit deployment_mode. An existing server is Direct.
+    seen['EXISTING_DEPLOYMENT_MODE'] = 'direct'
 for envname, value in seen.items():
     print(f'{envname}={shlex.quote(value)}')
 url = str(cfg.get('allocator_public_url') or '').strip()
@@ -595,7 +600,9 @@ resolve_server_settings() {
   existing_mode="$(frp_normalize_deployment_mode "${EXISTING_DEPLOYMENT_MODE:-direct}")" || exit 1
   if [[ "$user_set_mode" != "1" ]]; then
     FRP_DEPLOYMENT_MODE="$existing_mode"
-    if frp_has_tty && [[ -z "${EXISTING_DEPLOYMENT_MODE:-}" ]]; then
+    # Mode prompt is for a genuine fresh install only. A pre-2.1 config.json
+    # without deployment_mode is an existing Direct server, not a first install.
+    if frp_has_tty && [[ "${EXISTING_SERVER_CONFIG:-}" != "1" ]]; then
       echo
       echo "Deployment mode"
       echo "---------------"
@@ -610,7 +617,7 @@ resolve_server_settings() {
     fi
   fi
   FRP_DEPLOYMENT_MODE="$(frp_normalize_deployment_mode "$FRP_DEPLOYMENT_MODE")" || exit 1
-  if [[ -n "${EXISTING_DEPLOYMENT_MODE:-}" && "$existing_mode" != "$FRP_DEPLOYMENT_MODE" ]]; then
+  if [[ "${EXISTING_SERVER_CONFIG:-}" == "1" && "$existing_mode" != "$FRP_DEPLOYMENT_MODE" ]]; then
     frp_confirm_mode_switch "$existing_mode" "$FRP_DEPLOYMENT_MODE" || exit 1
     FRP_MODE_SWITCH=1
   fi

@@ -183,6 +183,11 @@ speak WSS to nginx on TCP/443. A 2.0.0 client that ignores `frp_transport`
 will enroll/apply HMAC-OK and then fail to connect until the client software
 is 2.1.0+ and Apply rewrites `frpc.toml`.
 
+A pre-2.1 `config.json` that omits `deployment_mode` is treated as Direct.
+Re-running with `FRP_DEPLOYMENT_MODE=single443` is a mode switch and still
+requires `FRP_CONFIRM_MODE_SWITCH=yes` (or `SWITCH` on a TTY). A genuine
+fresh install with no `config.json` does not require that confirmation.
+
 Recommended sequence:
 
 1. Upgrade client software to 2.1.0+ while the server is still Direct

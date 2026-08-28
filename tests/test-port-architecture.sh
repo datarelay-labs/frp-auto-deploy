@@ -18,7 +18,7 @@ reset_env() {
     FRP_SERVER_CONFIG DETECTED_PUBLIC_IP DETECTED_INTERNAL_IP \
     CLIENT_INSTALLER_URL FRP_DEPLOYMENT_MODE FRP_CONFIRM_MODE_SWITCH \
     FRP_LISTEN_HOST FRP_CONTROL_BIND_ADDR FRP_TRANSPORT FRP_MODE_SWITCH \
-    EXISTING_DEPLOYMENT_MODE || true
+    EXISTING_DEPLOYMENT_MODE EXISTING_SERVER_CONFIG || true
 }
 
 export FRP_SERVER_SOURCED=1
@@ -209,6 +209,8 @@ assert_ports "single443" 443 7000 443 6099
 [[ "$FRP_TRANSPORT" == wss ]] || fail "single443 transport"
 [[ "$FRP_LISTEN_HOST" == 127.0.0.1 ]] || fail "single443 listen host"
 [[ "$FRP_CONTROL_BIND_ADDR" == 127.0.0.1 ]] || fail "single443 bind addr"
+[[ "${FRP_MODE_SWITCH:-0}" == "0" ]] || fail "fresh single443 should not be a mode switch"
+[[ -z "${EXISTING_SERVER_CONFIG:-}" ]] || fail "missing config was treated as existing"
 pass "single443 clean-install defaults"
 
 reset_env
@@ -327,7 +329,108 @@ export FRP_CONFIRM_MODE_SWITCH=yes
 resolve_server_settings >/dev/null
 assert_ports "mode switch" 443 7000 443 6099
 [[ "$FRP_ALLOCATOR_PUBLIC_URL" == 'https://203.0.113.10/enroll' ]] || fail "mode switch rewrote allocator URL"
+[[ "$FRP_MODE_SWITCH" == "1" ]] || fail "explicit direct config did not set FRP_MODE_SWITCH"
 pass "direct to single443 requires explicit confirmation"
+
+write_legacy_19_config() {
+  python3 - "$1" <<'PY'
+import json, sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps({
+  "public_host": "203.0.113.10",
+  "public_ip": "203.0.113.10",
+  "frp_control_public_port": 443,
+  "frp_control_listen_port": 443,
+  "allocator_public_port": 6099,
+  "allocator_listen_port": 6099,
+  "listen_port": 6099,
+  "port_start": 6000,
+  "port_end": 6098,
+  "allocator_public_url": "https://203.0.113.10:6099/enroll",
+}, indent=2) + "\n")
+PY
+}
+
+# Case 2: pre-2.1 config without deployment_mode is legacy Direct.
+reset_env
+export FRP_PUBLIC_HOST=203.0.113.10
+export FRP_DEPLOYMENT_MODE=single443
+export FRP_SERVER_CONFIG="$WORKDIR/legacy-1.9.1.json"
+write_legacy_19_config "$FRP_SERVER_CONFIG"
+load_existing_server_config
+[[ "${EXISTING_SERVER_CONFIG:-}" == "1" ]] || fail "legacy config not detected as existing"
+[[ "${EXISTING_DEPLOYMENT_MODE:-}" == "direct" ]] || fail "legacy config not treated as direct"
+if (
+  load_existing_server_config
+  resolve_server_settings
+) >/dev/null 2>"$WORKDIR/legacy-switch.err"; then
+  fail "legacy Direct to single443 without confirmation should fail"
+fi
+grep -qi 'FRP_CONFIRM_MODE_SWITCH' "$WORKDIR/legacy-switch.err" || fail "legacy switch confirmation message"
+export FRP_CONFIRM_MODE_SWITCH=yes
+resolve_server_settings >/dev/null
+assert_ports "legacy 1.9.1 switch" 443 7000 443 6099
+[[ "$FRP_ALLOCATOR_PUBLIC_URL" == 'https://203.0.113.10/enroll' ]] || fail "legacy switch rewrote allocator URL"
+[[ "$FRP_TRANSPORT" == wss ]] || fail "legacy switch transport"
+[[ "$FRP_LISTEN_HOST" == 127.0.0.1 ]] || fail "legacy switch listen host"
+[[ "$FRP_CONTROL_BIND_ADDR" == 127.0.0.1 ]] || fail "legacy switch bind addr"
+[[ "$FRP_MODE_SWITCH" == "1" ]] || fail "legacy Direct to single443 did not set FRP_MODE_SWITCH"
+pass "pre-2.1 Direct to single443 requires confirmation and applies defaults"
+
+# Explicit user port overrides still win on a legacy switch.
+reset_env
+export FRP_PUBLIC_HOST=203.0.113.10
+export FRP_DEPLOYMENT_MODE=single443
+export FRP_CONFIRM_MODE_SWITCH=yes
+export FRP_CONTROL_LISTEN_PORT=7100
+export FRP_ALLOCATOR_LISTEN_PORT=6199
+export FRP_SERVER_CONFIG="$WORKDIR/legacy-1.9.1.json"
+load_existing_server_config
+resolve_server_settings >/dev/null
+assert_ports "legacy override" 443 7100 443 6199
+[[ "$FRP_MODE_SWITCH" == "1" ]] || fail "legacy override lost FRP_MODE_SWITCH"
+pass "legacy switch honors explicit listen port overrides"
+
+# Case 4: existing single443 reinstall is not a mode switch.
+reset_env
+export FRP_PUBLIC_HOST=203.0.113.10
+export FRP_DEPLOYMENT_MODE=single443
+export FRP_SERVER_CONFIG="$WORKDIR/existing-s443.json"
+python3 - "$FRP_SERVER_CONFIG" <<'PY'
+import json, sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps({
+  "public_host": "203.0.113.10",
+  "frp_control_public_port": 443,
+  "frp_control_listen_port": 7000,
+  "allocator_public_port": 443,
+  "allocator_listen_port": 6099,
+  "listen_port": 6099,
+  "port_start": 6000,
+  "port_end": 6098,
+  "deployment_mode": "single443",
+  "frp_transport": "wss",
+  "allocator_public_url": "https://203.0.113.10/enroll",
+}, indent=2)+"\n")
+PY
+load_existing_server_config
+resolve_server_settings >/dev/null
+assert_ports "single443 reinstall" 443 7000 443 6099
+[[ "${FRP_MODE_SWITCH:-0}" == "0" ]] || fail "single443 reinstall set FRP_MODE_SWITCH"
+pass "existing single443 reinstall is not a mode switch"
+
+# Case 5: existing Direct without a new mode request stays Direct.
+reset_env
+export FRP_PUBLIC_HOST=203.0.113.10
+export FRP_SERVER_CONFIG="$WORKDIR/legacy-1.9.1.json"
+load_existing_server_config
+resolve_server_settings >/dev/null
+assert_ports "legacy remain direct" 443 443 6099 6099
+[[ "${FRP_DEPLOYMENT_MODE}" == "direct" ]] || fail "legacy remain mode"
+[[ "${FRP_TRANSPORT}" == "tcp" ]] || fail "legacy remain transport"
+[[ "${FRP_MODE_SWITCH:-0}" == "0" ]] || fail "legacy remain set FRP_MODE_SWITCH"
+[[ "$FRP_ALLOCATOR_PUBLIC_URL" == 'https://203.0.113.10:6099/enroll' ]] || fail "legacy remain allocator URL"
+pass "existing Direct without mode request remains Direct"
 
 # NAT summary for single443 must not tell operators to publish backends.
 reset_env
@@ -355,6 +458,8 @@ echo "SINGLE443_FRONTEND_CONFIG=PASS"
 echo "SINGLE443_ALLOCATOR_PROXY_VERIFY=PASS"
 echo "SINGLE443_BACKEND_LOOPBACK_ONLY=PASS"
 echo "SINGLE443_MODE_SWITCH_GUARD=PASS"
+echo "FRESH_INSTALL_REGRESSION=PASS"
+echo "LEGACY_DIRECT_TO_SINGLE443_REGRESSION=PASS"
 echo "NO_PUBLIC_BACKEND_6099_SINGLE443=PASS"
 echo "NO_PUBLIC_BACKEND_7000_SINGLE443=PASS"
 echo "PORT_ARCHITECTURE_TEST=PASS"
