@@ -73,7 +73,7 @@ class Env:
     def cleanup(self):
         self.tmp.cleanup()
 
-    def add_enrollment(self, enrollment_id='aabbccddeeff0011', secret='secret-aabbccddeeff0011', ttl=600):
+    def add_enrollment(self, enrollment_id='aabbccddeeff0011', secret='secret-aabbccddeeff0011', ttl=600, note='', label=''):
         now = int(time.time())
         record = {
             'id': enrollment_id,
@@ -83,12 +83,16 @@ class Env:
             'bound_machine_id': None,
             'used_at': None,
         }
+        if note:
+            record['note'] = note
+        if label:
+            record['label'] = label
         path = self.enrollments / f'{enrollment_id}.json'
         MOD.atomic_write_json(path, record)
         return enrollment_id, secret
 
     def enroll(self, services, machine_id='machine-a', hostname='dev-dp-mirror',
-               enrollment_id=None, secret=None, timestamp=None):
+               enrollment_id=None, secret=None, timestamp=None, headers=None, peer_host=None):
         if enrollment_id is None:
             enrollment_id, secret = self.add_enrollment()
         body = json.dumps({
@@ -98,7 +102,9 @@ class Env:
         }, separators=(',', ':')).encode()
         ts = str(timestamp if timestamp is not None else int(time.time()))
         sig = hmac_hex(secret, ts + '\n' + body.decode())
-        return self.allocator.enroll(enrollment_id, ts, sig, body)
+        return self.allocator.enroll(
+            enrollment_id, ts, sig, body, headers=headers or {}, peer_host=peer_host
+        )
 
     def load_state(self):
         return json.loads(self.registry.read_text())
@@ -601,6 +607,73 @@ def case_range_6000_exhaustion():
         env.cleanup()
 
 
+def case_admin_metadata_and_source_ip():
+    env = Env()
+    try:
+        eid, secret = env.add_enrollment(
+            enrollment_id='feedfacefeedface',
+            secret='secret-feedfacefeedface',
+            note='Seoul office groupware server',
+            label='seoul-groupware',
+        )
+        code, result = env.enroll(
+            [svc('ssh', preset='ssh')],
+            machine_id='aabbccddeeff00112233445566778899',
+            hostname='aella',
+            enrollment_id=eid,
+            secret=secret,
+            peer_host='203.0.113.50',
+            headers={'X-Forwarded-For': '198.51.100.9'},
+        )
+        if code != 200:
+            fail('metadata enroll', result)
+        client = env.load_state()['clients']['aabbccddeeff00112233445566778899']
+        if client.get('label') != 'seoul-groupware':
+            fail('seed label', client)
+        if client.get('note') != 'Seoul office groupware server':
+            fail('seed note', client)
+        if client.get('hostname') != 'aella':
+            fail('hostname', client)
+        if client.get('last_source_ip') != '203.0.113.50':
+            fail('direct peer IP ignored XFF', client)
+        port = client['services']['ssh']['remote_port']
+        mgmt = client.get('mgmt_status')
+        eid2, secret2 = env.add_enrollment(
+            enrollment_id='cafebabecafebabe',
+            secret='secret-cafebabecafebabe',
+            note='should-not-overwrite',
+            label='should-not-overwrite',
+        )
+        code, result = env.enroll(
+            [svc('ssh', preset='ssh')],
+            machine_id='aabbccddeeff00112233445566778899',
+            hostname='aella-renamed',
+            enrollment_id=eid2,
+            secret=secret2,
+            peer_host='127.0.0.1',
+            headers={'X-Forwarded-For': '198.51.100.20'},
+        )
+        if code != 200:
+            fail('reenroll', result)
+        client = env.load_state()['clients']['aabbccddeeff00112233445566778899']
+        if client.get('label') != 'seoul-groupware':
+            fail('reenroll overwrote label', client)
+        if client.get('note') != 'Seoul office groupware server':
+            fail('reenroll overwrote note', client)
+        if client.get('hostname') != 'aella-renamed':
+            fail('observed hostname not updated', client)
+        if client['services']['ssh']['remote_port'] != port:
+            fail('port changed')
+        if client.get('mgmt_status') != mgmt:
+            fail('mgmt changed')
+        if client.get('last_source_ip') != '198.51.100.20':
+            fail('loopback trusted XFF', client)
+        pass_('admin metadata preserved on re-enroll')
+        pass_('source IP trust boundary')
+    finally:
+        env.cleanup()
+
+
 def main():
     case_a_single_ssh()
     case_b_no_ssh()
@@ -622,6 +695,7 @@ def main():
     case_registry_write_failure()
     case_lost_response_retry()
     case_range_6000_exhaustion()
+    case_admin_metadata_and_source_ip()
     print()
     print('ALLOCATOR_GENERIC_TESTS=PASS')
 

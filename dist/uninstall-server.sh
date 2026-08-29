@@ -106,7 +106,7 @@ frp_u_rm_file "$(frp_u_path /etc/frp-auto-deploy/frontend.conf)"
 frp_u_rm_file "$(frp_u_path /usr/local/bin/frps)"
 # Keep any distro-installed nginx package; only the project frontend unit
 # and project-owned frontend.conf are removed.
-for tool in frp-create-client frp-clients frp-client-info frp-release-client \
+for tool in frp-create-client frp-clients frp-client-info frp-client-set frp-release-client \
   frp-release-service frp-revoke-client frp-set-client-installer-url \
   frp-server-status frp-update; do
   frp_u_rm_file "$(frp_u_path /usr/local/sbin/${tool})"
@@ -119,6 +119,7 @@ if [[ -d "$libdir" && ! -L "$libdir" ]]; then
   frp_u_rm_file "${libdir}/frp-port-allocator.py"
   frp_u_rm_file "${libdir}/frp_pki.py"
   frp_u_rm_file "${libdir}/frp_frontend.py"
+  frp_u_rm_file "${libdir}/frp_client_registry.py"
   if [[ ! -f "$(frp_u_path /etc/frp/client-state.json)" && ! -x "$(frp_u_path /usr/local/bin/frp-client)" ]]; then
     frp_u_rm_file "${libdir}/frp-common.sh"
     frp_u_rm_file "${libdir}/frp_mgmt_auth.py"

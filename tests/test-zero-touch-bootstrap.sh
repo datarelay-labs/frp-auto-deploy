@@ -222,15 +222,19 @@ FRP_CREATE_CLIENT_TEST_INPUT='' FRP_DEPLOY_TEST_ROOT="$TREE" \
 eof_rc=$?
 set -e
 [[ "$eof_rc" -ne 0 ]] || fail "EOF during SSH prompt should fail"
-grep -q 'SSH service setup' "$WORKDIR/eof.out" || fail "EOF did not show SSH setup"
-grep -q 'Client SSH user:' "$WORKDIR/eof.out" || fail "EOF did not prompt username"
+grep -q 'Client identification' "$WORKDIR/eof.out" || fail "EOF did not show client identification"
+grep -q 'Client name:' "$WORKDIR/eof.out" || fail "EOF did not prompt client name"
 [[ "$(ticket_count)" == "$BEFORE_TICKETS" ]] || fail "ticket created before input completed"
 pass "TICKET_NOT_CREATED_BEFORE_INPUT"
 
 BEFORE_TICKETS="$(ticket_count)"
-FRP_CREATE_CLIENT_TEST_INPUT=$'\naella\n\n' FRP_DEPLOY_TEST_ROOT="$TREE" \
-  python3 "$CREATE" --one-line --ssh --note client-01 \
+FRP_CREATE_CLIENT_TEST_INPUT=$'\nseoul-groupware\n\n\naella\n\n' FRP_DEPLOY_TEST_ROOT="$TREE" \
+  python3 "$CREATE" --one-line --ssh \
   >"$WORKDIR/prompt.out" 2>"$WORKDIR/prompt.err"
+grep -q 'Client identification' "$WORKDIR/prompt.out" || fail "missing client identification"
+grep -q 'Client name:' "$WORKDIR/prompt.out" || fail "missing client name prompt"
+grep -q 'ERROR: Client name cannot be blank.' "$WORKDIR/prompt.err" \
+  || fail "blank client name not rejected"
 grep -q 'SSH service setup' "$WORKDIR/prompt.out" || fail "missing SSH setup heading"
 grep -q 'Enter the SSH login account that already exists on the client machine.' \
   "$WORKDIR/prompt.out" || fail "missing SSH setup help"
@@ -239,9 +243,10 @@ grep -qF 'SSH port [22]:' "$WORKDIR/prompt.out" || fail "missing port prompt"
 grep -q 'ERROR: SSH username cannot be blank.' "$WORKDIR/prompt.err" \
   || fail "blank username not rejected"
 grep -q 'Client configuration' "$WORKDIR/prompt.out" || fail "missing confirmation"
-grep -q 'SSH user : aella' "$WORKDIR/prompt.out" || fail "confirmation user"
-grep -q 'SSH port : 22' "$WORKDIR/prompt.out" || fail "confirmation port"
-grep -q 'Target   : 127.0.0.1:22' "$WORKDIR/prompt.out" || fail "confirmation target"
+grep -q 'Client name : seoul-groupware' "$WORKDIR/prompt.out" || fail "confirmation client name"
+grep -q 'SSH user    : aella' "$WORKDIR/prompt.out" || fail "confirmation user"
+grep -q 'SSH port    : 22' "$WORKDIR/prompt.out" || fail "confirmation port"
+grep -q 'Target      : 127.0.0.1:22' "$WORKDIR/prompt.out" || fail "confirmation target"
 grep -q "FRP_SSH_USER='aella'" "$WORKDIR/prompt.out" || fail "generated command missing entered user"
 if grep -E 'FRP_SSH_USER=.ubuntu|Client SSH user: ubuntu|SSH user : ubuntu' \
   "$WORKDIR/prompt.out" "$WORKDIR/prompt.err"; then
@@ -628,7 +633,7 @@ PY
 FRP_DEPLOY_TEST_ROOT="$LIVE_TREE" python3 "$ROOT/tools/frp-client-info" zt-host >"$WORKDIR/info.out"
 grep -q '203.0.113.10:18300' "$WORKDIR/info.out" || fail "client-info public endpoint"
 grep -q "ssh -p 18300 ${SSH_USER}@203.0.113.10" "$WORKDIR/info.out" || fail "client-info ssh connect"
-grep -q 'Note        : customer-01' "$WORKDIR/info.out" || fail "client-info note"
+grep -q 'Description    : customer-01' "$WORKDIR/info.out" || fail "client-info note"
 if grep -q '127.0.0.1:18300' "$WORKDIR/info.out"; then
   fail "internal listener in connection info"
 fi

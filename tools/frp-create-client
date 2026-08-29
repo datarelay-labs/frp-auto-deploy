@@ -141,7 +141,7 @@ def atomic_write_json(path, data, mode=0o600):
         pass
 
 
-def write_enrollment(enroll_dir, enrollment_id, secret, ttl, note):
+def write_enrollment(enroll_dir, enrollment_id, secret, ttl, note, label=''):
     now = int(time.time())
     record = {
         'id': enrollment_id,
@@ -152,6 +152,7 @@ def write_enrollment(enroll_dir, enrollment_id, secret, ttl, note):
         'bound_machine_id': None,
         'used_at': None,
         'note': note,
+        'label': label,
     }
     path = enroll_dir / (enrollment_id + '.json')
     atomic_write_json(path, record, 0o600)
@@ -174,10 +175,19 @@ def parse_args(argv=None):
             '  sudo frp-create-client\n'
             '  sudo frp-create-client --one-line --ssh --note client-01\n'
             '  sudo frp-create-client --one-line --ssh --ssh-user aella --note customer-01\n'
+            '  sudo frp-create-client --one-line --ssh --client-name seoul-groupware --note "Seoul office"\n'
         ),
     )
     p.add_argument('--ttl', type=int, default=600, help='TTL in seconds (default 600)')
     p.add_argument('--note', default='')
+    p.add_argument(
+        '--client-name',
+        '--label',
+        dest='client_name',
+        default='',
+        metavar='NAME',
+        help='administrator label seeded at enrollment (does not replace hostname)',
+    )
     p.add_argument(
         '--one-line',
         action='store_true',
@@ -305,6 +315,47 @@ def validate_prompt_ssh_user(raw):
     return user, ''
 
 
+def validate_prompt_label(raw):
+    text = '' if raw is None else str(raw).strip()
+    if not text:
+        return '', 'Client name cannot be blank.'
+    if any(ord(c) < 32 for c in text):
+        return '', 'Client name must not contain control characters or newlines'
+    if len(text) > 64:
+        return '', 'Client name must be at most 64 characters'
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._ -]{0,63}', text):
+        return '', 'invalid client name'
+    return text, ''
+
+
+def prompt_client_identification(existing_name, existing_note):
+    print()
+    print('Client identification')
+    print('=====================')
+    print()
+    print('Enter a name that will help you identify this machine later.')
+    print()
+
+    name = '' if existing_name is None else str(existing_name).strip()
+    if not name:
+        while True:
+            entered = read_prompt('Client name: ')
+            name, err = validate_prompt_label(entered)
+            if name:
+                break
+            sys.stderr.write('ERROR: %s\n' % err)
+
+    note = '' if existing_note is None else str(existing_note)
+    if not str(existing_note or '').strip():
+        entered = read_prompt('Description [optional]: ')
+        note = '' if entered is None else str(entered).strip()
+        if any(ord(c) < 32 for c in note):
+            fail('Description must not contain control characters or newlines')
+        if len(note) > 1024:
+            fail('Description must be at most 1024 characters')
+    return name, note
+
+
 def prompt_zero_touch_ssh(existing_user, existing_port, port_explicit):
     print()
     print('SSH service setup')
@@ -333,15 +384,20 @@ def prompt_zero_touch_ssh(existing_user, existing_port, port_explicit):
             if port is not None:
                 break
             sys.stderr.write('ERROR: invalid SSH port; must be an integer 1-65535\n')
+    return user, port
 
+
+def print_client_configuration(name, note, ssh_user='', ssh_port=None):
     print()
     print('Client configuration')
     print('--------------------')
-    print('SSH user : %s' % user)
-    print('SSH port : %s' % port)
-    print('Target   : 127.0.0.1:%s' % port)
+    print('Client name : %s' % (name or '(hostname after enrollment)'))
+    print('Description : %s' % (note or '-'))
+    if ssh_user:
+        print('SSH user    : %s' % ssh_user)
+        print('SSH port    : %s' % ssh_port)
+        print('Target      : 127.0.0.1:%s' % ssh_port)
     print()
-    return user, port
 
 
 def resolve_zero_touch_ssh(ssh_user, ssh_port, port_explicit):
@@ -399,7 +455,7 @@ def print_manual(cfg, record, ttl, public_host, control_public, allocator, ca_fp
     print()
 
 
-def print_one_line(ticket, ttl, note, public_host, control_public, allocator, ca_fp, installer, ssh_user, ssh_port):
+def print_one_line(ticket, ttl, note, public_host, control_public, allocator, ca_fp, installer, ssh_user, ssh_port, client_name=''):
     env_parts = [
         'FRP_ALLOCATOR_URL=%s' % shell_quote(allocator),
         'FRP_ALLOCATOR_CA_SHA256=%s' % shell_quote(ca_fp),
@@ -423,6 +479,8 @@ def print_one_line(ticket, ttl, note, public_host, control_public, allocator, ca
     print(command)
     print()
     print('Expires: %s (%s seconds)' % (iso(int(time.time()) + ttl), ttl))
+    if client_name:
+        print('Client name: %s' % client_name)
     if note:
         print('Note: %s' % note)
     if public_host and control_public:
@@ -475,14 +533,25 @@ def main(argv=None):
     installer = str(cfg.get('client_installer_url', '') or '').strip()
 
     reject_control_chars('--note', a.note)
+    reject_control_chars('--client-name', a.client_name)
     reject_control_chars('allocator public URL', allocator)
     reject_control_chars('client installer URL', installer)
     reject_control_chars('--ssh-user', ssh_user)
+    client_name = str(a.client_name or '').strip()
+    note = str(a.note or '')
+    if client_name:
+        client_name, err = validate_prompt_label(client_name)
+        if err:
+            fail(err)
+    if len(note) > 1024:
+        fail('note must be at most 1024 characters')
 
     if not a.one_line:
         enrollment_id = secrets.token_hex(8)
         secret = secrets.token_hex(32)
-        record, _path = write_enrollment(enroll_dir, enrollment_id, secret, ttl, a.note)
+        record, _path = write_enrollment(
+            enroll_dir, enrollment_id, secret, ttl, note, label=client_name
+        )
         print_manual(cfg, record, ttl, public_host, control_public, allocator, ca_fp, installer)
         return 0
 
@@ -507,6 +576,11 @@ def main(argv=None):
     if alloc_mod is None:
         fail('allocator module is missing')
 
+    if is_interactive_stdin() and (not client_name or not str(a.note or '').strip()):
+        client_name, note = prompt_client_identification(client_name, note)
+        reject_control_chars('--client-name', client_name)
+        reject_control_chars('--note', note)
+
     if a.ssh:
         ssh_user, ssh_port = resolve_zero_touch_ssh(ssh_user, ssh_port, port_explicit)
         reject_control_chars('--ssh-user', ssh_user)
@@ -519,6 +593,9 @@ def main(argv=None):
     except alloc_mod.ServiceValidationError as exc:
         fail(str(exc))
 
+    ssh_user, ssh_pre_port = first_ssh_preflight(services)
+    print_client_configuration(client_name, note, ssh_user, ssh_pre_port)
+
     bootstrap_cfg = str(cfg.get('bootstrap_dir') or '').strip()
     if bootstrap_cfg:
         bootstrap_dir = remap(bootstrap_cfg)
@@ -527,16 +604,15 @@ def main(argv=None):
 
     try:
         ticket, _enroll_record, _ticket_record = alloc_mod.issue_bootstrap_ticket(
-            enroll_dir, bootstrap_dir, services, ttl, a.note
+            enroll_dir, bootstrap_dir, services, ttl, note, label=client_name
         )
     except Exception as exc:
         fail('failed to issue bootstrap ticket: %s' % exc)
 
-    ssh_user, ssh_pre_port = first_ssh_preflight(services)
     print_one_line(
         ticket,
         ttl,
-        a.note,
+        note,
         public_host,
         control_public,
         allocator,
@@ -544,6 +620,7 @@ def main(argv=None):
         installer,
         ssh_user,
         ssh_pre_port,
+        client_name=client_name,
     )
     return 0
 

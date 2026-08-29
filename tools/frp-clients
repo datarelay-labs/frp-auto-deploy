@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import importlib.util
 import json
 import os
 import socket
@@ -6,6 +7,28 @@ from pathlib import Path
 
 ROOT = os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
 CFG = Path(ROOT + '/etc/frp-auto-deploy/config.json')
+
+
+def load_creg():
+    here = Path(__file__).resolve()
+    candidates = [
+        here.parent.parent / 'lib' / 'frp_client_registry.py',
+        Path('/usr/local/lib/frp-auto-deploy/frp_client_registry.py'),
+    ]
+    if ROOT:
+        candidates.insert(1, Path(ROOT) / 'usr/local/lib/frp-auto-deploy/frp_client_registry.py')
+    for path in candidates:
+        if path.is_file():
+            spec = importlib.util.spec_from_file_location('frp_client_registry', str(path))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+    raise SystemExit('ERROR: missing frp_client_registry.py')
+
+
+CREG = load_creg()
+
+
 def require_v2(state):
     if not isinstance(state, dict) or state.get('schema_version') != 2:
         version = 1
@@ -42,34 +65,11 @@ def active(port):
         s.close()
 
 
-def enabled_services(client):
-    services = client.get('services') or {}
-    if not isinstance(services, dict):
-        return []
-    items = []
-    for sid, svc in services.items():
-        if not isinstance(svc, dict):
-            continue
-        if svc.get('enabled', True) is False:
-            continue
-        items.append((sid, svc))
-    return sorted(items, key=lambda kv: (kv[1].get('remote_port') is None, kv[1].get('remote_port') or 0, kv[0]))
-
-
 def client_online(services):
     for _sid, svc in services:
         if active(svc.get('remote_port')):
             return True
     return False
-
-
-def mgmt_status(client):
-    status = client.get('mgmt_status')
-    if status in ('enrolled', 'legacy', 'revoked'):
-        return status
-    if client.get('mgmt_pubkey'):
-        return 'enrolled'
-    return 'legacy'
 
 
 cfg = json.loads(CFG.read_text())
@@ -79,36 +79,59 @@ if ROOT and not str(reg).startswith(ROOT):
 state = json.loads(reg.read_text()) if reg.exists() else {'schema_version': 2, 'clients': {}}
 require_v2(state)
 
-print(f'PUBLIC IP: {cfg["public_ip"]}')
-print()
-print(f'{"HOSTNAME":24} {"SERVICES":8} {"STATE":8} {"MGMT":12} LAST ENROLLED')
-print('-' * 84)
+public_ip = str(cfg.get('public_host') or cfg.get('public_ip') or '')
+clients = CREG.sorted_clients(state)
 
-clients = sorted(
-    (state.get('clients') or {}).items(),
-    key=lambda kv: (kv[1].get('hostname') or '', kv[0]),
+print('Registered clients')
+print('==================')
+print()
+print(
+    f'{"#":<3} {"LABEL":<18} {"HOSTNAME":<14} {"CLIENT ID":<10} '
+    f'{"SERVICES":<8} {"STATE":<8} {"MGMT":<10} SSH'
 )
-for mid, client in clients:
-    services = enabled_services(client)
-    hostname = (client.get('hostname') or '')[:24]
+print('-' * 104)
+
+if not clients:
+    print('(none)')
+
+for idx, (mid, client) in enumerate(clients, start=1):
+    services = CREG.enabled_services(client)
+    label = CREG.sanitize_display(CREG.display_name(client, mid), 18)
+    hostname = CREG.sanitize_display(client.get('hostname') or '-', 14)
+    short_id = CREG.short_machine_id(mid)
     state_txt = 'online' if client_online(services) else 'offline'
-    last = client.get('last_enrolled_at') or '-'
-    mgmt = mgmt_status(client)
-    print(f'{hostname:24} {str(len(services)):8} {state_txt:8} {mgmt:12} {last}')
+    mgmt = CREG.mgmt_status(client)
+    ssh_txt = '-'
+    _sid, ssh = CREG.first_ssh_service(client)
+    if ssh:
+        user = CREG.sanitize_display(ssh.get('ssh_user') or '', 32)
+        port = ssh.get('remote_port') or '-'
+        if user:
+            ssh_txt = '%s@%s:%s' % (user, public_ip or 'host', port)
+        else:
+            ssh_txt = '%s:%s' % (public_ip or 'host', port)
+        ssh_txt = CREG.sanitize_display(ssh_txt, 36)
+    print(
+        f'{idx:<3} {label:<18} {hostname:<14} {short_id:<10} '
+        f'{str(len(services)):<8} {state_txt:<8} {mgmt:<10} {ssh_txt}'
+    )
 
 if clients:
     print()
-    for _mid, client in clients:
-        hostname = client.get('hostname') or '(unknown)'
-        print(hostname)
+    for mid, client in clients:
+        name = CREG.sanitize_display(CREG.display_name(client, mid), 64)
+        print(name)
         services = client.get('services') or {}
         if not isinstance(services, dict) or not services:
             print('  (no services)')
             continue
-        for sid, svc in sorted(services.items(), key=lambda kv: (kv[1].get('remote_port') or 0, kv[0]) if isinstance(kv[1], dict) else (0, kv[0])):
+        for sid, svc in sorted(
+            services.items(),
+            key=lambda kv: (kv[1].get('remote_port') or 0, kv[0]) if isinstance(kv[1], dict) else (0, kv[0]),
+        ):
             if not isinstance(svc, dict):
                 continue
             port = svc.get('remote_port') or '-'
             suffix = '' if svc.get('enabled', True) else ' (reserved)'
-            print(f'  {sid}:{port}{suffix}')
+            print(f'  {CREG.sanitize_display(sid, 32)}:{port}{suffix}')
         print()

@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""Atomically update server-owned client metadata (label/note)."""
+import argparse
+import fcntl
+import importlib.util
+import json
+import os
+import sys
+from pathlib import Path
+
+ROOT = os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
+
+
+def load_creg():
+    here = Path(__file__).resolve()
+    candidates = [
+        here.parent.parent / 'lib' / 'frp_client_registry.py',
+        Path('/usr/local/lib/frp-auto-deploy/frp_client_registry.py'),
+    ]
+    if ROOT:
+        candidates.insert(1, Path(ROOT) / 'usr/local/lib/frp-auto-deploy/frp_client_registry.py')
+    for path in candidates:
+        if path.is_file():
+            spec = importlib.util.spec_from_file_location('frp_client_registry', str(path))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+    raise SystemExit('ERROR: missing frp_client_registry.py')
+
+
+CREG = load_creg()
+
+
+def require_v2(state):
+    if not isinstance(state, dict) or state.get('schema_version') != 2:
+        version = 1
+        if isinstance(state, dict) and 'schema_version' in state:
+            version = state.get('schema_version')
+        raise SystemExit(
+            f'ERROR: unsupported registry schema version {version}.\n\n'
+            'This release requires registry schema version 2.\n\n'
+            'Back up the existing registry and redeploy/reset it explicitly before continuing.'
+        )
+    for client in (state.get('clients') or {}).values():
+        if not isinstance(client, dict):
+            raise SystemExit(
+                'ERROR: unsupported registry schema version 2.\n\n'
+                'This release requires registry schema version 2.\n\n'
+                'Back up the existing registry and redeploy/reset it explicitly before continuing.'
+            )
+        if 'ssh_port' in client or 'https_port' in client:
+            raise SystemExit(
+                'ERROR: unsupported registry schema version 2.\n\n'
+                'Legacy SSH/HTTPS fields are present. This release requires the generic multi-service registry.\n\n'
+                'Back up the existing registry and redeploy/reset it explicitly before continuing.'
+            )
+
+
+def lock_registry(path):
+    lock_path = Path(path).resolve().parent / 'registry.lock'
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def unlock_registry(fd):
+    if fd is None:
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def fail(message, code=2):
+    sys.stderr.write('ERROR: %s\n' % message)
+    raise SystemExit(code)
+
+
+parser = argparse.ArgumentParser(
+    description='Set server-owned client label/description without touching identity or ports'
+)
+parser.add_argument('query', help='label, unique hostname, or machine-id prefix')
+parser.add_argument('--label', default=None, help='new administrator label')
+parser.add_argument('--note', default=None, help='new administrator description')
+args = parser.parse_args()
+
+if args.label is None and args.note is None:
+    fail('pass --label and/or --note')
+
+label = None
+note = None
+try:
+    if args.label is not None:
+        label = CREG.validate_label(args.label, required=True)
+    if args.note is not None:
+        note = CREG.validate_note(args.note)
+except ValueError as exc:
+    fail(str(exc))
+
+cfg = json.loads(Path(ROOT + '/etc/frp-auto-deploy/config.json').read_text())
+path = Path(cfg['registry_file'])
+if ROOT and not str(path).startswith(ROOT):
+    path = Path(ROOT + str(path))
+
+lock_fd = lock_registry(path)
+try:
+    state = json.loads(path.read_text())
+    require_v2(state)
+    mid, client = CREG.resolve_client_or_exit(state, args.query)
+    hostname_before = client.get('hostname')
+    machine_ports = {}
+    for sid, svc in (client.get('services') or {}).items():
+        if isinstance(svc, dict) and svc.get('remote_port') is not None:
+            machine_ports[sid] = svc.get('remote_port')
+    mgmt_before = (
+        client.get('mgmt_status'),
+        client.get('mgmt_pubkey'),
+        client.get('mgmt_mac_key'),
+        client.get('mgmt_fingerprint'),
+    )
+    if label is not None:
+        client['label'] = label
+    if note is not None:
+        client['note'] = note
+    state['clients'][mid] = client
+    if client.get('hostname') != hostname_before:
+        fail('refusing to mutate hostname')
+    CREG.atomic_write_json(path, state)
+    state_after = json.loads(path.read_text())
+    after = state_after['clients'][mid]
+    if after.get('hostname') != hostname_before:
+        fail('hostname changed')
+    if mid not in state_after['clients']:
+        fail('machine_id changed')
+    for sid, port in machine_ports.items():
+        if (after.get('services') or {}).get(sid, {}).get('remote_port') != port:
+            fail('public port changed')
+    mgmt_after = (
+        after.get('mgmt_status'),
+        after.get('mgmt_pubkey'),
+        after.get('mgmt_mac_key'),
+        after.get('mgmt_fingerprint'),
+    )
+    if mgmt_after != mgmt_before:
+        fail('management identity changed')
+finally:
+    unlock_registry(lock_fd)
+
+print('Updated %s (%s)' % (CREG.display_name(client, mid), CREG.short_machine_id(mid)))
+if label is not None:
+    print('Label : %s' % label)
+if note is not None:
+    print('Note  : %s' % note)
+print('Hostname, machine ID, public ports, and management identity were not changed.')

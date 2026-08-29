@@ -67,6 +67,24 @@ def _load_mgmt_auth():
 MGMT = _load_mgmt_auth()
 
 
+def _load_client_registry():
+    candidates = [
+        Path(__file__).resolve().parent / 'frp_client_registry.py',
+        Path(__file__).resolve().parent.parent / 'lib' / 'frp_client_registry.py',
+        Path('/usr/local/lib/frp-auto-deploy/frp_client_registry.py'),
+    ]
+    for path in candidates:
+        if path.is_file():
+            spec = importlib.util.spec_from_file_location('frp_client_registry', path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+    raise RuntimeError('missing frp_client_registry.py')
+
+
+CREG = _load_client_registry()
+
+
 def unsupported_registry_message(state=None):
     version = None
     if isinstance(state, dict) and 'schema_version' in state:
@@ -282,7 +300,7 @@ def cleanup_expired_bootstrap_tickets(bootstrap_dir, now=None, keep_id=None):
             continue
 
 
-def issue_bootstrap_ticket(enrollments_dir, bootstrap_dir, services, ttl, note=''):
+def issue_bootstrap_ticket(enrollments_dir, bootstrap_dir, services, ttl, note='', label=''):
     """Create a hashed bootstrap ticket plus a normal enrollment record.
 
     Does not allocate a public port. Caller must have already validated
@@ -290,6 +308,7 @@ def issue_bootstrap_ticket(enrollments_dir, bootstrap_dir, services, ttl, note='
     """
     ttl = int(ttl)
     note = str(note or '')
+    label = str(label or '')
     enrollment_id = secrets.token_hex(8)
     enroll_secret = secrets.token_hex(32)
     ticket_id = secrets.token_hex(8)
@@ -307,6 +326,7 @@ def issue_bootstrap_ticket(enrollments_dir, bootstrap_dir, services, ttl, note='
         'bound_machine_id': None,
         'used_at': None,
         'note': note,
+        'label': label,
     }
     ticket_record = {
         'schema': 1,
@@ -318,6 +338,7 @@ def issue_bootstrap_ticket(enrollments_dir, bootstrap_dir, services, ttl, note='
         'bound_machine_id': None,
         'completed_at': None,
         'note': note,
+        'label': label,
         'services': services,
     }
     enrollments_dir = Path(enrollments_dir)
@@ -735,10 +756,10 @@ class Allocator:
     def cleanup_expired_bootstrap_tickets(self, now=None, keep_id=None):
         cleanup_expired_bootstrap_tickets(self.bootstrap_dir, now, keep_id=keep_id)
 
-    def issue_bootstrap_ticket(self, services, ttl, note=''):
+    def issue_bootstrap_ticket(self, services, ttl, note='', label=''):
         ensure_secret_dir(self.bootstrap_dir, 0o700)
         return issue_bootstrap_ticket(
-            self.enrollments_dir, self.bootstrap_dir, services, ttl, note
+            self.enrollments_dir, self.bootstrap_dir, services, ttl, note, label=label
         )
 
     def _invalid_ticket_response(self):
@@ -1098,9 +1119,10 @@ class Allocator:
             return None, None, 'invalid signature'
         return record, path, None
 
-    def enroll(self, enrollment_id, timestamp, signature, body, headers=None):
+    def enroll(self, enrollment_id, timestamp, signature, body, headers=None, peer_host=None):
         headers = headers or {}
         identity_auth = str(headers.get('X-Mgmt-Auth') or '').strip() == '1'
+        source_ip = CREG.request_source_ip(peer_host, headers)
 
         record = None
         enroll_path = None
@@ -1182,16 +1204,22 @@ class Allocator:
                             'mgmt_status': 'legacy',
                             'services': {},
                         }
-                        if record is not None and record.get('note'):
-                            client['note'] = str(record.get('note') or '')
+                        CREG.seed_admin_metadata(
+                            client,
+                            label=(record or {}).get('label'),
+                            note=(record or {}).get('note'),
+                        )
                         clients[machine_id] = client
                     else:
                         client['hostname'] = hostname or client.get('hostname', '')
                         client['last_enrolled_at'] = now_iso
                         if not isinstance(client.get('services'), dict):
                             client['services'] = {}
-                        if record is not None and record.get('note') and not client.get('note'):
-                            client['note'] = str(record.get('note') or '')
+                        CREG.seed_admin_metadata(
+                            client,
+                            label=(record or {}).get('label'),
+                            note=(record or {}).get('note'),
+                        )
 
                     if client is None:
                         return 403, api_error('unknown client identity', 'AUTH_FAILED')
@@ -1199,6 +1227,17 @@ class Allocator:
                     client['last_enrolled_at'] = now_iso
                     if not isinstance(client.get('services'), dict):
                         client['services'] = {}
+                    CREG.apply_observed_fields(
+                        client,
+                        hostname=hostname,
+                        source_ip=source_ip,
+                        seen_at=now_iso,
+                    )
+                    CREG.seed_admin_metadata(
+                        client,
+                        label=(record or {}).get('label'),
+                        note=(record or {}).get('note'),
+                    )
 
                     if not identity_auth:
                         issued_mac, ident_error = self.register_mgmt_identity(
@@ -1398,12 +1437,18 @@ def make_handler(allocator):
                     return
                 try:
                     if path == '/enroll':
+                        peer_host = ''
+                        try:
+                            peer_host = self.client_address[0]
+                        except Exception:
+                            peer_host = ''
                         code, result = allocator.enroll(
                             self.headers.get('X-Enrollment-ID', ''),
                             self.headers.get('X-Timestamp', ''),
                             self.headers.get('X-Signature', ''),
                             body,
                             headers=self.headers,
+                            peer_host=peer_host,
                         )
                         self.send_json(code, result)
                         return

@@ -77,6 +77,8 @@ def test_backend_identity_ip_and_dns():
             fail('proxy_ssl_name used public IP')
         if 'proxy_ssl_verify off' in conf:
             fail('proxy_ssl_verify disabled')
+        if 'proxy_set_header X-Forwarded-For $remote_addr;' not in conf:
+            fail('missing trusted X-Forwarded-For from $remote_addr')
         if 'location = "/~!frp"' not in conf:
             fail('WSS path')
         if 'ca\\.crt|healthz|enroll|bootstrap/redeem' not in conf:

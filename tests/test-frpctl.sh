@@ -178,7 +178,7 @@ pass "FRPCTL_REVOKE_DISPATCH"
 pass "FRPCTL_RELEASE_SERVICE_DISPATCH"
 pass "FRPCTL_DIRECT_COMMANDS_PRESERVED"
 
-for cmd in frp-client frp-clients frp-client-info frp-create-client \
+for cmd in frp-client frp-clients frp-client-info frp-client-set frp-create-client \
   frp-release-client frp-release-service frp-revoke-client \
   frp-server-status frp-update frp-set-client-installer-url; do
   [[ -e "$ROOT/tools/$cmd" ]] || fail "missing command $cmd"
@@ -211,8 +211,8 @@ export FRP_CTL_TEST_ROOT="$SERVER"
 export FRP_CTL_TEST_MENU=1
 run_repl "$SERVER" "$WORKDIR/server-menu.out" menu exit || fail "server menu repl"
 grep -q 'Role            : Server' "$WORKDIR/server-menu.out" || fail "server role"
-grep -q '2) List clients' "$WORKDIR/server-menu.out" || fail "server menu clients"
-grep -q '5) Revoke management access' "$WORKDIR/server-menu.out" || fail "server menu revoke"
+grep -q '3) Manage clients' "$WORKDIR/server-menu.out" || fail "server menu manage clients"
+grep -q '6) Revoke management access' "$WORKDIR/server-menu.out" || fail "server menu revoke"
 pass "FRPCTL_SERVER_DETECTION"
 
 unset FRP_CTL_TEST_MENU
@@ -305,7 +305,7 @@ pass "FRPCTL_REPL_SERVER_CLIENT_INFO"
 pass "FRPCTL_REPL_SERVER_ENROLL_DISPATCH"
 
 export FRP_CTL_DRY_RUN=1
-run_repl "$SERVER" "$WORKDIR/guided-enroll.out" menu 3 1 11 exit || fail "guided enroll zero-touch"
+run_repl "$SERVER" "$WORKDIR/guided-enroll.out" menu 4 1 12 exit || fail "guided enroll zero-touch"
 grep -q 'Create enrollment' "$WORKDIR/guided-enroll.out" || fail "guided enroll heading"
 grep -q 'Zero-touch SSH' "$WORKDIR/guided-enroll.out" || fail "guided enroll zero-touch option"
 grep -q 'Manual Enrollment Code' "$WORKDIR/guided-enroll.out" || fail "guided enroll manual option"
@@ -313,7 +313,7 @@ grep -q 'DISPATCH frp-create-client --one-line --ssh' "$WORKDIR/guided-enroll.ou
   || fail "guided enroll did not dispatch zero-touch"
 pass "FRPCTL_GUIDED_ENROLL_ZERO_TOUCH"
 
-run_repl "$SERVER" "$WORKDIR/guided-enroll-manual.out" menu 3 2 11 exit || fail "guided enroll manual"
+run_repl "$SERVER" "$WORKDIR/guided-enroll-manual.out" menu 4 2 12 exit || fail "guided enroll manual"
 grep -q 'DISPATCH frp-create-client' "$WORKDIR/guided-enroll-manual.out" \
   || fail "guided enroll manual dispatch"
 if grep -q 'DISPATCH frp-create-client --one-line' "$WORKDIR/guided-enroll-manual.out"; then

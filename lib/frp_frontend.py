@@ -177,6 +177,8 @@ http {
             proxy_ssl_server_name on;
             proxy_set_header Host $host;
             proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header X-Forwarded-For $remote_addr;
+            proxy_set_header X-Real-IP $remote_addr;
             proxy_read_timeout 60s;
             proxy_send_timeout 60s;
             proxy_connect_timeout 10s;

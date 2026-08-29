@@ -47,7 +47,7 @@ grep -qF 'does **not**:' README.md || fail "README missing zero-touch negatives"
 pass "ZERO_TOUCH_DOCS"
 
 for cmd in frpctl frp-create-client frp-client frp-client-info frp-clients \
-  frp-release-service frp-release-client frp-revoke-client frp-update \
+  frp-client-set frp-release-service frp-release-client frp-revoke-client frp-update \
   frp-server-status frp-set-client-installer-url; do
   [[ -e "$ROOT/tools/$cmd" ]] || fail "documented command missing: $cmd"
 done

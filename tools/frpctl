@@ -202,6 +202,8 @@ Server commands:
   enroll             Create a short-lived Enrollment Code
   create-client      Same as enroll
   client-info NAME   Same as client
+  client-set NAME    Set administrator label/description
+  edit-client NAME   Same as client-set
   revoke NAME        Revoke a client's management identity
   revoke-client NAME Same as revoke
   release-service NAME ID
@@ -246,15 +248,16 @@ frpctl_print_client_menu() {
 frpctl_print_server_menu() {
   echo "1) Status"
   echo "2) List clients"
-  echo "3) Create enrollment"
-  echo "4) Client information"
-  echo "5) Revoke management access"
-  echo "6) Release service"
-  echo "7) Release client"
-  echo "8) Update"
-  echo "9) System diagnostics"
-  echo "10) Help"
-  echo "11) Exit"
+  echo "3) Manage clients"
+  echo "4) Create enrollment"
+  echo "5) Client information"
+  echo "6) Revoke management access"
+  echo "7) Release service"
+  echo "8) Release client"
+  echo "9) Update"
+  echo "10) System diagnostics"
+  echo "11) Help"
+  echo "12) Exit"
 }
 
 frpctl_print_both_menu() {
@@ -379,6 +382,172 @@ frpctl_guided_enroll() {
   esac
 }
 
+frpctl_print_manage_client_actions() {
+  echo "Actions"
+  echo
+  echo "1. Change label"
+  echo "2. Edit description"
+  echo "3. Show connection information"
+  echo "4. View services"
+  echo "5. Revoke management access"
+  echo "6. Release service"
+  echo "7. Release client"
+  echo "8. Back"
+}
+
+frpctl_manage_one_client() {
+  local mid="$1" action sid label note
+  while true; do
+    echo
+    echo "FRP Auto Deploy — Client Management"
+    echo "==================================="
+    echo
+    frpctl_run frp-client-info "$mid" || return 1
+    echo
+    frpctl_print_manage_client_actions
+    echo
+    action="$(frpctl_read "Select: " "")" || return 1
+    case "$action" in
+      1)
+        label="$(frpctl_read "New label: " "")"
+        if [[ -z "$label" ]]; then
+          echo "ERROR: label is required" >&2
+          continue
+        fi
+        frpctl_run frp-client-set "$mid" --label "$label" || true
+        ;;
+      2)
+        note="$(frpctl_read "New description: " "")"
+        frpctl_run frp-client-set "$mid" --note "$note" || true
+        ;;
+      3)
+        frpctl_run frp-client-info "$mid" || true
+        ;;
+      4)
+        frpctl_run frp-clients || true
+        ;;
+      5)
+        frpctl_run frp-revoke-client "$mid" || true
+        ;;
+      6)
+        sid="$(frpctl_read "Service ID: " "")"
+        if [[ -z "$sid" ]]; then
+          echo "ERROR: service ID is required" >&2
+          continue
+        fi
+        frpctl_run frp-release-service "$mid" "$sid" || true
+        ;;
+      7)
+        frpctl_run frp-release-client "$mid" || true
+        return 0
+        ;;
+      8|"")
+        return 0
+        ;;
+      *)
+        echo "ERROR: select 1-8" >&2
+        ;;
+    esac
+  done
+}
+
+frpctl_manage_clients() {
+  local cfg root choice mid libdir
+  cfg="$(frpctl_path /etc/frp-auto-deploy/config.json)"
+  root="${FRP_CTL_TEST_ROOT:-${FRP_DEPLOY_TEST_ROOT:-}}"
+  libdir="${_FRPCTL_DIR}/../lib"
+  echo
+  echo "FRP Auto Deploy — Client Management"
+  echo "==================================="
+  echo
+  python3 - "$cfg" "$root" "$libdir" <<'PY'
+import importlib.util
+import json
+import sys
+from pathlib import Path
+cfg_path = Path(sys.argv[1])
+root = sys.argv[2]
+libdir = Path(sys.argv[3])
+search = []
+if root:
+    search.append(Path(root) / 'usr/local/lib/frp-auto-deploy/frp_client_registry.py')
+search.append(libdir / 'frp_client_registry.py')
+search.append(Path('/usr/local/lib/frp-auto-deploy/frp_client_registry.py'))
+mod = None
+for path in search:
+    if path.is_file():
+        spec = importlib.util.spec_from_file_location('frp_client_registry', str(path))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        break
+if mod is None:
+    sys.stderr.write('ERROR: missing frp_client_registry.py\n')
+    raise SystemExit(1)
+if not cfg_path.is_file():
+    print('(no registered clients)')
+    raise SystemExit(0)
+cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+reg = Path(str(cfg.get('registry_file') or ''))
+if root and not str(reg).startswith(root):
+    reg = Path(root + str(reg))
+state = json.loads(reg.read_text(encoding='utf-8')) if reg.is_file() else {'clients': {}}
+clients = mod.sorted_clients(state)
+if not clients:
+    print('(no registered clients)')
+    raise SystemExit(0)
+for idx, (mid, client) in enumerate(clients, start=1):
+    print('%s. %s' % (idx, mod.sanitize_display(mod.display_name(client, mid))))
+    print('   Hostname : %s' % mod.sanitize_display(client.get('hostname') or '-'))
+    print('   ID       : %s' % mod.short_machine_id(mid))
+    print('   State    : %s' % mod.mgmt_status(client))
+    print()
+PY
+  choice="$(frpctl_read "Select client number: " "")" || return 1
+  [[ -n "$choice" ]] || return 0
+  mid="$(python3 - "$cfg" "$root" "$libdir" "$choice" <<'PY'
+import importlib.util
+import json
+import sys
+from pathlib import Path
+cfg_path = Path(sys.argv[1])
+root = sys.argv[2]
+libdir = Path(sys.argv[3])
+choice = sys.argv[4].strip()
+search = []
+if root:
+    search.append(Path(root) / 'usr/local/lib/frp-auto-deploy/frp_client_registry.py')
+search.append(libdir / 'frp_client_registry.py')
+search.append(Path('/usr/local/lib/frp-auto-deploy/frp_client_registry.py'))
+mod = None
+for path in search:
+    if path.is_file():
+        spec = importlib.util.spec_from_file_location('frp_client_registry', str(path))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        break
+if mod is None:
+    raise SystemExit(1)
+cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+reg = Path(str(cfg.get('registry_file') or ''))
+if root and not str(reg).startswith(root):
+    reg = Path(root + str(reg))
+state = json.loads(reg.read_text(encoding='utf-8'))
+clients = mod.sorted_clients(state)
+if not choice.isdigit():
+    raise SystemExit(1)
+idx = int(choice)
+if idx < 1 or idx > len(clients):
+    raise SystemExit(1)
+print(clients[idx - 1][0])
+PY
+)" || {
+    echo "ERROR: invalid client number" >&2
+    return 1
+  }
+  [[ -n "$mid" ]] || return 1
+  frpctl_manage_one_client "$mid"
+}
+
 frpctl_server_menu() {
   local choice client sid
   while true; do
@@ -393,8 +562,9 @@ frpctl_server_menu() {
     case "$choice" in
       1) frpctl_run frp-server-status ;;
       2) frpctl_run frp-clients ;;
-      3) frpctl_guided_enroll ;;
-      4)
+      3) frpctl_manage_clients ;;
+      4) frpctl_guided_enroll ;;
+      5)
         client="$(frpctl_read "Client name: " "")"
         if [[ -z "$client" ]]; then
           echo "ERROR: client name is required" >&2
@@ -402,7 +572,7 @@ frpctl_server_menu() {
         fi
         frpctl_run frp-client-info "$client"
         ;;
-      5)
+      6)
         client="$(frpctl_read "Client name: " "")"
         if [[ -z "$client" ]]; then
           echo "ERROR: client name is required" >&2
@@ -410,7 +580,7 @@ frpctl_server_menu() {
         fi
         frpctl_run frp-revoke-client "$client"
         ;;
-      6)
+      7)
         client="$(frpctl_read "Client name: " "")"
         sid="$(frpctl_read "Service ID: " "")"
         if [[ -z "$client" || -z "$sid" ]]; then
@@ -419,7 +589,7 @@ frpctl_server_menu() {
         fi
         frpctl_run frp-release-service "$client" "$sid"
         ;;
-      7)
+      8)
         client="$(frpctl_read "Client name: " "")"
         if [[ -z "$client" ]]; then
           echo "ERROR: client name is required" >&2
@@ -427,14 +597,14 @@ frpctl_server_menu() {
         fi
         frpctl_run frp-release-client "$client"
         ;;
-      8) frpctl_run frp-update ;;
-      9) frpctl_dispatch doctor || true ;;
-      10) frpctl_usage ;;
-      11)
+      9) frpctl_run frp-update ;;
+      10) frpctl_dispatch doctor || true ;;
+      11) frpctl_usage ;;
+      12)
         echo "Exit."
         return 0
         ;;
-      *) echo "ERROR: select 1-11" >&2 ;;
+      *) echo "ERROR: select 1-12" >&2 ;;
     esac
   done
 }
@@ -589,6 +759,7 @@ frpctl_help_server_body() {
 Clients
   clients               List registered clients
   client <name>         Show client information
+  client-set <name>     Set administrator label/description
   enroll                Create a short-lived Enrollment Code
 
 Security
@@ -629,6 +800,7 @@ frpctl_repl_help() {
     echo "---------------"
     echo "  clients               List registered clients"
     echo "  client <name>         Show client information"
+    echo "  client-set <name>     Set administrator label/description"
     echo "  enroll                Create a short-lived Enrollment Code"
     echo "  revoke <name>         Revoke client management access"
     echo "  release-service <client> <service-id>"
@@ -687,7 +859,7 @@ frpctl_known_commands() {
     printf '%s\n' services manage info client-status client-update
   fi
   if [[ "$server" == "1" ]]; then
-    printf '%s\n' clients client client-info enroll create-client \
+    printf '%s\n' clients client client-info client-set edit-client enroll create-client \
       revoke revoke-client release-service release-client \
       server-status server-update
   fi
@@ -740,8 +912,11 @@ for client in (state.get('clients') or {}).values():
     if not isinstance(client, dict):
         continue
     host = str(client.get('hostname') or '').strip()
+    label = str(client.get('label') or '').strip()
     if host and '\n' not in host and '\r' not in host:
         names.append(host)
+    if label and '\n' not in label and '\r' not in label:
+        names.append(label)
 for name in sorted(set(names)):
     print(name)
 PY
@@ -786,7 +961,8 @@ for mid, client in (state.get('clients') or {}).items():
     if not isinstance(client, dict):
         continue
     host = str(client.get('hostname') or '')
-    if host == query or mid == query or str(mid).startswith(query):
+    label = str(client.get('label') or '')
+    if host == query or label == query or mid == query or str(mid).startswith(query):
         matches.append(client)
 if len(matches) != 1:
     raise SystemExit(0)
@@ -818,6 +994,13 @@ frpctl_complete_arg_stage() {
         printf '%s' "client"
       else
         printf '%s' "none"
+      fi
+      ;;
+    client-set|edit-client)
+      if [[ "$argn" == "1" ]]; then
+        printf '%s' "client"
+      else
+        printf '%s' "client-set-flag"
       fi
       ;;
     release-service)
@@ -904,8 +1087,11 @@ frpctl_completion_candidates() {
       printf '%s\n' --json --verbose --quiet | frpctl_filter_prefix "${_FRP_CTL_COMP_PREFIX}"
       ;;
     create-client-flag)
-      printf '%s\n' --one-line --ssh --ssh-user --ssh-port --ttl --note --services-file \
+      printf '%s\n' --one-line --ssh --ssh-user --ssh-port --ttl --note --client-name --label --services-file \
         | frpctl_filter_prefix "${_FRP_CTL_COMP_PREFIX}"
+      ;;
+    client-set-flag)
+      printf '%s\n' --label --note | frpctl_filter_prefix "${_FRP_CTL_COMP_PREFIX}"
       ;;
     client)
       if ! frpctl_is_server; then
@@ -1224,6 +1410,18 @@ frpctl_dispatch() {
         return $?
       fi
       frpctl_invoke frp-client-info "$@"
+      ;;
+    client-set|edit-client)
+      frpctl_require_server || return 1
+      if [[ $# -lt 1 ]]; then
+        if [[ "${FRP_CTL_REPL:-}" == "1" ]]; then
+          frpctl_usage_error "client-set <client> [--label NAME] [--note TEXT]"
+        else
+          frpctl_usage_error "frpctl client-set <client> [--label NAME] [--note TEXT]"
+        fi
+        return $?
+      fi
+      frpctl_invoke frp-client-set "$@"
       ;;
     revoke|revoke-client)
       frpctl_require_server || return 1
