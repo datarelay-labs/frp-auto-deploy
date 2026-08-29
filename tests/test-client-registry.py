@@ -66,10 +66,16 @@ def test_display_and_match():
 
 
 def test_seed_does_not_overwrite():
-    client = {'label': 'keep-me', 'note': 'keep-note'}
+    client = {
+        'label': 'keep-me',
+        'note': 'keep-note',
+        'tags': {'customer': 'lotte', 'site': 'seoul'},
+    }
     creg.seed_admin_metadata(client, label='new', note='new-note')
     if client['label'] != 'keep-me' or client['note'] != 'keep-note':
         fail('overwrite', client)
+    if client['tags'] != {'customer': 'lotte', 'site': 'seoul'}:
+        fail('tags overwritten', client)
     empty = {}
     creg.seed_admin_metadata(empty, label='seoul-groupware', note='desc')
     if empty.get('label') != 'seoul-groupware':
@@ -77,10 +83,44 @@ def test_seed_does_not_overwrite():
     pass_('SEED_ADMIN_METADATA')
 
 
+def test_tags():
+    if creg.parse_tag_assignment('customer=lotte') != ('customer', 'lotte'):
+        fail('parse tag assignment')
+    filters = [('customer', 'lotte'), ('site', 'seoul')]
+    if not creg.client_matches_tags(
+        {'tags': {'customer': 'lotte', 'site': 'seoul', 'role': 'dp'}},
+        filters,
+    ):
+        fail('tag AND match')
+    if creg.client_matches_tags({'tags': {'customer': 'lotte'}}, filters):
+        fail('tag AND missing key')
+    invalid = [
+        'missing-equals',
+        '=value',
+        'bad key=value',
+        'key=',
+        'key=bad,value',
+        'key=bad\x1bvalue',
+        'key=bad\x00value',
+        'key=bad\rvalue',
+        'key=bad\nvalue',
+        ('k' * 65) + '=value',
+        'key=' + ('v' * 129),
+    ]
+    for value in invalid:
+        try:
+            creg.parse_tag_assignment(value)
+            fail('invalid tag accepted', repr(value))
+        except ValueError:
+            pass
+    pass_('CLIENT_TAG_VALIDATION_AND_MATCHING')
+
+
 def main():
     test_source_ip()
     test_display_and_match()
     test_seed_does_not_overwrite()
+    test_tags()
     print('CLIENT_REGISTRY_HELPERS=PASS')
 
 

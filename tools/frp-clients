@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 import importlib.util
 import json
 import os
@@ -26,6 +27,22 @@ def load_creg():
 
 
 CREG = load_creg()
+
+
+parser = argparse.ArgumentParser(description='List registered clients')
+parser.add_argument(
+    '--tag',
+    action='append',
+    default=[],
+    metavar='KEY=VALUE',
+    help='show clients with this tag; multiple --tag filters use AND semantics',
+)
+args = parser.parse_args()
+tag_filters = []
+try:
+    tag_filters = [CREG.parse_tag_assignment(value) for value in args.tag]
+except ValueError as exc:
+    parser.error(str(exc))
 
 
 def require_v2(state):
@@ -73,6 +90,12 @@ require_v2(state)
 
 public_ip = CREG.sanitize_display(cfg.get('public_host') or cfg.get('public_ip') or '', 253)
 clients = CREG.sorted_clients(state)
+if tag_filters:
+    clients = [
+        (mid, client)
+        for mid, client in clients
+        if CREG.client_matches_tags(client, tag_filters)
+    ]
 listener_snapshot = CREG.passive_listening_ports()
 
 print('Registered clients')

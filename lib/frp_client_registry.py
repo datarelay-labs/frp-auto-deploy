@@ -2,7 +2,7 @@
 """Client registry identity helpers.
 
 Immutable identity is machine_id. Hostname is observed from the client.
-label/note are server-owned and must survive re-enrollment.
+label/note/tags are server-owned and must survive re-enrollment.
 """
 import ipaddress
 import json
@@ -18,8 +18,12 @@ from pathlib import Path
 LABEL_MAX_LEN = 64
 NOTE_MAX_LEN = 1024
 HOSTNAME_MAX_LEN = 253
+TAG_KEY_MAX_LEN = 64
+TAG_VALUE_MAX_LEN = 128
 SHORT_MACHINE_ID_LEN = 8
 LABEL_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._ -]{0,63}$')
+TAG_KEY_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
+TAG_VALUE_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:/@+ -]{0,127}$')
 
 
 class ClientLookupError(Exception):
@@ -205,6 +209,53 @@ def validate_note(value):
     return validate_text_field(value, 'note', NOTE_MAX_LEN)
 
 
+def validate_tag_key(value):
+    text = '' if value is None else str(value).strip()
+    if not text:
+        raise ValueError('tag key is required')
+    if any(ch in text for ch in ('\x00', '\x1b', '\r', '\n')):
+        raise ValueError('tag key must not contain ESC, NUL, CR, or LF')
+    if len(text) > TAG_KEY_MAX_LEN:
+        raise ValueError('tag key must be at most %s characters' % TAG_KEY_MAX_LEN)
+    if not TAG_KEY_RE.fullmatch(text):
+        raise ValueError(
+            'tag key must start with an alphanumeric character '
+            'and may contain letters, digits, ".", "_" and "-"'
+        )
+    return text
+
+
+def validate_tag_value(value):
+    text = '' if value is None else str(value).strip()
+    if not text:
+        raise ValueError('tag value is required')
+    if any(ch in text for ch in ('\x00', '\x1b', '\r', '\n')):
+        raise ValueError('tag value must not contain ESC, NUL, CR, or LF')
+    if len(text) > TAG_VALUE_MAX_LEN:
+        raise ValueError('tag value must be at most %s characters' % TAG_VALUE_MAX_LEN)
+    if not TAG_VALUE_RE.fullmatch(text):
+        raise ValueError(
+            'tag value must start with an alphanumeric character and may contain '
+            'letters, digits, space, ".", "_", ":", "/", "@", "+", and "-"'
+        )
+    return text
+
+
+def parse_tag_assignment(value):
+    text = '' if value is None else str(value)
+    if '=' not in text:
+        raise ValueError('tag must use key=value format')
+    key, tag_value = text.split('=', 1)
+    return validate_tag_key(key), validate_tag_value(tag_value)
+
+
+def client_matches_tags(client, filters):
+    tags = (client or {}).get('tags') or {}
+    if not isinstance(tags, dict):
+        return False
+    return all(tags.get(key) == value for key, value in filters)
+
+
 def short_machine_id(machine_id, length=SHORT_MACHINE_ID_LEN):
     text = str(machine_id or '')
     if len(text) <= length:
@@ -336,7 +387,7 @@ def resolve_client_or_exit(state, query):
 
 
 def seed_admin_metadata(client, label=None, note=None):
-    """Set label/note only when the existing values are empty."""
+    """Set label/note only when empty; never modify server-owned tags."""
     if not isinstance(client, dict):
         return client
     incoming_label = str(label or '').strip()

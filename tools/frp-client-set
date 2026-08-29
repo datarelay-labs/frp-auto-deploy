@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Atomically update server-owned client metadata (label/note)."""
+"""Atomically update server-owned client metadata (label/note/tags)."""
 import argparse
 import fcntl
 import importlib.util
@@ -83,23 +83,43 @@ def fail(message, code=2):
 
 
 parser = argparse.ArgumentParser(
-    description='Set server-owned client label/description without touching identity or ports'
+    description='Set server-owned client metadata without touching identity or ports'
 )
 parser.add_argument('query', help='label, unique hostname, or machine-id prefix')
 parser.add_argument('--label', default=None, help='new administrator label')
 parser.add_argument('--note', default=None, help='new administrator description')
+parser.add_argument(
+    '--tag',
+    action='append',
+    default=[],
+    metavar='KEY=VALUE',
+    help='set a server-owned tag (repeatable)',
+)
+parser.add_argument(
+    '--remove-tag',
+    action='append',
+    default=[],
+    metavar='KEY',
+    help='remove a server-owned tag (repeatable)',
+)
 args = parser.parse_args()
 
-if args.label is None and args.note is None:
-    fail('pass --label and/or --note')
+if args.label is None and args.note is None and not args.tag and not args.remove_tag:
+    fail('pass --label, --note, --tag, and/or --remove-tag')
 
 label = None
 note = None
+tag_updates = {}
+tag_removals = []
 try:
     if args.label is not None:
         label = CREG.validate_label(args.label, required=True)
     if args.note is not None:
         note = CREG.validate_note(args.note)
+    for assignment in args.tag:
+        key, value = CREG.parse_tag_assignment(assignment)
+        tag_updates[key] = value
+    tag_removals = [CREG.validate_tag_key(key) for key in args.remove_tag]
 except ValueError as exc:
     fail(str(exc))
 
@@ -128,6 +148,17 @@ try:
         client['label'] = label
     if note is not None:
         client['note'] = note
+    tags = client.get('tags') or {}
+    if not isinstance(tags, dict):
+        fail('stored client tags must be an object')
+    tags = dict(tags)
+    for key in tag_removals:
+        tags.pop(key, None)
+    tags.update(tag_updates)
+    if tags:
+        client['tags'] = tags
+    else:
+        client.pop('tags', None)
     state['clients'][mid] = client
     if client.get('hostname') != hostname_before:
         fail('refusing to mutate hostname')
@@ -157,4 +188,8 @@ if label is not None:
     print('Label : %s' % label)
 if note is not None:
     print('Note  : %s' % note)
+for key in tag_removals:
+    print('Removed tag: %s' % key)
+for key, value in sorted(tag_updates.items()):
+    print('Tag   : %s=%s' % (key, value))
 print('Hostname, machine ID, public ports, and management identity were not changed.')

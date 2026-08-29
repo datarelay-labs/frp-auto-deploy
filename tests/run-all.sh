@@ -39,6 +39,7 @@ python3 tests/test-mgmt-identity.py
 ./tests/test-zero-service-client.sh
 ./tests/test-management-commands.sh
 ./tests/test-client-metadata.sh
+./tests/test-client-tags.sh
 python3 tests/test-client-registry.py
 ./tests/test-frp-client.sh
 ./tests/test-lifecycle.sh
