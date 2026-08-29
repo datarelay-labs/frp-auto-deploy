@@ -176,6 +176,7 @@ def parse_args(argv=None):
             '  sudo frp-create-client --one-line --ssh --note client-01\n'
             '  sudo frp-create-client --one-line --ssh --ssh-user aella --note customer-01\n'
             '  sudo frp-create-client --one-line --ssh --client-name seoul-groupware --note "Seoul office"\n'
+            '  sudo frp-create-client --one-line --client-name inventory-only\n'
         ),
     )
     p.add_argument('--ttl', type=int, default=600, help='TTL in seconds (default 600)')
@@ -455,7 +456,7 @@ def print_manual(cfg, record, ttl, public_host, control_public, allocator, ca_fp
     print()
 
 
-def print_one_line(ticket, ttl, note, public_host, control_public, allocator, ca_fp, installer, ssh_user, ssh_port, client_name=''):
+def print_one_line(ticket, ttl, note, public_host, control_public, allocator, ca_fp, installer, ssh_user, ssh_port, client_name='', management_only=False):
     env_parts = [
         'FRP_ALLOCATOR_URL=%s' % shell_quote(allocator),
         'FRP_ALLOCATOR_CA_SHA256=%s' % shell_quote(ca_fp),
@@ -466,6 +467,8 @@ def print_one_line(ticket, ttl, note, public_host, control_public, allocator, ca
         env_parts.append('FRP_SSH_USER=%s' % shell_quote(ssh_user))
     if ssh_port and int(ssh_port) != 22:
         env_parts.append('FRP_SSH_PORT=%s' % shell_quote(str(int(ssh_port))))
+    if management_only:
+        env_parts.append('FRP_MANAGEMENT_ONLY=1')
     command = 'curl -fsSL %s | sudo env %s bash' % (
         shell_quote(installer),
         ' '.join(env_parts),
@@ -488,6 +491,8 @@ def print_one_line(ticket, ttl, note, public_host, control_public, allocator, ca
     print()
     print('Send that single line to the remote user. They paste it and press Enter.')
     print('No Enrollment Code prompt or FRP configuration is required.')
+    if management_only:
+        print('This enrolls management identity only; no service or public port is created.')
     print()
     print('The ticket is not the FRP token. It cannot manage the client after enrollment.')
     print('It cannot be reused by another machine once bound.')
@@ -555,8 +560,6 @@ def main(argv=None):
         print_manual(cfg, record, ttl, public_host, control_public, allocator, ca_fp, installer)
         return 0
 
-    if not a.ssh and not a.services_file:
-        fail('--one-line requires --ssh or --services-file')
     if a.ssh and not ssh_user and not is_interactive_stdin():
         fail(NONINTERACTIVE_SSH_USER_ERROR)
 
@@ -586,7 +589,7 @@ def main(argv=None):
         reject_control_chars('--ssh-user', ssh_user)
         raw_services = [ssh_service(ssh_user, ssh_port)]
     else:
-        raw_services = load_services_file(a.services_file)
+        raw_services = load_services_file(a.services_file) if a.services_file else []
 
     try:
         services = alloc_mod.normalize_services(raw_services)
@@ -621,6 +624,7 @@ def main(argv=None):
         ssh_user,
         ssh_pre_port,
         client_name=client_name,
+        management_only=not services,
     )
     return 0
 

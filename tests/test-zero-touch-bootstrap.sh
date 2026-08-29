@@ -121,13 +121,10 @@ grep -q 'frp-create-client --one-line --ssh --note client-01' "$WORKDIR/help.out
 grep -q 'frp-create-client --one-line --ssh --ssh-user aella' "$WORKDIR/help.out" || fail "help explicit example"
 pass "CREATE_CLIENT_HELP"
 
-set +e
-"$CREATE" --one-line >"$WORKDIR/nosvc.out" 2>"$WORKDIR/nosvc.err"
-rc=$?
-set -e
-[[ "$rc" -ne 0 ]] || fail "--one-line without services should fail"
-grep -qi 'requires --ssh or --services-file' "$WORKDIR/nosvc.err" || fail "no-services message"
-pass "ONE_LINE_REQUIRES_SERVICES"
+"$CREATE" --one-line --client-name inventory-only >"$WORKDIR/nosvc.out" 2>"$WORKDIR/nosvc.err"
+grep -q 'FRP_MANAGEMENT_ONLY=1' "$WORKDIR/nosvc.out" || fail "management-only marker"
+grep -q 'no service or public port' "$WORKDIR/nosvc.out" || fail "management-only explanation"
+pass "ONE_LINE_MANAGEMENT_ONLY"
 
 set +e
 "$CREATE" --ssh-user aella >"$WORKDIR/sshu.out" 2>"$WORKDIR/sshu.err"

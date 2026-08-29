@@ -283,21 +283,8 @@ def bootstrap_file_path(bootstrap_dir, ticket_id):
 
 
 def cleanup_expired_bootstrap_tickets(bootstrap_dir, now=None, keep_id=None):
-    now = int(now if now is not None else time.time())
-    keep_id = (keep_id or '').lower()
-    try:
-        entries = list(Path(bootstrap_dir).glob('*.json'))
-    except OSError:
-        return
-    for path in entries:
-        if keep_id and path.stem.lower() == keep_id:
-            continue
-        try:
-            record = load_json(path)
-            if int(record.get('expires_at', 0)) < now:
-                unlink_quiet(path)
-        except Exception:
-            continue
+    """Retain ticket metadata so administrators can audit expired enrollments."""
+    return
 
 
 def issue_bootstrap_ticket(enrollments_dir, bootstrap_dir, services, ttl, note='', label=''):
@@ -646,8 +633,6 @@ def normalize_services(raw_services):
         raise ServiceValidationError('services is required')
     if not isinstance(raw_services, list):
         raise ServiceValidationError('services must be a list')
-    if not raw_services:
-        raise ServiceValidationError('at least one service must be configured')
     if len(raw_services) > MAX_SERVICES:
         raise ServiceValidationError('too many services in one enrollment request')
 
@@ -820,6 +805,12 @@ class Allocator:
                         return 410, api_error(
                             'bootstrap ticket has expired',
                             'BOOTSTRAP_TICKET_EXPIRED',
+                        )
+
+                    if record.get('revoked_at'):
+                        return 403, api_error(
+                            'bootstrap ticket has been revoked',
+                            'BOOTSTRAP_TICKET_REVOKED',
                         )
 
                     if record.get('completed_at'):
@@ -1110,6 +1101,8 @@ class Allocator:
 
         if abs(now - ts) > MAX_CLOCK_SKEW:
             return None, None, 'request timestamp outside allowed window'
+        if record.get('revoked_at'):
+            return None, None, 'enrollment code revoked'
         if now > int(record.get('expires_at', 0)):
             return None, None, 'enrollment code expired'
 

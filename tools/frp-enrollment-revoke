@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""Revoke an unused or bound bootstrap enrollment."""
+import argparse
+import fcntl
+import json
+import os
+import tempfile
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
+CONFIG = Path(ROOT + '/etc/frp-auto-deploy/config.json')
+
+
+def remap(path):
+    path = Path(path)
+    if ROOT and not str(path).startswith(ROOT):
+        return Path(ROOT + str(path))
+    return path
+
+
+def atomic_write(path, data):
+    fd, tmp = tempfile.mkstemp(prefix=path.name + '.', suffix='.tmp', dir=str(path.parent))
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            json.dump(data, handle, indent=2, sort_keys=True)
+            handle.write('\n')
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description='Revoke an unused or bound enrollment ticket')
+    parser.add_argument('id', help='ticket ID shown by frp-enrollments')
+    args = parser.parse_args(argv)
+    ticket_id = args.id.strip().lower()
+    if len(ticket_id) != 16 or any(c not in '0123456789abcdef' for c in ticket_id):
+        parser.error('ticket ID must be 16 hexadecimal characters')
+
+    cfg = json.loads(CONFIG.read_text(encoding='utf-8'))
+    bootstrap = remap(
+        cfg.get('bootstrap_dir')
+        or str(Path(cfg['enrollments_dir']).parent / 'bootstrap')
+    )
+    enrollments = remap(cfg['enrollments_dir'])
+    path = bootstrap / (ticket_id + '.json')
+    registry = remap(cfg.get('registry_file') or str(bootstrap.parent / 'registry.json'))
+    lock_path = registry.parent / 'registry.lock'
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        if not path.is_file():
+            raise SystemExit('ERROR: enrollment ticket not found')
+        record = json.loads(path.read_text(encoding='utf-8'))
+        if record.get('completed_at'):
+            raise SystemExit('ERROR: completed enrollment tickets cannot be revoked')
+        if record.get('revoked_at'):
+            raise SystemExit('ERROR: enrollment ticket is already revoked')
+        if int(record.get('expires_at') or 0) < int(time.time()):
+            raise SystemExit('ERROR: expired enrollment tickets cannot be revoked')
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+        record['revoked_at'] = now
+        atomic_write(path, record)
+        enrollment_id = str(record.get('enrollment_id') or '')
+        enroll_path = enrollments / (enrollment_id + '.json')
+        if enroll_path.is_file():
+            enroll = json.loads(enroll_path.read_text(encoding='utf-8'))
+            enroll['revoked_at'] = now
+            atomic_write(enroll_path, enroll)
+    finally:
+        os.close(lock_fd)
+    print('Revoked enrollment %s' % ticket_id)
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

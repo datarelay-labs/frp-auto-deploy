@@ -23,6 +23,9 @@ for f in \
   "$BASE_DIR/lib/frp_doctor.py" \
   "$BASE_DIR/release-manifest.json" \
   "$BASE_DIR/tools/frp-create-client" \
+  "$BASE_DIR/tools/frp-enrollments" \
+  "$BASE_DIR/tools/frp-enrollment-revoke" \
+  "$BASE_DIR/tools/frp-enroll-bulk" \
   "$BASE_DIR/tools/frp-clients" \
   "$BASE_DIR/tools/frp-client-info" \
   "$BASE_DIR/tools/frp-release-client" \
@@ -1746,7 +1749,7 @@ frp_server_main() {
   else
     rm -f "$unit_frontend" "$frontend_conf"
   fi
-  for tool in frp-create-client frp-clients frp-client-info frp-client-set frp-release-client frp-release-service frp-revoke-client frp-set-client-installer-url frp-server-status frp-update frpctl; do
+  for tool in frp-create-client frp-enrollments frp-enrollment-revoke frp-enroll-bulk frp-clients frp-client-info frp-client-set frp-release-client frp-release-service frp-revoke-client frp-set-client-installer-url frp-server-status frp-update frpctl; do
     install -m 0755 "$BASE_DIR/tools/$tool" "${sbin_dir}/$tool"
   done
 

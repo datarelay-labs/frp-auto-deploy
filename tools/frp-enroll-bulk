@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""Issue one independent bootstrap ticket per bulk enrollment row."""
+import argparse
+import csv
+import importlib.util
+from importlib.machinery import SourceFileLoader
+import json
+import os
+import sys
+from pathlib import Path
+
+ROOT = os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
+CONFIG = Path(ROOT + '/etc/frp-auto-deploy/config.json')
+
+
+def load_create_client():
+    path = Path(__file__).resolve().parent / 'frp-create-client'
+    spec = importlib.util.spec_from_loader(
+        'frp_create_client', SourceFileLoader('frp_create_client', str(path))
+    )
+    if spec is None or spec.loader is None:
+        raise SystemExit('ERROR: frp-create-client is unavailable')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def remap(path):
+    path = Path(path)
+    if ROOT and not str(path).startswith(ROOT):
+        return Path(ROOT + str(path))
+    return path
+
+
+def validate_row(create, label, ssh_user, note):
+    label = str(label or '').strip()
+    ssh_user = str(ssh_user or '').strip()
+    note = str(note or '').strip()
+    if label:
+        label, error = create.validate_prompt_label(label)
+        if error:
+            raise ValueError(error)
+    if ssh_user and not create.SSH_USER_RE.fullmatch(ssh_user):
+        raise ValueError('invalid ssh_user')
+    create.reject_control_chars('note', note)
+    if len(note) > 1024:
+        raise ValueError('note must be at most 1024 characters')
+    return label, ssh_user, note
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description='Create independent one-time enrollment commands')
+    parser.add_argument('csv_path', nargs='?', metavar='CSV', help='CSV file with label,ssh_user,note columns')
+    parser.add_argument('--count', type=int, help='number of management-only enrollments')
+    parser.add_argument('--csv', dest='csv_option', metavar='PATH', help='CSV file with label,ssh_user,note columns')
+    parser.add_argument('--label-prefix', default='client', help='label prefix for --count')
+    parser.add_argument('--ssh-user', default='', help='SSH user for every --count row')
+    parser.add_argument('--note', default='', help='note for every --count row')
+    parser.add_argument('--ttl', type=int, default=600)
+    args = parser.parse_args(argv)
+    csv_path = args.csv_option or args.csv_path
+    if bool(args.count is not None) == bool(csv_path):
+        parser.error('use exactly one of --count N or CSV input')
+    if args.ttl <= 0:
+        parser.error('--ttl must be positive')
+    if args.count is not None and (args.count < 1 or args.count > 1000):
+        parser.error('--count must be between 1 and 1000')
+
+    create = load_create_client()
+    cfg = json.loads(CONFIG.read_text(encoding='utf-8'))
+    allocator_url = str(cfg.get('allocator_public_url') or '').strip()
+    installer = str(cfg.get('client_installer_url') or '').strip()
+    ca_path = remap(cfg.get('tls_ca_cert') or '/etc/frp-auto-deploy/pki/ca.crt')
+    ca_fp = create.fingerprint_from_cert(ca_path)
+    if not allocator_url.lower().startswith('https://') or not installer or not ca_fp:
+        raise SystemExit('ERROR: secure allocator URL, installer URL, and CA fingerprint are required')
+    enrollments = remap(cfg['enrollments_dir'])
+    bootstrap = remap(cfg.get('bootstrap_dir') or str(Path(cfg['enrollments_dir']).parent / 'bootstrap'))
+    allocator = create.load_allocator()
+    if allocator is None:
+        raise SystemExit('ERROR: allocator module is missing')
+
+    rows = []
+    if args.count is not None:
+        width = max(2, len(str(args.count)))
+        for index in range(1, args.count + 1):
+            rows.append((f'{args.label_prefix}-{index:0{width}d}', args.ssh_user, args.note))
+    else:
+        with open(csv_path, newline='', encoding='utf-8-sig') as handle:
+            reader = csv.DictReader(handle)
+            required = {'label', 'ssh_user', 'note'}
+            if not reader.fieldnames or not required.issubset(set(reader.fieldnames)):
+                parser.error('CSV header must contain label,ssh_user,note')
+            rows = [(row.get('label'), row.get('ssh_user'), row.get('note')) for row in reader]
+        if not rows:
+            parser.error('CSV contains no enrollment rows')
+
+    if not sys.stdout.isatty():
+        print(
+            'WARNING: redirected output contains sensitive one-time bootstrap commands; '
+            'protect the destination file and delete it after use.',
+            file=sys.stderr,
+        )
+    print('label,expires,bootstrap_command')
+    for index, raw in enumerate(rows):
+        try:
+            label, ssh_user, note = validate_row(create, *raw)
+        except ValueError as exc:
+            raise SystemExit(f'ERROR: row {index + 1}: {exc}')
+        services = allocator.normalize_services(
+            [create.ssh_service(ssh_user, 22)] if ssh_user else []
+        )
+        row_ttl = args.ttl + index
+        ticket, _enroll, ticket_record = allocator.issue_bootstrap_ticket(
+            enrollments, bootstrap, services, row_ttl, note, label=label
+        )
+        env = [
+            'FRP_ALLOCATOR_URL=' + create.shell_quote(allocator_url),
+            'FRP_ALLOCATOR_CA_SHA256=' + create.shell_quote(ca_fp),
+            'FRP_BOOTSTRAP_TICKET=' + create.shell_quote(ticket),
+            'FRP_ZERO_TOUCH=1',
+        ]
+        if ssh_user:
+            env.append('FRP_SSH_USER=' + create.shell_quote(ssh_user))
+        else:
+            env.append('FRP_MANAGEMENT_ONLY=1')
+        command = 'curl -fsSL %s | sudo env %s bash' % (
+            create.shell_quote(installer), ' '.join(env)
+        )
+        expires = str(ticket_record.get('expires_at'))
+        print(','.join([
+            csv_quote(label),
+            csv_quote(expires),
+            csv_quote(command),
+        ]))
+    return 0
+
+
+def csv_quote(value):
+    from io import StringIO
+    buf = StringIO()
+    csv.writer(buf, lineterminator='').writerow([str(value)])
+    return buf.getvalue()
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

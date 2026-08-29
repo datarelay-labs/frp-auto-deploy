@@ -1426,6 +1426,9 @@ state = {
     'machine_id': machine_id,
     'host_id': host_id,
     'services': services,
+    'management_only': not any(
+        rec.get('enabled', True) is not False for rec in services.values()
+    ),
 }
 dest = Path(dest)
 dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1572,8 +1575,6 @@ except json.JSONDecodeError:
     raise SystemExit('ERROR: FRP_SERVICES_JSON is not valid JSON')
 if not isinstance(raw, list):
     raise SystemExit('ERROR: FRP_SERVICES_JSON must be a list')
-if not raw:
-    raise SystemExit('ERROR: at least one service must be configured')
 path.write_text('[]\n', encoding='utf-8')
 for item in raw:
     add(path, item)
@@ -2015,7 +2016,7 @@ if not eid or not secret:
     print('ERR\tBOOTSTRAP_REDEEM_FAILED\tbootstrap response is missing enrollment data')
     raise SystemExit(1)
 services = data.get('services')
-if not isinstance(services, list) or not services:
+if not isinstance(services, list):
     print('ERR\tBOOTSTRAP_REDEEM_FAILED\tbootstrap response is missing services')
     raise SystemExit(1)
 Path(sys.argv[2]).write_text(json.dumps(services, indent=2) + '\n', encoding='utf-8')
@@ -2198,7 +2199,7 @@ if 'ssh_port' in d or 'https_port' in d:
 if 'token_ciphertext' in d or 'mgmt_mac_key' in d or d.get('token'):
     raise SystemExit('ERROR: allocator returned unexpected secret material')
 services=d.get('services')
-if not isinstance(services, list) or not services:
+if not isinstance(services, list):
     raise SystemExit('ERROR: allocator response is missing services')
 transport=str(d.get('frp_transport') or 'tcp').strip().lower() or 'tcp'
 if transport not in ('tcp', 'wss'):
@@ -2259,7 +2260,7 @@ if 'ssh_port' in d or 'https_port' in d:
 if 'mgmt_mac_key' in d:
     raise SystemExit('ERROR: allocator returned unexpected secret material')
 services=d.get('services')
-if not isinstance(services, list) or not services:
+if not isinstance(services, list):
     raise SystemExit('ERROR: allocator response is missing services')
 transport=str(d.get('frp_transport') or 'tcp').strip().lower() or 'tcp'
 if transport not in ('tcp', 'wss'):
@@ -2924,7 +2925,7 @@ frp_client_restart() {
   if [[ "${FRP_SKIP_SYSTEMD:-}" == "1" || -n "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
     return 0
   fi
-  systemctl restart frpc
+  systemctl enable frpc >/dev/null && systemctl restart frpc
 }
 
 frp_client_wait_proxies() {

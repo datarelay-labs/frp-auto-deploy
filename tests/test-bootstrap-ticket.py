@@ -342,10 +342,10 @@ def test_cleanup_expired():
         path.write_text(json.dumps(rec, indent=2) + '\n')
         env.allocator.cleanup_expired_bootstrap_tickets()
         path = env.allocator.bootstrap_path(ticket.split('.')[1])
-        if path.exists():
-            fail('expired ticket not cleaned')
+        if not path.exists():
+            fail('expired ticket metadata removed')
             return
-        pass_('BOOTSTRAP_TICKET_CLEANUP')
+        pass_('BOOTSTRAP_TICKET_EXPIRY_RETAINED')
     finally:
         env.cleanup()
 

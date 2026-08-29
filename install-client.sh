@@ -149,7 +149,12 @@ services = json.loads(Path(sys.argv[2]).read_text(encoding='utf-8'))
 print()
 print('FRP client setup complete.')
 print()
-print('The requested remote service is connected.')
+if not services:
+    print('Management identity enrolled (management-only mode).')
+    print('No services are published and no public ports were allocated.')
+    print('Add a service later with: sudo frp-client')
+else:
+    print('The requested remote service is connected.')
 print('You can close this terminal.')
 print()
 for item in services:
@@ -386,11 +391,6 @@ frp_client_main() {
     export FRP_SERVICES_JSON
     services_load_from_env
     unset FRP_SERVICES_JSON
-    if [[ "$(services_count)" == "0" ]]; then
-      echo "ERROR: bootstrap returned no services" >&2
-      frp_emit_failure_class ZERO_TOUCH_INPUT_INVALID
-      return 1
-    fi
   fi
 
   echo "Validating enrollment and requesting persistent public ports ..."
@@ -450,7 +450,7 @@ frp_client_main() {
   render_frpc_toml "$FRPC_TOML" "$FRP_SERVER" "$FRP_SERVER_PORT" "$FRP_TOKEN" "$HOST_ID" "$SERVICES_FILE" "${FRP_TRANSPORT:-tcp}"
   frp_client_verify_config "$FRPC_TOML" || exit 1
 
-  if [[ "${FRP_SKIP_SYSTEMD:-}" != "1" && -z "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
+  if [[ "$(services_count)" != "0" && "${FRP_SKIP_SYSTEMD:-}" != "1" && -z "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
     echo "Installing systemd service ..."
     UNIT_SRC=""
     if [[ -f "${_FRP_INSTALL_CLIENT_DIR}/client/frpc.service" ]]; then
@@ -498,6 +498,34 @@ EOF2
       journalctl -u frpc -n 80 --no-pager >&2 || true
       frp_emit_failure_class HEALTH_CHECK_FAILED
       exit 1
+    fi
+  elif [[ "$(services_count)" == "0" ]]; then
+    echo "Management-only mode: frpc is not started until a service is enabled."
+    if [[ "${FRP_SKIP_SYSTEMD:-}" != "1" && -z "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
+      echo "Installing inactive systemd service for future services ..."
+      if [[ -f "${_FRP_INSTALL_CLIENT_DIR}/client/frpc.service" ]]; then
+        install -m 0644 "${_FRP_INSTALL_CLIENT_DIR}/client/frpc.service" /etc/systemd/system/frpc.service
+      else
+        cat >/etc/systemd/system/frpc.service <<'EOF2'
+[Unit]
+Description=FRP Client
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/frpc -c /etc/frp/frpc.toml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF2
+      fi
+      systemctl daemon-reload || {
+        frp_emit_failure_class SYSTEMD_RELOAD_FAILED
+        exit 1
+      }
     fi
   fi
 
