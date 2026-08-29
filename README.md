@@ -476,8 +476,14 @@ configuration that requires a leaf certificate reissue.
 ```bash
 sudo frpctl update
 sudo frp-update --check          # server FRP binary, check only
+sudo frpctl project-update --check
 sudo frp-client update           # client project tools
 ```
+
+Same-version server project updates compare **build identity** (the SHA256SUMS
+digest of `dist/bootstrap-server.sh`), not only `PROJECT_VERSION`. `--check` is
+read-only. A matching semantic version with a different or unknown bundle SHA
+is an update; the same verified SHA is `not needed` and does not mutate state.
 
 Hosts installed before `frpctl`:
 

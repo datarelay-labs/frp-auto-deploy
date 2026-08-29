@@ -122,6 +122,21 @@ A client that was incorrectly labeled `stable` / `v2.1.0` with
 way: explicit `FRP_RELEASE_CHANNEL=dev`, expected `source_ref=main`, and
 a verified candidate whose manifest is `dev` / `main`.
 
+## Server project-update build identity
+
+`sudo frpctl project-update --check` is read-only. Availability is not decided
+from `PROJECT_VERSION` alone:
+
+- installed version **less than** candidate → update available
+- installed version **greater than** candidate → downgrade refused
+- same version and installed bundle SHA **equals** the SHA256SUMS digest → not needed
+- same version and SHA differs, or installed SHA is unknown while the target
+  SHA was externally verified → update available
+
+Production remote updates persist `FRP_BUNDLE_SHA256` from SHA256SUMS.
+`frp-project-update --source DIR` is local-source identity (staged project-tree
+digest). That digest is not a substitute for SHA256SUMS verification.
+
 ## Rollback
 
 - Server FRP binary: `frp-update` restores the previous binary on health failure.

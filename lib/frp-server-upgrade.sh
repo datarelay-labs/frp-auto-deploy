@@ -177,43 +177,56 @@ PY
 
 frp_server_upgrade_validate_source_metadata() {
   local source="$1"
-  python3 - "$source/release-manifest.json" "$source/VERSION" \
-    "${FRP_EXPECTED_SOURCE_REF:-}" "${FRP_EXPECTED_RELEASE_CHANNEL:-}" <<'PY'
-import json
-import re
-import sys
-from pathlib import Path
+  local expected_ref="${2:-${FRP_EXPECTED_SOURCE_REF:-}}"
+  local expected_channel="${3:-${FRP_EXPECTED_RELEASE_CHANNEL:-}}"
+  frp_validate_release_source_metadata "$source" "$expected_ref" "$expected_channel"
+}
 
-manifest_path, version_path, expected_ref, expected_channel = sys.argv[1:]
-try:
-    data = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
-except Exception:
-    sys.stderr.write("ERROR: missing or invalid release-manifest.json\n")
-    raise SystemExit(1)
-values = {}
-try:
-    for line in Path(version_path).read_text(encoding="utf-8").splitlines():
-        if "=" in line:
-            key, value = line.split("=", 1)
-            values[key.strip()] = value.strip().strip('"').strip("'")
-except OSError:
-    sys.stderr.write("ERROR: missing VERSION metadata\n")
-    raise SystemExit(1)
-project = values.get("PROJECT_VERSION", "")
-if not re.fullmatch(r"\d+\.\d+\.\d+", project):
-    sys.stderr.write("ERROR: invalid project version metadata\n")
-    raise SystemExit(1)
-if str(data.get("project_version") or "") != project:
-    sys.stderr.write("ERROR: release metadata project version mismatch\n")
-    raise SystemExit(1)
-if expected_ref and str(data.get("git_ref") or "") != expected_ref:
-    sys.stderr.write("ERROR: release metadata source ref mismatch\n")
-    raise SystemExit(1)
-if expected_channel and str(data.get("channel") or "") != expected_channel:
-    sys.stderr.write("ERROR: release metadata channel mismatch\n")
-    raise SystemExit(1)
-print(project)
-PY
+frp_server_display_or_unknown() {
+  local v="${1:-}"
+  if [[ -z "$v" ]]; then
+    printf '%s' "unknown"
+  else
+    printf '%s' "$v"
+  fi
+}
+
+frp_server_verified_bundle_sha256() {
+  # Production remote identity: SHA256SUMS digest passed as FRP_BUNDLE_SHA256.
+  # A self-hash of the running candidate is not external verification.
+  local digest=""
+  if [[ "${FRP_BUNDLE_SHA256:-}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    digest="$(printf '%s' "$FRP_BUNDLE_SHA256" | tr '[:upper:]' '[:lower:]')"
+    printf '%s' "$digest"
+    return 0
+  fi
+  return 1
+}
+
+frp_server_target_build_identity() {
+  local staged="$1" digest=""
+  if digest="$(frp_server_verified_bundle_sha256)"; then
+    printf '%s' "$digest"
+    return 0
+  fi
+  # Local --source (tests/development): staged project-tree digest is
+  # build identity only. It is not a substitute for SHA256SUMS verification.
+  frp_server_upgrade_tree_digest "$staged"
+}
+
+frp_server_report_identity() {
+  local installed_version="$1" target_version="$2"
+  local installed_channel="$3" target_channel="$4"
+  local installed_ref="$5" target_ref="$6"
+  local installed_bundle="$7" target_bundle="$8"
+  echo "Installed project version : ${installed_version}"
+  echo "Target project version    : ${target_version}"
+  echo "Installed release channel : ${installed_channel}"
+  echo "Target release channel    : ${target_channel}"
+  echo "Installed source ref      : ${installed_ref}"
+  echo "Target source ref         : ${target_ref}"
+  echo "Installed bundle SHA256   : ${installed_bundle}"
+  echo "Target bundle SHA256      : ${target_bundle}"
 }
 
 frp_server_upgrade_stage() {
@@ -381,6 +394,9 @@ frp_server_apply_project_upgrade() {
   local version_file previous target staged snapshot backups preserved_before
   local restart_frps=0 restart_alloc=0 restart_frontend=0 rel
   local resolved_channel resolved_ref
+  local candidate_meta target_channel target_ref
+  local installed_channel installed_ref installed_bundle target_bundle
+  local update_needed=1 vcmp
 
   _FRP_UPGRADE_MUTATION_STARTED=0
   _FRP_UPGRADE_ROLLBACK_DONE=0
@@ -407,19 +423,30 @@ frp_server_apply_project_upgrade() {
   resolved_channel="$FRP_RESOLVED_RELEASE_CHANNEL"
   resolved_ref="$FRP_RESOLVED_SOURCE_REF"
 
-  target="$(frp_server_upgrade_validate_source_metadata "$source")" || return 1
+  candidate_meta="$(frp_server_upgrade_validate_source_metadata \
+    "$source" "$resolved_ref" "$resolved_channel")" || return 1
+  target="$(printf '%s' "$candidate_meta" | awk -F'\t' '{print $1}')"
+  target_channel="$(printf '%s' "$candidate_meta" | awk -F'\t' '{print $2}')"
+  target_ref="$(printf '%s' "$candidate_meta" | awk -F'\t' '{print $3}')"
   version_file="$(frp_server_fs /etc/frp-auto-deploy/version)"
   previous="$(frp_read_kv_file "$version_file" PROJECT_VERSION)"
   previous="${previous:-legacy / unknown}"
-  echo "Installed project version : ${previous}"
-  echo "Target project version    : ${target}"
-  echo "Release channel           : ${resolved_channel}"
-  echo "Source ref                : ${resolved_ref}"
-  echo "FRP binary update         : NO"
-  if [[ "$previous" != "legacy / unknown" && "$(frp_version_compare "$previous" "$target")" == "gt" ]]; then
-    echo "ERROR: installed project version ${previous} is newer than candidate ${target}" >&2
-    frp_emit_failure_class DOWNGRADE_REFUSED
-    return 1
+  installed_channel="$(frp_server_display_or_unknown "${FRP_INSTALLED_RELEASE_CHANNEL:-}")"
+  installed_ref="$(frp_server_display_or_unknown "${FRP_INSTALLED_SOURCE_REF:-}")"
+  installed_bundle="$(frp_server_display_or_unknown "${FRP_INSTALLED_BUNDLE_SHA256:-}")"
+  if [[ "$previous" != "legacy / unknown" ]]; then
+    vcmp="$(frp_version_compare "$previous" "$target")"
+    if [[ "$vcmp" == "gt" ]]; then
+      target_bundle="$(frp_server_verified_bundle_sha256 || true)"
+      frp_server_report_identity "$previous" "$target" \
+        "$installed_channel" "$target_channel" \
+        "$installed_ref" "$target_ref" \
+        "$installed_bundle" "$(frp_server_display_or_unknown "$target_bundle")"
+      echo "FRP binary update         : NO"
+      echo "ERROR: installed project version ${previous} is newer than candidate ${target}" >&2
+      frp_emit_failure_class DOWNGRADE_REFUSED
+      return 1
+    fi
   fi
 
   staged="$(frp_secure_mktemp_dir)"
@@ -430,9 +457,37 @@ frp_server_apply_project_upgrade() {
     echo "UPGRADE_ROLLBACK=NOT_REQUIRED"
     return 1
   fi
+  target_bundle="$(frp_server_target_build_identity "$staged")"
+  frp_server_report_identity "$previous" "$target" \
+    "$installed_channel" "$target_channel" \
+    "$installed_ref" "$target_ref" \
+    "$installed_bundle" "$target_bundle"
+  echo "FRP binary update         : NO"
+
+  if [[ "$previous" != "legacy / unknown" ]]; then
+    vcmp="$(frp_version_compare "$previous" "$target")"
+    if [[ "$vcmp" == "eq" ]]; then
+      if [[ "$installed_bundle" =~ ^[0-9a-fA-F]{64}$ ]] && \
+         [[ "$(printf '%s' "$installed_bundle" | tr '[:upper:]' '[:lower:]')" == "$target_bundle" ]]; then
+        update_needed=0
+      else
+        update_needed=1
+      fi
+    fi
+  fi
+
   if [[ "$check_only" == "1" ]]; then
-    [[ "$previous" == "$target" ]] && echo "Update                    : not needed" ||
+    if [[ "$update_needed" == "0" ]]; then
+      echo "Update                    : not needed"
+    else
       echo "Update                    : available"
+    fi
+    echo "State mutation             : NO"
+    return 0
+  fi
+
+  if [[ "$update_needed" == "0" ]]; then
+    echo "Update                    : not needed"
     echo "State mutation             : NO"
     return 0
   fi
@@ -467,7 +522,7 @@ frp_server_apply_project_upgrade() {
 
   FRP_TXN_RELEASE_CHANNEL="$resolved_channel" \
   FRP_TXN_SOURCE_REF="$resolved_ref" \
-  FRP_TXN_BUNDLE_SHA256="${FRP_BUNDLE_SHA256:-}" \
+  FRP_TXN_BUNDLE_SHA256="${target_bundle:-}" \
   FRP_TXN_SNAPSHOT_PATH="$snapshot" \
   FRP_TXN_MUTATION_STARTED=true \
     frp_txn_write project-update commit "$previous" "$target"
@@ -529,7 +584,10 @@ frp_server_apply_project_upgrade() {
     frp_server_health_frontend || { frp_server_upgrade_rollback "$snapshot"; return 1; }
   fi
 
-  if ! FRP_RELEASE_CHANNEL="$resolved_channel" PROJECT_VERSION="$target" \
+  if ! FRP_RELEASE_CHANNEL="$resolved_channel" \
+      FRP_BUNDLE_SHA256="$target_bundle" \
+      FRP_VERSION_REQUIRE_VERIFIED_BUNDLE=1 \
+      PROJECT_VERSION="$target" \
       frp_write_version_file "$version_file" server; then
     frp_server_upgrade_rollback "$snapshot"
     frp_emit_failure_class FILE_COMMIT_FAILED
@@ -541,6 +599,12 @@ frp_server_apply_project_upgrade() {
   frp_audit_emit project_update.completed
   echo "Server project update completed successfully."
   echo "Project version : ${previous} -> ${target}"
+  echo "Release channel : ${target_channel}"
+  echo "Source ref      : ${target_ref}"
+  echo "Bundle SHA256   : ${target_bundle}"
+  if [[ "$previous" == "$target" ]]; then
+    echo "Same-version update : refreshed management files"
+  fi
   echo "FRP binary      : unchanged"
   echo "Server state    : preserved"
   echo "Client re-enroll: NOT REQUIRED"

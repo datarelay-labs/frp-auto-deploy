@@ -6,6 +6,9 @@
   source-ref can be validated before a live update.
 - Same-version client updates compare verified bundle SHA256, not only
   `PROJECT_VERSION`. Unknown build identity is never "not needed".
+- Same-version server `project-update` uses the same build-identity rule:
+  verified bundle SHA256 (or a local-source staged-tree digest). Matching
+  `PROJECT_VERSION` alone is never "not needed".
 - Legacy clients without persisted release metadata fail closed on remote
   update (`LEGACY_CLIENT_SECURE_BRIDGE_REQUIRED`) until a one-time verified
   bridge. See `docs/FRP_UPGRADE.md`.

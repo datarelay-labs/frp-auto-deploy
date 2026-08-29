@@ -531,4 +531,129 @@ env FRP_SERVER_TEST_ROOT="$PENDCHECK" "$UPDATE" --source "$ROOT" --check \
   fail "pending --check wrote marker"
 pass "CHECK_ONLY_PENDING_READONLY"
 
+# Same-version decisions use build identity, not PROJECT_VERSION alone.
+. "$ROOT/VERSION"
+OCI_INSTALLED_SHA=d0a33da2a9d1cb9832fc0f2892eb52dce31e87fdd63803d3a01c8013b1355ff9
+OCI_CANDIDATE_SHA=1f67f3b0b96de60b78ff2434abbf2463f5bf222e47a4ca8f791a9933cc8f98cc
+
+write_identity() {
+  local tree="$1" project="$2" channel="$3" ref="$4" sha="${5:-}"
+  {
+    printf 'PROJECT_VERSION=%s\n' "$project"
+    printf 'FRP_VERSION=0.70.1\n'
+    printf 'RELEASE_CHANNEL=%s\n' "$channel"
+    printf 'SOURCE_REF=%s\n' "$ref"
+    if [[ -n "$sha" ]]; then
+      printf 'BUNDLE_SHA256=%s\n' "$sha"
+    fi
+  } >"$tree/etc/frp-auto-deploy/version"
+}
+
+run_verified() {
+  local tree="$1"
+  shift
+  env FRP_SERVER_TEST_ROOT="$tree" FRP_BUNDLE_SHA256="$OCI_CANDIDATE_SHA" \
+    FRP_AUDIT_LOG="$tree/var/log/frp-auto-deploy/audit.jsonl" \
+    "$UPDATE" --source "$ROOT" "$@"
+}
+
+# Unknown persisted SHA at the same semantic version is never "not needed".
+UNK="$WORKDIR/same-unknown"
+setup_tree "$UNK"
+write_identity "$UNK" "$PROJECT_VERSION" dev main
+run_verified "$UNK" --check >"$WORKDIR/unk-check.out" || fail "unknown-build --check"
+grep -q "Installed project version : ${PROJECT_VERSION}" "$WORKDIR/unk-check.out" || fail "unknown installed version"
+grep -q "Target project version    : ${PROJECT_VERSION}" "$WORKDIR/unk-check.out" || fail "unknown target version"
+grep -q 'Installed bundle SHA256   : unknown' "$WORKDIR/unk-check.out" || fail "unknown installed sha"
+grep -q "Target bundle SHA256      : ${OCI_CANDIDATE_SHA}" "$WORKDIR/unk-check.out" || fail "unknown target sha"
+grep -q 'Update                    : available' "$WORKDIR/unk-check.out" || fail "unknown should be available"
+grep -q 'State mutation             : NO' "$WORKDIR/unk-check.out" || fail "unknown check mutation"
+pass "SERVER_SAME_VERSION_UNKNOWN_BUILD"
+
+# Same version, different verified SHA → available (OCI identity).
+DIFF="$WORKDIR/same-diff"
+setup_tree "$DIFF"
+write_identity "$DIFF" "$PROJECT_VERSION" dev main "$OCI_INSTALLED_SHA"
+DIFF_BEFORE="$(state_digest "$DIFF")"
+DIFF_VER="$(sha "$DIFF/etc/frp-auto-deploy/version")"
+FRP_BEFORE="$(sha "$DIFF/usr/local/bin/frps")"
+run_verified "$DIFF" --check >"$WORKDIR/diff-check.out" || fail "different-build --check"
+grep -q "Installed bundle SHA256   : ${OCI_INSTALLED_SHA}" "$WORKDIR/diff-check.out" || fail "oci installed sha"
+grep -q "Target bundle SHA256      : ${OCI_CANDIDATE_SHA}" "$WORKDIR/diff-check.out" || fail "oci target sha"
+grep -q "Installed release channel : dev" "$WORKDIR/diff-check.out" || fail "oci installed channel"
+grep -q "Target release channel    : dev" "$WORKDIR/diff-check.out" || fail "oci target channel"
+grep -q "Installed source ref      : main" "$WORKDIR/diff-check.out" || fail "oci installed ref"
+grep -q "Target source ref         : main" "$WORKDIR/diff-check.out" || fail "oci target ref"
+grep -q 'Update                    : available' "$WORKDIR/diff-check.out" || fail "different build should be available"
+grep -q 'State mutation             : NO' "$WORKDIR/diff-check.out" || fail "different-build check mutation"
+[[ "$(state_digest "$DIFF")" == "$DIFF_BEFORE" ]] || fail "different-build --check mutated state"
+[[ "$(sha "$DIFF/etc/frp-auto-deploy/version")" == "$DIFF_VER" ]] || fail "different-build --check mutated version"
+[[ ! -d "$DIFF/var/lib/frp-auto-deploy/backups" ]] || fail "different-build --check created backup"
+[[ "$(sha "$DIFF/usr/local/bin/frps")" == "$FRP_BEFORE" ]] || fail "check changed frps"
+pass "SERVER_SAME_VERSION_DIFFERENT_BUILD"
+pass "SERVER_CHECK_DIFFERENT_BUILD_AVAILABLE"
+pass "SERVER_CHECK_READONLY"
+
+# Same version, same verified SHA → not needed.
+SAME="$WORKDIR/same-same"
+setup_tree "$SAME"
+write_identity "$SAME" "$PROJECT_VERSION" dev main "$OCI_CANDIDATE_SHA"
+SAME_BEFORE="$(state_digest "$SAME")"
+run_verified "$SAME" --check >"$WORKDIR/same-check.out" || fail "same-build --check"
+grep -q 'Update                    : not needed' "$WORKDIR/same-check.out" || fail "same build should be not needed"
+grep -q 'State mutation             : NO' "$WORKDIR/same-check.out" || fail "same-build check mutation"
+[[ "$(state_digest "$SAME")" == "$SAME_BEFORE" ]] || fail "same-build --check mutated"
+pass "SERVER_SAME_VERSION_SAME_BUILD"
+pass "SERVER_CHECK_SAME_BUILD_NOT_NEEDED"
+
+# Actual refresh for OCI identity, then idempotent second apply.
+REFRESH="$WORKDIR/oci-refresh"
+setup_tree "$REFRESH"
+write_identity "$REFRESH" "$PROJECT_VERSION" dev main "$OCI_INSTALLED_SHA"
+REFRESH_STATE="$(state_digest "$REFRESH")"
+REFRESH_FRP="$(sha "$REFRESH/usr/local/bin/frps")"
+mkdir -p "$REFRESH/var/log/frp-auto-deploy"
+run_verified "$REFRESH" >"$WORKDIR/refresh.out" || fail "oci actual refresh"
+grep -q 'Server project update completed successfully' "$WORKDIR/refresh.out" || fail "oci refresh success"
+grep -q 'Same-version update : refreshed management files' "$WORKDIR/refresh.out" || fail "oci same-version refresh line"
+grep -q "BUNDLE_SHA256=${OCI_CANDIDATE_SHA}" "$REFRESH/etc/frp-auto-deploy/version" || fail "verified sha not persisted"
+grep -q "PROJECT_VERSION=${PROJECT_VERSION}" "$REFRESH/etc/frp-auto-deploy/version" || fail "project version lost"
+grep -q 'FRP_VERSION=0.70.1' "$REFRESH/etc/frp-auto-deploy/version" || fail "frp version changed"
+grep -q 'RELEASE_CHANNEL=dev' "$REFRESH/etc/frp-auto-deploy/version" || fail "channel not preserved"
+grep -q 'SOURCE_REF=main' "$REFRESH/etc/frp-auto-deploy/version" || fail "source ref not preserved"
+[[ "$(state_digest "$REFRESH")" == "$REFRESH_STATE" ]] || fail "oci refresh changed protected state"
+[[ "$(sha "$REFRESH/usr/local/bin/frps")" == "$REFRESH_FRP" ]] || fail "oci refresh changed frps"
+grep -q 'project_update.completed' "$REFRESH/var/log/frp-auto-deploy/audit.jsonl" || fail "refresh missing audit"
+[[ -d "$REFRESH/var/lib/frp-auto-deploy/backups" ]] || fail "refresh missing snapshot"
+BACKUP_COUNT="$(find "$REFRESH/var/lib/frp-auto-deploy/backups" -mindepth 1 -maxdepth 1 -type d | wc -l)"
+pass "SERVER_ACTUAL_DIFFERENT_BUILD_REFRESH"
+pass "SERVER_BUILD_SHA_PERSISTENCE"
+pass "SERVER_DEV_CHANNEL_PRESERVED"
+pass "SERVER_SOURCE_REF_PRESERVED"
+pass "SERVER_NO_FRP_BINARY_CHANGE"
+pass "SERVER_STATE_PRESERVED"
+pass "SERVER_NO_CLIENT_REENROLLMENT"
+
+run_verified "$REFRESH" --check >"$WORKDIR/refresh-check2.out" || fail "second --check"
+grep -q 'Update                    : not needed' "$WORKDIR/refresh-check2.out" || fail "second check should be not needed"
+grep -q 'State mutation             : NO' "$WORKDIR/refresh-check2.out" || fail "second check mutation"
+
+AUDIT_BEFORE="$(sha "$REFRESH/var/log/frp-auto-deploy/audit.jsonl")"
+VER_BEFORE="$(sha "$REFRESH/etc/frp-auto-deploy/version")"
+run_verified "$REFRESH" >"$WORKDIR/refresh2.out" || fail "second actual"
+grep -q 'Update                    : not needed' "$WORKDIR/refresh2.out" || fail "second actual should be not needed"
+grep -q 'State mutation             : NO' "$WORKDIR/refresh2.out" || fail "second actual mutation flag"
+if grep -q 'Server project update completed successfully' "$WORKDIR/refresh2.out"; then
+  fail "second actual mutated"
+fi
+if grep -q 'Same-version update : refreshed management files' "$WORKDIR/refresh2.out"; then
+  fail "second actual refreshed"
+fi
+[[ "$(sha "$REFRESH/etc/frp-auto-deploy/version")" == "$VER_BEFORE" ]] || fail "second actual rewrote version"
+[[ "$(sha "$REFRESH/var/log/frp-auto-deploy/audit.jsonl")" == "$AUDIT_BEFORE" ]] || fail "second actual wrote audit"
+[[ "$(find "$REFRESH/var/lib/frp-auto-deploy/backups" -mindepth 1 -maxdepth 1 -type d | wc -l)" == "$BACKUP_COUNT" ]] ||
+  fail "second actual created snapshot"
+[[ ! -f "$REFRESH/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "second actual left txn marker"
+pass "SERVER_ACTUAL_SAME_BUILD_NO_MUTATION"
+
 echo "SERVER_PROJECT_UPDATE_TESTS=PASS"
