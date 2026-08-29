@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""List pending bootstrap enrollments without exposing ticket secrets."""
+import argparse
+import json
+import os
+import time
+from pathlib import Path
+
+ROOT = os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
+CONFIG = Path(ROOT + '/etc/frp-auto-deploy/config.json')
+
+
+def remap(path):
+    path = Path(path)
+    if ROOT and not str(path).startswith(ROOT):
+        return Path(ROOT + str(path))
+    return path
+
+
+def state_of(record, now):
+    if record.get('revoked_at'):
+        return 'revoked'
+    if record.get('completed_at'):
+        return 'completed'
+    if int(record.get('expires_at') or 0) < now:
+        return 'expired'
+    if record.get('bound_machine_id'):
+        return 'bound'
+    return 'unused'
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description='List bootstrap enrollment lifecycle state (never displays secrets)'
+    )
+    parser.parse_args(argv)
+    cfg = json.loads(CONFIG.read_text(encoding='utf-8'))
+    bootstrap = remap(
+        cfg.get('bootstrap_dir')
+        or str(Path(cfg['enrollments_dir']).parent / 'bootstrap')
+    )
+    records = []
+    for path in bootstrap.glob('*.json') if bootstrap.is_dir() else []:
+        try:
+            rec = json.loads(path.read_text(encoding='utf-8'))
+            if isinstance(rec, dict):
+                records.append(rec)
+        except (OSError, json.JSONDecodeError):
+            continue
+    records.sort(key=lambda rec: (str(rec.get('created_at') or ''), str(rec.get('id') or '')))
+    print(f'{"ID":<16} {"LABEL":<24} {"CREATED":<20} {"EXPIRES":<20} STATE')
+    print('-' * 91)
+    now = int(time.time())
+    for rec in records:
+        label = str(rec.get('label') or '-').replace('\n', ' ')[:24]
+        created = str(rec.get('created_at') or '-')
+        expires = int(rec.get('expires_at') or 0)
+        expires_text = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(expires))
+        print(
+            f'{str(rec.get("id") or "-"):<16} {label:<24} '
+            f'{created:<20} {expires_text:<20} {state_of(rec, now)}'
+        )
+    if not records:
+        print('(none)')
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

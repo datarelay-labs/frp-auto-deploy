@@ -127,11 +127,9 @@ PY
 pass "non-interactive FRP_SERVICES_JSON"
 
 services_init
-if FRP_SERVICES_JSON='[]' services_load_from_env 2>"$WORKDIR/empty.err"; then
-  fail "empty services should be rejected"
-fi
-grep -q 'at least one service must be configured' "$WORKDIR/empty.err" || fail "empty error message"
-pass "empty services rejected"
+FRP_SERVICES_JSON='[]' services_load_from_env
+[[ "$(services_count)" == "0" ]] || fail "empty management-only service set"
+pass "empty services accepted for management-only enrollment"
 
 services_init
 if FRP_SERVICES_JSON='[{"id":"ssh","local_ip":"127.0.0.1","local_port":22,"preset":"ssh"},{"id":"ssh","local_ip":"127.0.0.1","local_port":22,"preset":"ssh"}]' \

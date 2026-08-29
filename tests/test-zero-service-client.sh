@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+python3 - "$ROOT" "$WORK" <<'PY'
+import hashlib,hmac,importlib.util,json,sys,time
+from pathlib import Path
+root,work=Path(sys.argv[1]),Path(sys.argv[2])
+spec=importlib.util.spec_from_file_location('allocator',root/'server/frp-port-allocator.py')
+mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+enroll=work/'enrollments'; enroll.mkdir()
+token=work/'token'; token.write_text('test-token\n')
+registry=work/'registry.json'; mod.atomic_write_json(registry,mod.empty_registry())
+cfg=work/'config.json'; cfg.write_text(json.dumps({
+ 'public_host':'example.test','frp_control_public_port':7000,
+ 'port_start':19000,'port_end':19010,'listen_port':6999,
+ 'registry_file':str(registry),'enrollments_dir':str(enroll),
+ 'bootstrap_dir':str(work/'bootstrap'),'token_file':str(token),
+})+'\n')
+a=mod.Allocator(str(cfg)); mod.port_is_available=lambda port: True
+ticket,enrollment,_=a.issue_bootstrap_ticket([],600,'inventory','zero-node')
+code,redeemed=a.redeem_bootstrap(json.dumps({
+ 'ticket':ticket,'machine_id':'machine-zero','hostname':'zero-host'
+}).encode())
+assert code==200 and redeemed['services']==[]
+key,pub=work/'identity.key',work/'identity.pub'
+mod.MGMT.generate_keypair(key,pub)
+def enroll_services(services):
+    body=json.dumps({
+      'machine_id':'machine-zero','hostname':'zero-host','services':services,
+      'mgmt_pubkey':pub.read_text(),'mgmt_alg':mod.MGMT.MGMT_ALG,
+    },separators=(',',':')).encode()
+    ts=str(int(time.time()))
+    sig=hmac.new(enrollment['secret'].encode(),(ts+'\n'+body.decode()).encode(),hashlib.sha256).hexdigest()
+    return a.enroll(enrollment['id'],ts,sig,body)
+status,result=enroll_services([])
+assert status==200 and result['services']==[]
+state=a.load_registry(); client=state['clients']['machine-zero']
+assert client['mgmt_status']=='enrolled'
+assert client['services']=={}
+assert a.used_ports(state)==set()
+ssh=[{'id':'ssh','name':'SSH','protocol':'tcp','local_ip':'127.0.0.1',
+      'local_port':22,'preset':'ssh','ssh_user':'aella'}]
+status,result=enroll_services(ssh)
+assert status==200 and result['services']==[{'id':'ssh','remote_port':19000}]
+state=a.load_registry()
+assert state['clients']['machine-zero']['services']['ssh']['remote_port']==19000
+PY
+cat >"$WORK/empty.json" <<'JSON'
+[]
+JSON
+export FRP_CLIENT_TEST_ROOT="$WORK/client"
+export FRP_CLIENT_LIB="$ROOT/lib/frp-client-common.sh"
+mkdir -p "$FRP_CLIENT_TEST_ROOT/etc/frp"
+# shellcheck source=../lib/frp-client-common.sh
+. "$ROOT/lib/frp-client-common.sh"
+render_frpc_toml "$WORK/frpc.toml" example.test 7000 token host-zero "$WORK/empty.json" tcp
+grep -q 'serverAddr = "example.test"' "$WORK/frpc.toml"
+! grep -q '^\[\[proxies\]\]' "$WORK/frpc.toml"
+frp_write_client_state "$WORK/state.json" https://example.test/enroll example.test 7000 \
+  zero-host machine-zero host-zero "$WORK/empty.json" tcp
+python3 - "$WORK/state.json" <<'PY'
+import json,sys
+s=json.load(open(sys.argv[1]))
+assert s['management_only'] is True
+assert s['services']=={}
+PY
+echo "ZERO_SERVICE_CLIENT_TEST=PASS"
