@@ -36,6 +36,10 @@ reg_path.write_text(json.dumps({
       "mgmt_pubkey": "KEEP",
       "mgmt_mac_key": "KEEP-MAC",
       "mgmt_fingerprint": "abcd",
+      "tags": {
+        "customer": "lotte",
+        "site": "seoul"
+      },
       "services": {
         "ssh": {
           "name": "SSH",
@@ -109,6 +113,7 @@ assert c['services']['ssh']['remote_port']==6002
 assert c['mgmt_status']=='enrolled'
 assert c['mgmt_pubkey']=='KEEP'
 assert c['mgmt_mac_key']=='KEEP-MAC'
+assert c['tags']=={'customer': 'lotte', 'site': 'seoul'}
 PY
 python3 "$ROOT/tools/frp-client-info" seoul-groupware >"$WORKDIR/after-set.out"
 grep -q 'seoul-groupware' "$WORKDIR/after-set.out" || fail "new label in info"
