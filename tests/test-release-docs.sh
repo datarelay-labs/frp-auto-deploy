@@ -40,7 +40,9 @@ pass "NO_FIXED_443_DOCS"
 
 grep -q 'ssh -p <public-port>' README.md || fail "README missing public SSH example"
 grep -q '\-\-one-line' README.md || fail "README missing zero-touch"
-grep -q '\-\-ssh-user ubuntu' README.md || fail "README zero-touch example user"
+grep -q 'Client SSH user' README.md || fail "README interactive SSH user prompt"
+grep -q '\-\-ssh-user' README.md || fail "README explicit --ssh-user"
+grep -q 'no default username' README.md || fail "README missing no-default-username"
 grep -qF 'does **not**:' README.md || fail "README missing zero-touch negatives"
 pass "ZERO_TOUCH_DOCS"
 
@@ -55,7 +57,21 @@ grep -q 'ROCKY_9_SELINUX_ENFORCING=NOT_TESTED' docs/RELEASE_VALIDATION.md || fai
 if grep -nE 'fully supported on Rocky 9 SELinux Enforcing' README.md; then
   fail "README overclaims Rocky SELinux"
 fi
+# Checklist must not treat untested real gates as mandatory checkbox requirements.
+if grep -nE '^- \[ \] Rocky Linux 9 (real VM|SELinux)|^- \[ \] AlmaLinux 9 (real VM|SELinux)|^- \[ \] Amazon Linux|^- \[ \] Native ARM64|^- \[ \] Real OpenSSL 1\.0\.2' docs/RELEASE_CHECKLIST.md; then
+  fail "checklist still lists untested real gates as mandatory checkboxes"
+fi
+grep -q 'authoritative' docs/RELEASE_CHECKLIST.md || fail "checklist missing authoritative pointer"
+grep -q 'Authoritative classification' docs/RELEASE_CHECKLIST.md || fail "checklist missing classification pointer"
+grep -q 'authoritative' docs/RELEASE_VALIDATION.md || fail "validation missing authoritative wording"
 pass "SUPPORT_CLAIM_ALIGNMENT"
+
+if grep -nE 'hashed/wrapped server-side' docs/SECURITY.md; then
+  fail "SECURITY.md still claims enrollment secret is hashed/wrapped"
+fi
+grep -q 'not hashed or wrapped at rest' docs/SECURITY.md || fail "SECURITY.md missing enrollment secret storage accuracy"
+grep -q 'BOOTSTRAP_TICKET_USED' docs/SECURITY.md || fail "SECURITY.md missing post-success ticket reuse class"
+pass "SECURITY_DOC_SECRET_ACCURACY"
 
 if grep -nE "curl[[:space:]]+[^|]*--cacert[[:space:]]+/tmp/" README.md docs/*.md examples/*.md 2>/dev/null; then
   fail "docs use --cacert with a /tmp CA path that may not exist"
@@ -105,7 +121,14 @@ grep -qF 'current stable release' README.md || fail "README missing stable wordi
 grep -qE '^## 2\.1\.0 — ' CHANGELOG.md || fail "CHANGELOG missing 2.1.0 heading"
 pass "VERSION_STABLE_WORDING"
 
-grep -q 'REAL_WSS_E2E=PASS' docs/RELEASE_VALIDATION.md || fail "missing REAL_WSS_E2E evidence"
+grep -qF 'v2.1.0/dist/bootstrap-server.sh' README.md || fail "README missing immutable server bootstrap URL"
+if grep -nE 'raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-(server|client)\.sh' \
+  README.md docs/SCHEMA_V2_DEPLOYMENT.md docs/DEPLOYMENT_MODES.md GITHUB_SETUP.md; then
+  fail "stable docs still point bootstrap installs at mutable main"
+fi
+grep -q 'FRP_RELEASE_CHANNEL=dev' README.md || fail "README missing opt-in dev channel note"
+pass "IMMUTABLE_RELEASE_URLS_IN_DOCS"
+
 grep -q 'REAL_ENTERPRISE_RESTRICTED_NETWORK_E2E=PASS' docs/RELEASE_VALIDATION.md || fail "missing enterprise-network evidence"
 grep -q 'REAL_SSH_SERVICE_E2E=PASS' docs/RELEASE_VALIDATION.md || fail "missing SSH E2E evidence"
 grep -q 'REAL_END_TO_END_REBOOT_RECOVERY=PASS' docs/RELEASE_VALIDATION.md || fail "missing reboot-recovery evidence"

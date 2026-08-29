@@ -22,6 +22,82 @@ if [[ -f "${_FRP_COMMON_DIR}/../VERSION" ]]; then
   . "${_FRP_COMMON_DIR}/../VERSION"
 fi
 
+FRP_GITHUB_OWNER="${FRP_GITHUB_OWNER:-datarelay-labs}"
+FRP_GITHUB_REPO="${FRP_GITHUB_REPO:-frp-auto-deploy}"
+FRP_GITHUB_RAW_HOST="${FRP_GITHUB_RAW_HOST:-raw.githubusercontent.com}"
+
+frp_release_channel() {
+  local ch
+  ch="$(printf '%s' "${FRP_RELEASE_CHANNEL:-stable}" | tr '[:upper:]' '[:lower:]')"
+  case "$ch" in
+    dev|main|development) printf 'dev' ;;
+    *) printf 'stable' ;;
+  esac
+}
+
+frp_release_git_ref() {
+  if [[ "$(frp_release_channel)" == "dev" ]]; then
+    printf 'main'
+  else
+    printf 'v%s' "${PROJECT_VERSION}"
+  fi
+}
+
+frp_github_raw_url() {
+  local rel="${1:-}"
+  rel="${rel#/}"
+  printf 'https://%s/%s/%s/%s/%s' \
+    "$FRP_GITHUB_RAW_HOST" "$FRP_GITHUB_OWNER" "$FRP_GITHUB_REPO" \
+    "$(frp_release_git_ref)" "$rel"
+}
+
+frp_default_client_installer_url() {
+  frp_github_raw_url dist/bootstrap-client.sh
+}
+
+frp_default_client_update_url() {
+  frp_github_raw_url dist/bootstrap-client.sh
+}
+
+frp_is_official_main_installer_url() {
+  local url="${1:-}"
+  [[ "$url" == "https://${FRP_GITHUB_RAW_HOST}/${FRP_GITHUB_OWNER}/${FRP_GITHUB_REPO}/main/dist/bootstrap-client.sh" ]]
+}
+
+frp_release_manifest_path() {
+  if [[ -n "${FRP_RELEASE_MANIFEST:-}" && -f "${FRP_RELEASE_MANIFEST}" ]]; then
+    printf '%s' "$FRP_RELEASE_MANIFEST"
+    return 0
+  fi
+  if [[ -f "${_FRP_COMMON_DIR}/../release-manifest.json" ]]; then
+    printf '%s' "${_FRP_COMMON_DIR}/../release-manifest.json"
+    return 0
+  fi
+  if [[ -f /usr/local/lib/frp-auto-deploy/release-manifest.json ]]; then
+    printf '%s' /usr/local/lib/frp-auto-deploy/release-manifest.json
+    return 0
+  fi
+  return 1
+}
+
+frp_release_artifact_sha256() {
+  local name="${1:-bootstrap-client.sh}" path
+  path="$(frp_release_manifest_path)" || return 1
+  python3 - "$path" "$name" <<'PY'
+import json, sys
+path, name = sys.argv[1], sys.argv[2]
+try:
+    data = json.loads(open(path, encoding='utf-8').read())
+except Exception:
+    raise SystemExit(1)
+art = (data.get('artifacts') or {}).get(name) or {}
+digest = str(art.get('sha256') or '').strip().lower()
+if len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):
+    raise SystemExit(1)
+print(digest)
+PY
+}
+
 FRP_TEST_HARNESS_MAGIC="frp-auto-deploy-test-harness"
 
 frp_test_harness_enabled() {

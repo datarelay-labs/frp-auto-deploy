@@ -18,7 +18,7 @@ reset_env() {
     FRP_SERVER_CONFIG DETECTED_PUBLIC_IP DETECTED_INTERNAL_IP \
     CLIENT_INSTALLER_URL FRP_DEPLOYMENT_MODE FRP_CONFIRM_MODE_SWITCH \
     FRP_LISTEN_HOST FRP_CONTROL_BIND_ADDR FRP_TRANSPORT FRP_MODE_SWITCH \
-    EXISTING_DEPLOYMENT_MODE EXISTING_SERVER_CONFIG || true
+    EXISTING_DEPLOYMENT_MODE EXISTING_SERVER_CONFIG FRP_RELEASE_CHANNEL || true
 }
 
 reset_env
@@ -209,7 +209,9 @@ pass "explicit env overrides existing config"
 legacy_owner='RickLee-kr'
 legacy_repo='frp-auto-deploy'
 LEGACY_INSTALLER_URL="https://raw.githubusercontent.com/${legacy_owner}/${legacy_repo}/main/dist/bootstrap-client.sh"
-CANONICAL_INSTALLER_URL='https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh'
+# Stable releases must pin an immutable tag/commit URL, never mutable main.
+CANONICAL_INSTALLER_URL="https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v${PROJECT_VERSION}/dist/bootstrap-client.sh"
+OFFICIAL_MAIN_INSTALLER_URL='https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh'
 
 # Known obsolete project installer URL is migrated on a safe installer rerun.
 EXISTING_LEGACY="$WORKDIR/legacy-installer-url.json"
@@ -232,6 +234,30 @@ load_existing_server_config
 resolve_server_settings
 [[ "$CLIENT_INSTALLER_URL" == "$CANONICAL_INSTALLER_URL" ]] || fail "legacy installer URL not migrated"
 pass "legacy project installer URL migrated"
+
+# Official mutable-main installer URL is rewritten to the immutable stable tag.
+EXISTING_MAIN="$WORKDIR/main-installer-url.json"
+python3 - "$EXISTING_MAIN" "$OFFICIAL_MAIN_INSTALLER_URL" <<'PY'
+import json, sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps({
+  "public_ip": "203.0.113.10",
+  "control_port": 443,
+  "port_start": 6000,
+  "port_end": 6098,
+  "listen_port": 6099,
+  "allocator_public_url": "https://203.0.113.10:6099/enroll",
+  "client_installer_url": sys.argv[2],
+}, indent=2, sort_keys=True) + "\n")
+PY
+reset_env
+export FRP_RELEASE_CHANNEL=stable
+export FRP_SERVER_CONFIG="$EXISTING_MAIN"
+load_existing_server_config
+resolve_server_settings
+[[ "$CLIENT_INSTALLER_URL" == "$CANONICAL_INSTALLER_URL" ]] || fail "official main installer URL not migrated to immutable tag"
+[[ "$CLIENT_INSTALLER_URL" != *'/main/'* ]] || fail "stable channel still uses mutable main"
+pass "official main installer URL migrated to immutable tag"
 
 # Arbitrary custom installer URLs are left unchanged.
 EXISTING_CUSTOM="$WORKDIR/custom-installer-url.json"

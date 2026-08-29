@@ -342,10 +342,13 @@ def case_j_exhaustion():
             enrollment_id=eid,
             secret=secret,
         )
-        if code != 500 or 'No available FRP service ports' not in str(result.get('error', '')):
+        if code != 500 or result.get('error_class') != 'PORT_RANGE_EXHAUSTED':
             fail('CASE J exhaustion', result)
-        if result.get('error_class') != 'PORT_RANGE_EXHAUSTED':
-            fail('CASE J error_class', result)
+        if 'no free ports' not in str(result.get('error', '')).lower():
+            fail('CASE J generic message', result)
+        # Detailed exception text must stay in the server log, not the API body.
+        if 'No available FRP service ports' in str(result.get('error', '')):
+            fail('CASE J leaked internal exception text', result)
         after = env.load_state()
         if after != before:
             fail('CASE J registry mutated')

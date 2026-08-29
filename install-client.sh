@@ -261,7 +261,7 @@ frp_client_existing_install_message() {
   echo "  sudo frpctl update" >&2
   echo >&2
   echo "or, from the bootstrap bundle:" >&2
-  echo "  curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh | sudo bash -s -- --upgrade" >&2
+  echo "  curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/bootstrap-client.sh | sudo bash -s -- --upgrade" >&2
   echo >&2
   echo "Use sudo frp-client to change published services." >&2
   echo "An Enrollment Code is only for first install or trust recovery." >&2
@@ -452,7 +452,14 @@ frp_client_main() {
 
   if [[ "${FRP_SKIP_SYSTEMD:-}" != "1" && -z "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
     echo "Installing systemd service ..."
-    cat >/etc/systemd/system/frpc.service <<'EOF2'
+    UNIT_SRC=""
+    if [[ -f "${_FRP_INSTALL_CLIENT_DIR}/client/frpc.service" ]]; then
+      UNIT_SRC="${_FRP_INSTALL_CLIENT_DIR}/client/frpc.service"
+    fi
+    if [[ -n "$UNIT_SRC" ]]; then
+      install -m 0644 "$UNIT_SRC" /etc/systemd/system/frpc.service
+    else
+      cat >/etc/systemd/system/frpc.service <<'EOF2'
 [Unit]
 Description=FRP Client
 After=network-online.target
@@ -467,6 +474,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF2
+    fi
     echo "Starting FRP client ..."
     systemctl daemon-reload || {
       frp_emit_failure_class SYSTEMD_RELOAD_FAILED

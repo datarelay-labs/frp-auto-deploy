@@ -17,8 +17,10 @@ for f in \
   "$BASE_DIR/lib/frp_mgmt_auth.py" \
   "$BASE_DIR/lib/frp_pki.py" \
   "$BASE_DIR/lib/frp_frontend.py" \
+  "$BASE_DIR/lib/frp_install_txn.py" \
   "$BASE_DIR/lib/frp-doctor-common.sh" \
   "$BASE_DIR/lib/frp_doctor.py" \
+  "$BASE_DIR/release-manifest.json" \
   "$BASE_DIR/tools/frp-create-client" \
   "$BASE_DIR/tools/frp-clients" \
   "$BASE_DIR/tools/frp-client-info" \
@@ -32,7 +34,7 @@ for f in \
   [[ -f "$f" ]] || { echo "ERROR: missing project file: $f" >&2; exit 1; }
 done
 
-DEFAULT_CLIENT_INSTALLER_URL="https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh"
+DEFAULT_CLIENT_INSTALLER_URL="$(frp_default_client_installer_url)"
 # Historical owner/repo, concatenated only to recognize the obsolete project URL.
 LEGACY_CLIENT_INSTALLER_OWNER='RickLee-kr'
 LEGACY_CLIENT_INSTALLER_REPO='frp-auto-deploy'
@@ -46,7 +48,12 @@ frp_migrate_legacy_client_installer_url() {
   local legacy
   legacy="$(frp_legacy_client_installer_url)"
   if [[ "${CLIENT_INSTALLER_URL:-}" == "$legacy" ]]; then
-    CLIENT_INSTALLER_URL="$DEFAULT_CLIENT_INSTALLER_URL"
+    CLIENT_INSTALLER_URL="$(frp_default_client_installer_url)"
+  fi
+  if [[ -z "${FRP_CLIENT_INSTALLER_URL:-}" ]] && \
+     [[ "$(frp_release_channel)" == "stable" ]] && \
+     frp_is_official_main_installer_url "${CLIENT_INSTALLER_URL:-}"; then
+    CLIENT_INSTALLER_URL="$(frp_default_client_installer_url)"
   fi
 }
 
@@ -968,7 +975,7 @@ write_server_config() {
     "$FRP_ALLOCATOR_PUBLIC_URL" \
     "$CLIENT_INSTALLER_URL" \
     "$pki" <<'PY'
-import json, os, sys
+import json, os, sys, tempfile
 from pathlib import Path
 path = Path(sys.argv[1])
 pki = sys.argv[11]
@@ -998,7 +1005,22 @@ cfg = {
     'tls_server_cert': pki.rstrip('/') + '/server.crt',
     'tls_server_key': pki.rstrip('/') + '/server.key',
 }
-path.write_text(json.dumps(cfg, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+payload = json.dumps(cfg, indent=2, sort_keys=True) + '\n'
+path.parent.mkdir(parents=True, exist_ok=True)
+fd, tmp = tempfile.mkstemp(prefix=path.name + '.', suffix='.tmp', dir=str(path.parent))
+try:
+    with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+finally:
+    if os.path.exists(tmp):
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 PY
   chmod 600 "$path"
 }
@@ -1057,7 +1079,7 @@ write_frontend_config() {
     --server-cert "${pki}/server.crt" \
     --server-key "${pki}/server.key" \
     --pid-path "${run_dir}/nginx.pid" \
-    --error-log "${log_dir}/frontend.error.log" \
+    --error-log stderr \
     --temp-root "$temp_root"
 }
 
@@ -1128,12 +1150,139 @@ frp_server_restore_frps_backup() {
   chmod 600 "$dest"
 }
 
+frp_server_lock_path() {
+  frp_server_fs /var/lib/frp-auto-deploy/server-lifecycle.lock
+}
+
+frp_acquire_server_lock() {
+  local lock pid
+  # Fixture installs run sequentially in one shell; skip host flock there.
+  if frp_server_test_mode; then
+    return 0
+  fi
+  lock="$(frp_server_lock_path)"
+  mkdir -p "$(dirname "$lock")"
+  if command -v flock >/dev/null 2>&1; then
+    if [[ -z "${FRP_SERVER_LOCK_FD:-}" ]]; then
+      exec {FRP_SERVER_LOCK_FD}>>"$lock"
+    fi
+    if ! flock -n "$FRP_SERVER_LOCK_FD"; then
+      echo "ERROR: another server install or lifecycle operation is already running." >&2
+      exec {FRP_SERVER_LOCK_FD}>&-
+      unset FRP_SERVER_LOCK_FD
+      return 1
+    fi
+    printf '%s\n' "$$" >"${lock}.pid"
+    chmod 600 "$lock" 2>/dev/null || true
+    return 0
+  fi
+  # Stale mkdir lock from a dead PID must not block forever.
+  if [[ -d "${lock}.dir" ]]; then
+    pid="$(cat "${lock}.dir/pid" 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then
+      rm -rf "${lock}.dir"
+    fi
+  fi
+  if ! mkdir "${lock}.dir" 2>/dev/null; then
+    echo "ERROR: another server install or lifecycle operation is already running." >&2
+    return 1
+  fi
+  printf '%s\n' "$$" >"${lock}.dir/pid"
+  return 0
+}
+
+frp_release_server_lock() {
+  local lock
+  if frp_server_test_mode; then
+    return 0
+  fi
+  lock="$(frp_server_lock_path)"
+  if [[ -n "${FRP_SERVER_LOCK_FD:-}" ]]; then
+    flock -u "$FRP_SERVER_LOCK_FD" 2>/dev/null || true
+    exec {FRP_SERVER_LOCK_FD}>&- 2>/dev/null || true
+    unset FRP_SERVER_LOCK_FD
+    rm -f "${lock}.pid"
+  fi
+  rm -rf "${lock}.dir"
+}
+
+frp_server_lock_return_trap() {
+  # bash RETURN traps fire for every nested function; only unlock when
+  # frp_server_main itself is returning.
+  if [[ "${FUNCNAME[0]:-}" == "frp_server_main" ]]; then
+    frp_release_server_lock
+  fi
+}
+
+frp_server_snapshot_root() {
+  printf '%s' "${FRP_SERVER_TEST_ROOT:-/}"
+}
+
+frp_server_create_snapshot() {
+  local dest="$1" py
+  py="$BASE_DIR/lib/frp_install_txn.py"
+  mkdir -p "$dest"
+  chmod 700 "$dest"
+  python3 "$py" snapshot --root "$(frp_server_snapshot_root)" --dest "$dest"
+}
+
+frp_server_rollback_snapshot() {
+  local dest="${FRP_INSTALL_SNAPSHOT:-}" py
+  [[ -n "$dest" && -d "$dest" ]] || return 0
+  py="$BASE_DIR/lib/frp_install_txn.py"
+  if [[ ! -f "$py" ]]; then
+    py="$(frp_server_fs /usr/local/lib/frp-auto-deploy/frp_install_txn.py)"
+  fi
+  if frp_server_skip_systemd || frp_server_test_mode; then
+    python3 "$py" restore --root "$(frp_server_snapshot_root)" --dest "$dest" || true
+  else
+    python3 "$py" restore --root "$(frp_server_snapshot_root)" --dest "$dest" --apply-services || true
+  fi
+}
+
+frp_server_fail_after_mutation() {
+  local class="$1"
+  shift
+  echo "ERROR: $*" >&2
+  frp_server_rollback_snapshot
+  frp_emit_failure_class "$class"
+  frp_txn_clear
+  frp_server_end_tmp
+  return 1
+}
+
+frp_verify_frontend_proxy_health() {
+  local py ca expected
+  if [[ "${FRP_INSTALL_HOOK_FRONTEND_PROXY_FAIL:-}" == "1" ]]; then
+    echo "ERROR: simulated frontend proxy verification failure" >&2
+    return 1
+  fi
+  if frp_server_skip_systemd; then
+    return 0
+  fi
+  py="$BASE_DIR/lib/frp_frontend.py"
+  if [[ ! -f "$py" ]]; then
+    py="$(frp_server_fs /usr/local/lib/frp-auto-deploy/frp_frontend.py)"
+  fi
+  ca="$(frp_pki_dir)/ca.crt"
+  expected="${CA_FINGERPRINT:-}"
+  python3 "$py" --verify-proxy \
+    --public-host "$FRP_PUBLIC_HOST" \
+    --frontend-port "$FRP_CONTROL_PUBLIC_PORT" \
+    --ca-cert "$ca" \
+    --expected-fingerprint "$expected"
+}
+
 frp_server_health_frontend() {
   if [[ "${FRP_INSTALL_HOOK_HEALTH_FAIL:-}" == "1" ]]; then
     echo "ERROR: simulated health check failure" >&2
     return 1
   fi
   frp_frontend_validate_config || return 1
+  if ! frp_verify_frontend_proxy_health; then
+    echo "ERROR: verified frontend proxy health check failed" >&2
+    return 1
+  fi
   if frp_server_skip_systemd; then
     return 0
   fi
@@ -1408,6 +1557,10 @@ frp_server_main() {
     echo "ERROR: run with sudo" >&2
     return 1
   fi
+  if ! frp_acquire_server_lock; then
+    return 1
+  fi
+  trap 'frp_server_lock_return_trap' RETURN
 
   frp_server_prepare_host
 
@@ -1489,10 +1642,14 @@ frp_server_main() {
   # this preserves ports such as 6000/6001 already used by unmanaged clients.
   ACTIVE_PORTS="$(frp_listening_tcp_ports_in_range "$FRP_PORT_START" "$FRP_PORT_END")"
 
+  FRP_INSTALL_SNAPSHOT="${backups_dir}/pre-install-snapshot"
+  frp_server_create_snapshot "$FRP_INSTALL_SNAPSHOT"
+
   frp_server_begin_tmp
   frp_txn_write install commit "${previous_project}" "${PROJECT_VERSION}"
 
   if ! frp_server_install_frp_binary; then
+    frp_server_rollback_snapshot
     frp_txn_clear
     frp_server_end_tmp
     return 1
@@ -1516,7 +1673,7 @@ frp_server_main() {
         ;;
     esac
   done <<< "$migrate_out"
-  [[ -s "$token_file" ]] || { echo "ERROR: FRP server token is missing after migration" >&2; frp_emit_failure_class FILE_COMMIT_FAILED; frp_server_end_tmp; return 1; }
+  [[ -s "$token_file" ]] || { frp_server_fail_after_mutation FILE_COMMIT_FAILED "FRP server token is missing after migration"; return 1; }
   chmod 600 "$token_file"
 
   toml_backup=""
@@ -1528,13 +1685,7 @@ frp_server_main() {
 
   write_frps_toml "$frps_toml"
   "$(frp_server_fs /usr/local/bin/frps)" verify -c "$frps_toml" || {
-    echo "ERROR: generated frps.toml failed verification" >&2
-    if [[ -n "$toml_backup" && -f "$toml_backup" ]]; then
-      cp "$toml_backup" "$frps_toml"
-      chmod 600 "$frps_toml"
-    fi
-    frp_emit_failure_class STAGING_FAILED
-    frp_server_end_tmp
+    frp_server_fail_after_mutation STAGING_FAILED "generated frps.toml failed verification"
     return 1
   }
 
@@ -1549,7 +1700,7 @@ frp_server_main() {
         ;;
     esac
   done <<< "$pki_out"
-  [[ -n "$CA_FINGERPRINT" ]] || { echo "ERROR: allocator CA fingerprint is missing" >&2; frp_emit_failure_class FILE_COMMIT_FAILED; frp_server_end_tmp; return 1; }
+  [[ -n "$CA_FINGERPRINT" ]] || { frp_server_fail_after_mutation FILE_COMMIT_FAILED "allocator CA fingerprint is missing"; return 1; }
 
   REGISTRY_ACTION=""
   MIGRATED_CLIENTS="0"
@@ -1567,7 +1718,7 @@ frp_server_main() {
         ;;
     esac
   done <<< "$registry_out"
-  [[ -f "$registry_file" ]] || { echo "ERROR: registry.json is missing" >&2; frp_emit_failure_class FILE_COMMIT_FAILED; frp_server_end_tmp; return 1; }
+  [[ -f "$registry_file" ]] || { frp_server_fail_after_mutation FILE_COMMIT_FAILED "registry.json is missing"; return 1; }
   chmod 600 "$registry_file"
 
   install -m 0700 "$BASE_DIR/server/frp-port-allocator.py" "${lib_dir}/frp-port-allocator.py"
@@ -1577,6 +1728,11 @@ frp_server_main() {
   install -m 0644 "$BASE_DIR/lib/frp-common.sh" "${lib_dir}/frp-common.sh"
   install -m 0644 "$BASE_DIR/lib/frp-doctor-common.sh" "${lib_dir}/frp-doctor-common.sh"
   install -m 0644 "$BASE_DIR/lib/frp_doctor.py" "${lib_dir}/frp_doctor.py"
+  install -m 0644 "$BASE_DIR/lib/frp_install_txn.py" "${lib_dir}/frp_install_txn.py"
+  install -m 0644 "$BASE_DIR/release-manifest.json" "${lib_dir}/release-manifest.json"
+  if [[ -f "$BASE_DIR/SHA256SUMS" ]]; then
+    install -m 0644 "$BASE_DIR/SHA256SUMS" "${lib_dir}/SHA256SUMS"
+  fi
   install -m 0644 "$BASE_DIR/server/frps.service" "$unit_frps"
   frp_write_compatible_systemd_unit \
     "$BASE_DIR/server/frp-port-allocator.service" \
@@ -1639,8 +1795,7 @@ frp_server_main() {
 
   if ! frp_server_skip_systemd; then
     systemctl daemon-reload || {
-      frp_emit_failure_class SYSTEMD_RELOAD_FAILED
-      frp_server_end_tmp
+      frp_server_fail_after_mutation SYSTEMD_RELOAD_FAILED "systemd daemon-reload failed"
       return 1
     }
   else
@@ -1648,79 +1803,51 @@ frp_server_main() {
   fi
 
   if ! frp_server_enable_units; then
-    frp_emit_failure_class SYSTEMD_ENABLE_FAILED
-    echo "ERROR: systemd enable failed; installation is not complete." >&2
-    frp_server_end_tmp
+    frp_server_fail_after_mutation SYSTEMD_ENABLE_FAILED "systemd enable failed; installation is not complete."
     return 1
   fi
 
   if frp_mode_is_single443; then
     if ! frp_frontend_validate_config; then
-      echo "ERROR: frontend configuration is invalid; FRP listeners were not restarted." >&2
-      frp_server_restore_frps_backup "${toml_backup:-}" "$frps_toml"
-      frp_emit_failure_class STAGING_FAILED
-      frp_server_end_tmp
+      frp_server_fail_after_mutation STAGING_FAILED "frontend configuration is invalid; FRP listeners were not restarted."
       return 1
     fi
   fi
 
   if [[ "$need_frps_restart" == "1" ]]; then
     if ! frp_server_restart_unit frps; then
-      frp_emit_failure_class SERVICE_START_FAILED
-      echo "ERROR: frps failed to start; installation is not complete." >&2
-      frp_server_restore_frps_backup "${toml_backup:-}" "$frps_toml"
-      frp_server_end_tmp
+      frp_server_fail_after_mutation SERVICE_START_FAILED "frps failed to start; installation is not complete."
       return 1
     fi
   fi
   if [[ "$need_alloc_restart" == "1" ]]; then
     if ! frp_server_restart_unit frp-port-allocator; then
-      frp_emit_failure_class SERVICE_START_FAILED
-      echo "ERROR: frp-port-allocator failed to start; restoring previous FRP control config if available." >&2
-      frp_server_restore_frps_backup "${toml_backup:-}" "$frps_toml"
-      frp_server_restart_unit frps || true
-      frp_server_end_tmp
+      frp_server_fail_after_mutation SERVICE_START_FAILED "frp-port-allocator failed to start; previous semantic configuration restored."
       return 1
     fi
   fi
   if [[ "$need_frontend_restart" == "1" ]]; then
     if ! frp_server_restart_unit frp-frontend; then
-      echo "ERROR: frp-frontend failed to start; restoring previous FRP control config if available." >&2
-      frp_server_restore_frps_backup "${toml_backup:-}" "$frps_toml"
-      frp_server_restart_unit frps || true
-      frp_emit_failure_class SERVICE_START_FAILED
-      frp_server_end_tmp
+      frp_server_fail_after_mutation SERVICE_START_FAILED "frp-frontend failed to start; previous semantic configuration restored."
       return 1
     fi
   fi
 
   if [[ "$need_frps_restart" == "1" ]] || [[ "$existing_install" != "1" ]]; then
     if ! frp_server_health_frps; then
-      echo "ERROR: frps health check failed; restoring previous FRP control config if available." >&2
-      frp_server_restore_frps_backup "${toml_backup:-}" "$frps_toml"
-      frp_server_restart_unit frps || true
-      frp_emit_failure_class HEALTH_CHECK_FAILED
-      frp_server_end_tmp
+      frp_server_fail_after_mutation HEALTH_CHECK_FAILED "frps health check failed; previous semantic configuration restored."
       return 1
     fi
   fi
   if [[ "$need_alloc_restart" == "1" ]] || [[ "$existing_install" != "1" ]]; then
     if ! frp_server_health_allocator "$FRP_ALLOCATOR_LISTEN_PORT"; then
-      echo "ERROR: allocator health check failed; restoring previous FRP control config if available." >&2
-      frp_server_restore_frps_backup "${toml_backup:-}" "$frps_toml"
-      frp_server_restart_unit frps || true
-      frp_emit_failure_class HEALTH_CHECK_FAILED
-      frp_server_end_tmp
+      frp_server_fail_after_mutation HEALTH_CHECK_FAILED "allocator health check failed; previous semantic configuration restored."
       return 1
     fi
   fi
-  if frp_mode_is_single443 && { [[ "$need_frontend_restart" == "1" ]] || [[ "$existing_install" != "1" ]]; }; then
+  if frp_mode_is_single443; then
     if ! frp_server_health_frontend; then
-      echo "ERROR: frontend health check failed; restoring previous FRP control config if available." >&2
-      frp_server_restore_frps_backup "${toml_backup:-}" "$frps_toml"
-      frp_server_restart_unit frps || true
-      frp_emit_failure_class HEALTH_CHECK_FAILED
-      frp_server_end_tmp
+      frp_server_fail_after_mutation HEALTH_CHECK_FAILED "verified frontend proxy health check failed; previous semantic configuration restored."
       return 1
     fi
   fi
@@ -1730,6 +1857,7 @@ frp_server_main() {
   frp_txn_clear
   frp_prune_backup_dirs "$backups_dir" "$FRP_BACKUP_KEEP"
   frp_server_end_tmp
+  FRP_INSTALL_SNAPSHOT=""
 
   cat <<EOF2
 

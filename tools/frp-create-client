@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import re
 import secrets
 import shlex
 import sys
@@ -157,6 +158,13 @@ def write_enrollment(enroll_dir, enrollment_id, secret, ttl, note):
     return record, path
 
 
+SSH_USER_RE = re.compile(r'[A-Za-z0-9._@-]{1,32}')
+NONINTERACTIVE_SSH_USER_ERROR = (
+    '--ssh-user is required for non-interactive zero-touch SSH creation.'
+)
+_TEST_INPUT_LINES = None
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
         description='Create a short-lived FRP client enrollment code',
@@ -164,7 +172,8 @@ def parse_args(argv=None):
         epilog=(
             'examples:\n'
             '  sudo frp-create-client\n'
-            '  sudo frp-create-client --one-line --ssh --ssh-user ubuntu --note customer-01\n'
+            '  sudo frp-create-client --one-line --ssh --note client-01\n'
+            '  sudo frp-create-client --one-line --ssh --ssh-user aella --note customer-01\n'
         ),
     )
     p.add_argument('--ttl', type=int, default=600, help='TTL in seconds (default 600)')
@@ -183,7 +192,10 @@ def parse_args(argv=None):
         '--ssh-user',
         default='',
         metavar='USER',
-        help='SSH username (connection-info metadata and zero-touch preflight)',
+        help=(
+            'SSH login account that already exists on the client '
+            '(required when stdin is not a TTY; no distro default)'
+        ),
     )
     p.add_argument(
         '--ssh-port',
@@ -232,10 +244,113 @@ def first_ssh_preflight(services):
             continue
         if str(item.get('preset') or '').strip().lower() != 'ssh':
             continue
-        user = str(item.get('ssh_user') or 'root').strip() or 'root'
+        user = str(item.get('ssh_user') or '').strip()
         port = coerce_port(item.get('local_port')) or 22
         return user, port
     return '', 22
+
+
+def is_interactive_stdin():
+    if 'FRP_CREATE_CLIENT_TEST_INPUT' in os.environ:
+        return True
+    try:
+        return sys.stdin.isatty()
+    except Exception:
+        return False
+
+
+def test_input_lines():
+    global _TEST_INPUT_LINES
+    if _TEST_INPUT_LINES is None:
+        raw = os.environ.get('FRP_CREATE_CLIENT_TEST_INPUT')
+        if raw is None:
+            _TEST_INPUT_LINES = False
+        else:
+            _TEST_INPUT_LINES = iter(raw.splitlines())
+    return _TEST_INPUT_LINES
+
+
+def read_prompt(prompt):
+    lines = test_input_lines()
+    if lines is not False:
+        sys.stdout.write(prompt)
+        sys.stdout.flush()
+        try:
+            value = next(lines)
+        except StopIteration:
+            fail('required interactive input was not completed')
+        sys.stdout.write(value + '\n')
+        sys.stdout.flush()
+        return value
+    try:
+        return input(prompt)
+    except EOFError:
+        fail('required interactive input was not completed')
+
+
+def normalize_ssh_user(raw):
+    if raw is None:
+        return ''
+    return str(raw).strip()
+
+
+def validate_prompt_ssh_user(raw):
+    user = normalize_ssh_user(raw)
+    if not user:
+        return '', 'SSH username cannot be blank.'
+    if any(ord(c) < 32 for c in user):
+        return '', 'SSH username must not contain control characters or newlines'
+    if not SSH_USER_RE.fullmatch(user):
+        return '', 'invalid ssh_user'
+    return user, ''
+
+
+def prompt_zero_touch_ssh(existing_user, existing_port, port_explicit):
+    print()
+    print('SSH service setup')
+    print('=================')
+    print()
+    print('Enter the SSH login account that already exists on the client machine.')
+    print()
+
+    user = normalize_ssh_user(existing_user)
+    if not user:
+        while True:
+            entered = read_prompt('Client SSH user: ')
+            user, err = validate_prompt_ssh_user(entered)
+            if user:
+                break
+            sys.stderr.write('ERROR: %s\n' % err)
+
+    port = existing_port
+    if not port_explicit:
+        while True:
+            entered = normalize_ssh_user(read_prompt('SSH port [22]: '))
+            if not entered:
+                port = 22
+                break
+            port = coerce_port(entered)
+            if port is not None:
+                break
+            sys.stderr.write('ERROR: invalid SSH port; must be an integer 1-65535\n')
+
+    print()
+    print('Client configuration')
+    print('--------------------')
+    print('SSH user : %s' % user)
+    print('SSH port : %s' % port)
+    print('Target   : 127.0.0.1:%s' % port)
+    print()
+    return user, port
+
+
+def resolve_zero_touch_ssh(ssh_user, ssh_port, port_explicit):
+    ssh_user = normalize_ssh_user(ssh_user)
+    if ssh_user:
+        return ssh_user, ssh_port
+    if is_interactive_stdin():
+        return prompt_zero_touch_ssh('', ssh_port, port_explicit)
+    fail(NONINTERACTIVE_SSH_USER_ERROR)
 
 
 def print_manual(cfg, record, ttl, public_host, control_public, allocator, ca_fp, installer):
@@ -276,7 +391,7 @@ def print_manual(cfg, record, ttl, public_host, control_public, allocator, ca_fp
         print('Set the client installer URL, then re-run this command:')
         print(
             '  sudo frp-set-client-installer-url '
-            'https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh'
+            'https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/bootstrap-client.sh'
         )
         if not allocator:
             print()
@@ -337,10 +452,12 @@ def main(argv=None):
         fail('--ssh and --services-file require --one-line')
 
     ssh_port = 22
-    if a.ssh_port is not None:
+    port_explicit = a.ssh_port is not None
+    if port_explicit:
         ssh_port = coerce_port(a.ssh_port)
         if ssh_port is None:
             fail('invalid --ssh-port; must be an integer 1-65535')
+    ssh_user = normalize_ssh_user(a.ssh_user)
 
     cfg = json.loads(Path(CONFIG).read_text())
     enroll_dir = remap(cfg['enrollments_dir'])
@@ -360,7 +477,7 @@ def main(argv=None):
     reject_control_chars('--note', a.note)
     reject_control_chars('allocator public URL', allocator)
     reject_control_chars('client installer URL', installer)
-    reject_control_chars('--ssh-user', a.ssh_user)
+    reject_control_chars('--ssh-user', ssh_user)
 
     if not a.one_line:
         enrollment_id = secrets.token_hex(8)
@@ -371,8 +488,8 @@ def main(argv=None):
 
     if not a.ssh and not a.services_file:
         fail('--one-line requires --ssh or --services-file')
-    if a.ssh and not str(a.ssh_user or '').strip():
-        fail('--ssh requires --ssh-user')
+    if a.ssh and not ssh_user and not is_interactive_stdin():
+        fail(NONINTERACTIVE_SSH_USER_ERROR)
 
     if not installer:
         fail(
@@ -391,7 +508,9 @@ def main(argv=None):
         fail('allocator module is missing')
 
     if a.ssh:
-        raw_services = [ssh_service(str(a.ssh_user).strip(), ssh_port)]
+        ssh_user, ssh_port = resolve_zero_touch_ssh(ssh_user, ssh_port, port_explicit)
+        reject_control_chars('--ssh-user', ssh_user)
+        raw_services = [ssh_service(ssh_user, ssh_port)]
     else:
         raw_services = load_services_file(a.services_file)
 

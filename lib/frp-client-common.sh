@@ -10,7 +10,6 @@ FRP_CLIENT_COMMON_LOADED=1
 FRP_CLIENT_STATE_SCHEMA=1
 FRP_CLIENT_BACKUP_KEEP="${FRP_CLIENT_BACKUP_KEEP:-5}"
 FRP_CLIENT_UPGRADE_BACKUP_KEEP="${FRP_CLIENT_UPGRADE_BACKUP_KEEP:-5}"
-FRP_CLIENT_UPDATE_URL="${FRP_CLIENT_UPDATE_URL:-https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh}"
 
 # Defaults match VERSION. A sibling VERSION file overrides project/FRP versions.
 PROJECT_VERSION="${PROJECT_VERSION:-2.1.0}"
@@ -28,6 +27,9 @@ if [[ -z "${FRP_COMMON_LOADED:-}" ]]; then
     # shellcheck disable=SC1091
     . /usr/local/lib/frp-auto-deploy/frp-common.sh
   fi
+fi
+if [[ -z "${FRP_CLIENT_UPDATE_URL:-}" ]]; then
+  FRP_CLIENT_UPDATE_URL="$(frp_default_client_update_url)"
 fi
 
 frp_client_path() {
@@ -704,7 +706,31 @@ infer_ssh_user() {
 
 probe_tcp() {
   local host="$1" port="$2"
-  timeout 3 bash -c "echo >/dev/tcp/${host}/${port}" >/dev/null 2>&1
+  # Host and port are argv, never interpolated into a shell command string.
+  python3 - "$host" "$port" <<'PY'
+import socket
+import sys
+
+host = sys.argv[1]
+port_text = sys.argv[2]
+try:
+    port = int(port_text)
+except (TypeError, ValueError):
+    raise SystemExit(1)
+if port < 1 or port > 65535:
+    raise SystemExit(1)
+if not host or any(ch in host for ch in "\r\n\x00"):
+    raise SystemExit(1)
+try:
+    sock = socket.create_connection((host, port), timeout=3)
+except Exception:
+    raise SystemExit(1)
+try:
+    sock.close()
+except Exception:
+    pass
+raise SystemExit(0)
+PY
 }
 
 maybe_warn_connectivity() {
@@ -1992,6 +2018,9 @@ PY
         ;;
       BOOTSTRAP_TICKET_BOUND)
         echo "This setup command was already used on another machine." >&2
+        ;;
+      BOOTSTRAP_TICKET_USED)
+        echo "This setup command has already completed enrollment and cannot be reused." >&2
         ;;
       BOOTSTRAP_TICKET_INVALID)
         echo "The one-time setup command is not valid." >&2
@@ -3396,6 +3425,39 @@ PY
   return 0
 }
 
+frp_verify_client_update_artifact() {
+  local archive="$1"
+  local expected="" sums_file=""
+  expected="${FRP_CLIENT_UPDATE_SHA256:-}"
+  if [[ -z "$expected" ]]; then
+    expected="$(frp_release_artifact_sha256 bootstrap-client.sh 2>/dev/null || true)"
+  fi
+  if [[ -z "$expected" ]]; then
+    sums_file="${FRP_RELEASE_SHA256SUMS_FILE:-}"
+    if [[ -z "$sums_file" ]]; then
+      if [[ -f "${_FRP_CLIENT_COMMON_DIR}/../SHA256SUMS" ]]; then
+        sums_file="${_FRP_CLIENT_COMMON_DIR}/../SHA256SUMS"
+      elif [[ -f /usr/local/lib/frp-auto-deploy/SHA256SUMS ]]; then
+        sums_file=/usr/local/lib/frp-auto-deploy/SHA256SUMS
+      fi
+    fi
+    if [[ -n "$sums_file" && -f "$sums_file" ]]; then
+      expected="$(awk '$2=="dist/bootstrap-client.sh" {print $1; exit}' "$sums_file")"
+    fi
+  fi
+  if [[ -z "$expected" && "$(frp_release_channel)" == "stable" && -z "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
+    echo "ERROR: stable client update requires an expected SHA256 for the release artifact" >&2
+    return 1
+  fi
+  if [[ -n "$expected" ]]; then
+    frp_verify_sha256 "$expected" "$archive" >/dev/null || {
+      echo "ERROR: downloaded client update failed SHA256 verification" >&2
+      return 1
+    }
+  fi
+  return 0
+}
+
 frp_client_fetch_and_upgrade() {
   local source="${1:-}"
   local check_only="${2:-0}"
@@ -3416,10 +3478,20 @@ frp_client_fetch_and_upgrade() {
   archive="${tmp}/bootstrap-client.sh"
   trap 'rm -rf "'"$tmp"'"' RETURN
   echo "Downloading frp-auto-deploy client update bundle..."
+  case "$FRP_CLIENT_UPDATE_URL" in
+    https://?*) ;;
+    *)
+      echo "ERROR: client update URL must be HTTPS" >&2
+      return 1
+      ;;
+  esac
   curl -fL --retry 3 --connect-timeout 10 --max-time 120 -o "$archive" "$FRP_CLIENT_UPDATE_URL" || {
     echo "ERROR: failed to download the client update bundle" >&2
     return 1
   }
+  if ! frp_verify_client_update_artifact "$archive"; then
+    return 1
+  fi
   chmod 0755 "$archive"
   echo "Applying update from downloaded bundle..."
   # The bundle extracts a source tree and runs install-client.sh --upgrade.

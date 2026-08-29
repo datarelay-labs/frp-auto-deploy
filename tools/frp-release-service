@@ -138,6 +138,15 @@ try:
     services = client.get('services') or {}
     if not isinstance(services, dict) or sid not in services:
         raise SystemExit(f'ERROR: service {sid} was not found on this client')
+    svc = services[sid]
+    if not isinstance(svc, dict):
+        raise SystemExit(f'ERROR: service {sid} was not found on this client')
+    port = svc.get('remote_port')
+    # Re-check under the registry lock to close the TOCTOU window.
+    if port and active(port) and not args.force:
+        raise SystemExit(
+            f'Service {sid} appears online on port {port}. Stop publishing it first, or use --force.'
+        )
     services.pop(sid)
     if services:
         client['services'] = services

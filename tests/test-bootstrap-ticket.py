@@ -398,6 +398,60 @@ def test_enroll_reuses_existing_and_note():
         env.cleanup()
 
 
+def test_redeem_retry_before_and_after_enroll():
+    env = Env()
+    try:
+        ticket, enroll, _r = env.issue()
+        code, result = env.redeem(ticket, 'machine-a')
+        if code != 200:
+            fail('first redeem', result)
+            return
+        code2, result2 = env.redeem(ticket, 'machine-a')
+        if code2 != 200:
+            fail('same-machine retry before enroll', result2)
+            return
+        if result2.get('enrollment_code') != result.get('enrollment_code'):
+            fail('retry enrollment changed before enroll')
+            return
+        pass_('REDEEM_RETRY_BEFORE_ENROLL=PASS')
+
+        code_other, result_other = env.redeem(ticket, 'machine-b')
+        if code_other != 409 or result_other.get('error_class') != 'BOOTSTRAP_TICKET_BOUND':
+            fail('second machine before enroll', '%s %s' % (code_other, result_other))
+            return
+        pass_('SECOND_MACHINE_REJECTED=PASS')
+
+        body = json.dumps({
+            'machine_id': 'machine-a',
+            'hostname': 'host-a',
+            'services': env.ssh_services(),
+        }, separators=(',', ':')).encode()
+        ts = str(int(time.time()))
+        sig = hmac.new(
+            enroll['secret'].encode(),
+            (ts + '\n' + body.decode()).encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        ecode, eresult = env.allocator.enroll(enroll['id'], ts, sig, body)
+        if ecode != 200:
+            fail('enroll for ticket completion', eresult)
+            return
+        path = env.allocator.bootstrap_path(ticket.split('.')[1])
+        stored = json.loads(path.read_text())
+        if not stored.get('completed_at'):
+            fail('ticket not marked completed', stored)
+            return
+
+        code3, result3 = env.redeem(ticket, 'machine-a')
+        if code3 != 409 or result3.get('error_class') != 'BOOTSTRAP_TICKET_USED':
+            fail('post-success redeem', '%s %s' % (code3, result3))
+            return
+        pass_('REDEEM_AFTER_SUCCESS_REJECTED=PASS')
+        pass_('BOOTSTRAP_TICKET_USED')
+    finally:
+        env.cleanup()
+
+
 def main():
     test_issue_hashed_and_entropy()
     test_redeem_bind_and_retry()
@@ -409,6 +463,7 @@ def main():
     test_create_race()
     test_cleanup_expired()
     test_enroll_reuses_existing_and_note()
+    test_redeem_retry_before_and_after_enroll()
     if FAILED:
         print('BOOTSTRAP_TICKET_TEST=FAIL')
         return 1

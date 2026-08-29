@@ -90,7 +90,7 @@ The official bootstrap URL is unchanged:
 
 ```bash
 curl -fsSL \
-https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-server.sh \
+https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/bootstrap-server.sh \
 | sudo bash
 ```
 

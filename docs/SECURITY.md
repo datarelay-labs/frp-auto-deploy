@@ -80,6 +80,9 @@ A short-lived secret created on the server (`sudo frp-create-client`).
 - Enrollment requests/responses are HMAC-authenticated
 - The enrollment secret is not sent in the HTTPS request body
 - The FRP token is returned encrypted (AES-256-CBC / PBKDF2) over verified HTTPS
+- Server storage: root-owned mode-0600 JSON under
+  `/var/lib/frp-auto-deploy/enrollments/*.json` (secret field stored as issued;
+  not hashed or wrapped at rest in the current release)
 
 Needed again only to enroll a new client, recover a lost local identity, or
 re-establish trust after `frp-revoke-client`.
@@ -90,7 +93,10 @@ Zero-touch (`--one-line`) issues a short-lived ticket that the client redeems
 over verified HTTPS **after** CA pinning.
 
 - High-entropy secret; hashed at rest on the server
-- First-machine bound; same-machine retry is safe; a different machine is rejected
+- First-machine bound; same-machine retry is safe until enrollment completes
+- After successful enrollment the ticket is marked completed; further redeem
+  attempts fail with `BOOTSTRAP_TICKET_USED`
+- A different machine is rejected with `BOOTSTRAP_TICKET_BOUND`
 - TTL enforced
 - Not placed in the HTTP URL path/query
 - Not persisted on the client as the raw ticket
@@ -157,7 +163,7 @@ Disable is not release.
 | Item | Typical path |
 | --- | --- |
 | FRP server token | `/etc/frp/server_token` |
-| Enrollment Code secret | `/var/lib/frp-auto-deploy/enrollments/*.json` (hashed/wrapped server-side) |
+| Enrollment Code secret | `/var/lib/frp-auto-deploy/enrollments/*.json` (root-owned `0600`; secret stored as issued, not hashed/wrapped) |
 | Bootstrap Ticket while valid | `/var/lib/frp-auto-deploy/bootstrap/` (hashed at rest) |
 | Client management private key | `/etc/frp/client-identity.key` |
 | Management MAC secret | `/etc/frp/client-identity.mac` (server copy on the client record) |

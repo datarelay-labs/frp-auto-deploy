@@ -152,6 +152,10 @@ grep -qx 'DISPATCH frp-clients' "$WORKDIR/server-clients.out" || fail "clients d
 grep -qx 'DISPATCH frp-create-client' "$WORKDIR/server-create.out" || fail "create-client dispatch"
 "$CTL" enroll >"$WORKDIR/server-enroll.out"
 grep -qx 'DISPATCH frp-create-client' "$WORKDIR/server-enroll.out" || fail "enroll dispatch"
+"$CTL" enroll --one-line --ssh >"$WORKDIR/server-enroll-ssh.out"
+grep -qx 'DISPATCH frp-create-client --one-line --ssh' "$WORKDIR/server-enroll-ssh.out" \
+  || fail "enroll --one-line --ssh dispatch"
+pass "FRPCTL_ENROLL_ONE_LINE_DISPATCH"
 "$CTL" client-info customer-dp >"$WORKDIR/server-info.out"
 grep -qx 'DISPATCH frp-client-info customer-dp' "$WORKDIR/server-info.out" || fail "client-info dispatch"
 "$CTL" client customer-dp >"$WORKDIR/server-client.out"
@@ -299,6 +303,30 @@ grep -q 'DISPATCH frp-release-client dp-os-upgrade' "$WORKDIR/server-cmds.out" |
 pass "FRPCTL_REPL_SERVER_CLIENTS"
 pass "FRPCTL_REPL_SERVER_CLIENT_INFO"
 pass "FRPCTL_REPL_SERVER_ENROLL_DISPATCH"
+
+export FRP_CTL_DRY_RUN=1
+run_repl "$SERVER" "$WORKDIR/guided-enroll.out" menu 3 1 11 exit || fail "guided enroll zero-touch"
+grep -q 'Create enrollment' "$WORKDIR/guided-enroll.out" || fail "guided enroll heading"
+grep -q 'Zero-touch SSH' "$WORKDIR/guided-enroll.out" || fail "guided enroll zero-touch option"
+grep -q 'Manual Enrollment Code' "$WORKDIR/guided-enroll.out" || fail "guided enroll manual option"
+grep -q 'DISPATCH frp-create-client --one-line --ssh' "$WORKDIR/guided-enroll.out" \
+  || fail "guided enroll did not dispatch zero-touch"
+pass "FRPCTL_GUIDED_ENROLL_ZERO_TOUCH"
+
+run_repl "$SERVER" "$WORKDIR/guided-enroll-manual.out" menu 3 2 11 exit || fail "guided enroll manual"
+grep -q 'DISPATCH frp-create-client' "$WORKDIR/guided-enroll-manual.out" \
+  || fail "guided enroll manual dispatch"
+if grep -q 'DISPATCH frp-create-client --one-line' "$WORKDIR/guided-enroll-manual.out"; then
+  fail "manual enroll used zero-touch flags"
+fi
+pass "FRPCTL_GUIDED_ENROLL_MANUAL"
+
+export FRP_CTL_DRY_RUN=1
+run_repl "$SERVER" "$WORKDIR/enroll-oneline.out" "enroll --one-line --ssh" exit \
+  || fail "repl enroll --one-line --ssh"
+grep -q 'DISPATCH frp-create-client --one-line --ssh' "$WORKDIR/enroll-oneline.out" \
+  || fail "enroll --one-line --ssh dispatch"
+pass "FRPCTL_ENROLL_ONE_LINE_SSH"
 pass "FRPCTL_REPL_SERVER_REVOKE_DISPATCH"
 pass "FRPCTL_REPL_SERVER_RELEASE_SERVICE_DISPATCH"
 pass "FRPCTL_REPL_SERVER_RELEASE_CLIENT_DISPATCH"

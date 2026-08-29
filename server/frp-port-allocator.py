@@ -44,6 +44,10 @@ BOOTSTRAP_DUMMY_HASH = '0' * 64
 HEX_RE = re.compile(r'^[0-9a-f]+$')
 MACHINE_ID_MAX_LEN = 128
 HOSTNAME_MAX_LEN = 253
+# Request body already caps at 64KiB; also bound idle reads and fan-out.
+ALLOCATOR_REQUEST_TIMEOUT_SEC = 30
+ALLOCATOR_MAX_CONCURRENT = 32
+_REQUEST_SLOTS = threading.BoundedSemaphore(ALLOCATOR_MAX_CONCURRENT)
 
 
 def _load_mgmt_auth():
@@ -797,6 +801,12 @@ class Allocator:
                             'BOOTSTRAP_TICKET_EXPIRED',
                         )
 
+                    if record.get('completed_at'):
+                        return 409, api_error(
+                            'bootstrap ticket has already completed enrollment',
+                            'BOOTSTRAP_TICKET_USED',
+                        )
+
                     bound = record.get('bound_machine_id')
                     if bound and bound != machine_id:
                         return 409, api_error(
@@ -839,15 +849,22 @@ class Allocator:
                         'services': services,
                         'note': str(record.get('note') or ''),
                     }
-        except RegistrySchemaError as exc:
-            return 500, api_error(str(exc), 'REGISTRY_INVALID')
+        except RegistrySchemaError:
+            return 500, api_error(
+                'registry schema is invalid', 'REGISTRY_INVALID'
+            )
         except OSError:
             return 500, api_error(
                 'failed to persist bootstrap ticket', 'SERVER_MUTATION_FAILED'
             )
 
     def complete_bootstrap_for_enrollment(self, enrollment_id, machine_id):
-        """Record completed_at without making the ticket unrecoverable."""
+        """Mark the matching bootstrap ticket completed/consumed after enrollment.
+
+        Same-machine redeem remains allowed until this runs. After
+        completed_at is set, further redeem attempts fail with
+        BOOTSTRAP_TICKET_USED.
+        """
         if not enrollment_id:
             return
         try:
@@ -1249,15 +1266,26 @@ class Allocator:
                         )
                     response_mac_key = client.get('mgmt_mac_key') if identity_auth else None
         except RegistrySchemaError as exc:
-            return 500, api_error(str(exc), 'REGISTRY_INVALID')
+            print('allocator registry error: %s' % exc, flush=True)
+            return 500, api_error(
+                'registry schema is invalid', 'REGISTRY_INVALID'
+            )
         except PortRangeExhausted as exc:
-            return 500, api_error(str(exc), 'PORT_RANGE_EXHAUSTED')
-        except OSError:
+            print('allocator port range exhausted: %s' % exc, flush=True)
+            return 500, api_error(
+                'no free ports remain in the configured range',
+                'PORT_RANGE_EXHAUSTED',
+            )
+        except OSError as exc:
+            print('allocator persist error: %s' % exc, flush=True)
             return 500, api_error(
                 'failed to persist registry', 'SERVER_MUTATION_FAILED'
             )
         except RuntimeError as exc:
-            return 500, api_error(str(exc), 'SERVER_MUTATION_FAILED')
+            print('allocator runtime error: %s' % exc, flush=True)
+            return 500, api_error(
+                'internal server error', 'SERVER_MUTATION_FAILED'
+            )
 
         response_payload = {
             'frp_server': cfg_public_host(self.cfg),
@@ -1290,6 +1318,15 @@ class Allocator:
 def make_handler(allocator):
     class Handler(BaseHTTPRequestHandler):
         server_version = 'frp-auto-deploy/1.2'
+        timeout = ALLOCATOR_REQUEST_TIMEOUT_SEC
+        protocol_version = 'HTTP/1.1'
+
+        def setup(self):
+            super().setup()
+            try:
+                self.request.settimeout(ALLOCATOR_REQUEST_TIMEOUT_SEC)
+            except OSError:
+                pass
 
         def log_message(self, fmt, *args):
             print('%s - %s' % (self.address_string(), fmt % args), flush=True)
@@ -1306,60 +1343,106 @@ def make_handler(allocator):
             parsed = urlparse(self.path)
             return parsed.path or '/'
 
-        def do_GET(self):
-            path = self._request_path()
-            if path == '/healthz':
-                self.send_json(200, {'status': 'ok'})
+        def _with_slot(self, fn):
+            acquired = _REQUEST_SLOTS.acquire(blocking=False)
+            if not acquired:
+                self.send_json(
+                    503,
+                    api_error('server is busy; retry later', 'SERVER_BUSY'),
+                )
                 return
-            if path == '/ca.crt':
-                ca_path = allocator.cfg.get('tls_ca_cert')
-                if not ca_path or not Path(ca_path).is_file():
-                    self.send_json(500, {'error': 'CA certificate is not available'})
-                    return
-                body = Path(ca_path).read_bytes()
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/x-pem-file')
-                self.send_header('Content-Length', str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-                return
-            self.send_json(404, {'error': 'not found'})
+            try:
+                return fn()
+            finally:
+                _REQUEST_SLOTS.release()
 
-        def do_POST(self):
-            path = self._request_path()
-            try:
-                length = int(self.headers.get('Content-Length', '0'))
-                if length <= 0 or length > 65536:
-                    self.send_json(400, {'error': 'invalid request body length'})
+        def do_GET(self):
+            def _handle():
+                path = self._request_path()
+                if path == '/healthz':
+                    self.send_json(200, {'status': 'ok'})
                     return
-                body = self.rfile.read(length)
-            except Exception:
-                self.send_json(400, {'error': 'invalid request body length'})
-                return
-            try:
-                if path == '/enroll':
-                    code, result = allocator.enroll(
-                        self.headers.get('X-Enrollment-ID', ''),
-                        self.headers.get('X-Timestamp', ''),
-                        self.headers.get('X-Signature', ''),
-                        body,
-                        headers=self.headers,
-                    )
-                    self.send_json(code, result)
-                    return
-                if path == '/bootstrap/redeem':
-                    code, result = allocator.redeem_bootstrap(body)
-                    self.send_json(code, result)
+                if path == '/ca.crt':
+                    ca_path = allocator.cfg.get('tls_ca_cert')
+                    if not ca_path or not Path(ca_path).is_file():
+                        self.send_json(
+                            500, {'error': 'CA certificate is not available'}
+                        )
+                        return
+                    body = Path(ca_path).read_bytes()
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/x-pem-file')
+                    self.send_header('Content-Length', str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
                     return
                 self.send_json(404, {'error': 'not found'})
-            except json.JSONDecodeError:
-                self.send_json(400, api_error('invalid JSON', 'AUTH_FAILED'))
-            except RegistrySchemaError as exc:
-                self.send_json(500, api_error(str(exc), 'REGISTRY_INVALID'))
-            except PortRangeExhausted as exc:
-                self.send_json(500, api_error(str(exc), 'PORT_RANGE_EXHAUSTED'))
-            except Exception as exc:
-                self.send_json(500, api_error(str(exc), 'SERVER_MUTATION_FAILED'))
+
+            self._with_slot(_handle)
+
+        def do_POST(self):
+            def _handle():
+                path = self._request_path()
+                try:
+                    length = int(self.headers.get('Content-Length', '0'))
+                    if length <= 0 or length > 65536:
+                        self.send_json(
+                            400, {'error': 'invalid request body length'}
+                        )
+                        return
+                    body = self.rfile.read(length)
+                except Exception:
+                    self.send_json(
+                        400, {'error': 'invalid request body length'}
+                    )
+                    return
+                try:
+                    if path == '/enroll':
+                        code, result = allocator.enroll(
+                            self.headers.get('X-Enrollment-ID', ''),
+                            self.headers.get('X-Timestamp', ''),
+                            self.headers.get('X-Signature', ''),
+                            body,
+                            headers=self.headers,
+                        )
+                        self.send_json(code, result)
+                        return
+                    if path == '/bootstrap/redeem':
+                        code, result = allocator.redeem_bootstrap(body)
+                        self.send_json(code, result)
+                        return
+                    self.send_json(404, {'error': 'not found'})
+                except json.JSONDecodeError:
+                    self.send_json(400, api_error('invalid JSON', 'AUTH_FAILED'))
+                except RegistrySchemaError as exc:
+                    print('allocator registry error: %s' % exc, flush=True)
+                    self.send_json(
+                        500,
+                        api_error(
+                            'registry schema is invalid', 'REGISTRY_INVALID'
+                        ),
+                    )
+                except PortRangeExhausted as exc:
+                    print(
+                        'allocator port range exhausted: %s' % exc, flush=True
+                    )
+                    self.send_json(
+                        500,
+                        api_error(
+                            'no free ports remain in the configured range',
+                            'PORT_RANGE_EXHAUSTED',
+                        ),
+                    )
+                except Exception as exc:
+                    print('allocator request error: %s' % exc, flush=True)
+                    self.send_json(
+                        500,
+                        api_error(
+                            'internal server error', 'SERVER_MUTATION_FAILED'
+                        ),
+                    )
+
+            self._with_slot(_handle)
 
     return Handler
 

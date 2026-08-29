@@ -129,9 +129,15 @@ Inbound: TCP/443 and TCP/6000-6098. Details, migration, and rollback:
 
 ## 2. Install the FRP server
 
+Stable installs pull from the immutable `v2.1.0` tag (not mutable `main`):
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-server.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/bootstrap-server.sh | sudo bash
 ```
+
+Opt into follow-`main` only with `FRP_RELEASE_CHANNEL=dev` (or an explicit
+`main` raw URL). A stable server's generated client installer URL also pins
+`v2.1.0`.
 
 The installer asks for the public hostname/IP and public vs listen ports. Values
 are stored in `/etc/frp-auto-deploy/config.json`. There is no hard-coded public
@@ -224,19 +230,56 @@ Adjust the Direct-mode healthz port if the allocator listen port is not 6099.
 
 ## 3. Create a client — zero-touch SSH (recommended)
 
-On the FRP server:
+On the FRP server, interactive TTY collects the SSH login account that already
+exists on the client. There is no default username (`ubuntu`, `root`, or any
+distro-specific account). Blank usernames are rejected.
 
 ```bash
 sudo frp-create-client \
   --one-line \
   --ssh \
-  --ssh-user ubuntu \
   --note customer-01
+```
+
+The same flow is available as `sudo frpctl enroll --one-line --ssh` or from the
+guided enrollment menu (`sudo frpctl` → Create enrollment → Zero-touch SSH).
+
+```text
+SSH service setup
+=================
+
+Enter the SSH login account that already exists on the client machine.
+
+Client SSH user: aella
+SSH port [22]:
+
+Client configuration
+--------------------
+SSH user : aella
+SSH port : 22
+Target   : 127.0.0.1:22
+```
+
+Automation may pass `--ssh-user` and skip the prompt:
+
+```bash
+sudo frp-create-client \
+  --one-line \
+  --ssh \
+  --ssh-user aella \
+  --note customer-01
+```
+
+Non-interactive `--one-line --ssh` without `--ssh-user` fails:
+
+```text
+ERROR: --ssh-user is required for non-interactive zero-touch SSH creation.
 ```
 
 Send the generated **one-line** command to the remote user. They paste it and
 press Enter. There is no Enrollment Code prompt, no service menu, and no FRP
-configuration knowledge required.
+configuration knowledge required. The command includes `FRP_SSH_USER` from the
+account entered (or supplied) above.
 
 The command contains a short-lived Bootstrap Ticket. Treat it as sensitive until
 used or expired. Use a placeholder like `<short-lived-bootstrap-ticket>` in
@@ -300,7 +343,7 @@ CA SHA256:
 <64 lowercase hex characters>
 
 Client install:
-curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh |
+curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/bootstrap-client.sh |
 sudo env \
   FRP_ALLOCATOR_URL='https://203.0.113.10:9443/enroll' \
   FRP_ALLOCATOR_CA_SHA256='<sha256>' \
@@ -439,7 +482,7 @@ sudo frp-client update           # client project tools
 Hosts installed before `frpctl`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh \
+curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/bootstrap-client.sh \
 | sudo bash -s -- --upgrade
 ```
 
@@ -459,7 +502,7 @@ with a 2.0.0 server (management protocol schema 1 is unchanged).
 ### Client
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/uninstall-client.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/uninstall-client.sh | sudo bash
 ```
 
 After uninstall, a later install is a new enrollment because local identity is
@@ -468,13 +511,13 @@ gone. Release ports on the server if they should be freed.
 ### Server
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/uninstall-server.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/uninstall-server.sh | sudo bash
 ```
 
 Purge (test hosts / decommission only):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/uninstall-server.sh | sudo bash -s -- --purge --yes
+curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/uninstall-server.sh | sudo bash -s -- --purge --yes
 ```
 
 ---

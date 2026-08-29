@@ -1,5 +1,9 @@
 # Real-environment release validation
 
+This file is the **authoritative** policy for which real-environment gates are
+required for a stable tag versus recommended. `docs/RELEASE_CHECKLIST.md`
+defers to this classification.
+
 Docker `./tests/run-distro-matrix.sh` is **userspace portability** only. It does
 not start the distro's systemd as PID 1, does not prove SELinux Enforcing, and
 does not prove a real VM.

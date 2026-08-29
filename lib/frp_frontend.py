@@ -75,6 +75,18 @@ def _require_abs_path(value, name):
     return path
 
 
+def _require_error_log(value):
+    """Allow absolute paths or nginx special targets (stderr / syslog:...)."""
+    text = str(value or '').strip()
+    if text in ('stderr', '/dev/stderr', 'stdout', '/dev/stdout'):
+        return text
+    if text.startswith('syslog:'):
+        if '..' in text or any(ch in text for ch in '\r\n\x00'):
+            raise ValueError('error_log syslog target is invalid')
+        return text
+    return _require_abs_path(text, 'error_log')
+
+
 def render_nginx_conf(
     public_host,
     frontend_port,
@@ -84,7 +96,7 @@ def render_nginx_conf(
     server_cert,
     server_key,
     pid_path='/run/frp-auto-deploy/nginx.pid',
-    error_log='/var/log/frp-auto-deploy/frontend.error.log',
+    error_log='stderr',
     temp_root='/var/lib/frp-auto-deploy/nginx',
     websocket_path=FRP_WEBSOCKET_PATH,
 ):
@@ -96,7 +108,7 @@ def render_nginx_conf(
     server_cert = _require_abs_path(server_cert, 'server_cert')
     server_key = _require_abs_path(server_key, 'server_key')
     pid_path = _require_abs_path(pid_path, 'pid_path')
-    error_log = _require_abs_path(error_log, 'error_log')
+    error_log = _require_error_log(error_log)
     temp_root = _require_abs_path(temp_root, 'temp_root')
     if websocket_path != FRP_WEBSOCKET_PATH:
         raise ValueError('FRP 0.70.1 WebSocket path is fixed at %s' % FRP_WEBSOCKET_PATH)
@@ -236,11 +248,62 @@ def write_nginx_conf(dest, **kwargs):
     return str(path)
 
 
+def verify_frontend_proxy(public_host, frontend_port, ca_cert, expected_fingerprint, timeout=8):
+    """Verified TLS GET /healthz and /ca.crt through the public frontend.
+
+    Never disables certificate verification. Returns (ok, message).
+    """
+    # Local imports keep the config-writer usable without doctor on PATH.
+    import frp_doctor  # noqa: WPS433
+
+    host = str(public_host or '').strip()
+    ca_path = str(ca_cert or '').strip()
+    if not host:
+        return False, 'public host is missing'
+    if not ca_path or not Path(ca_path).is_file():
+        return False, 'CA certificate is missing'
+    try:
+        port = int(frontend_port)
+    except (TypeError, ValueError):
+        return False, 'frontend port is invalid'
+    expected = str(expected_fingerprint or '').replace(':', '').strip().lower()
+    if not expected:
+        try:
+            expected = frp_doctor.fingerprint_cert_file(ca_path)[0] or ''
+        except Exception:
+            expected = ''
+    if not expected:
+        return False, 'expected CA fingerprint is missing'
+
+    health = frp_doctor.https_loopback_get(host, port, '/healthz', ca_path, timeout=timeout)
+    if not health.get('ok'):
+        return False, 'frontend /healthz failed (%s)' % (
+            health.get('error_class') or health.get('detail') or 'unreachable'
+        )
+
+    ca_resp = frp_doctor.https_loopback_get(host, port, '/ca.crt', ca_path, timeout=timeout)
+    if not ca_resp.get('ok') and not ca_resp.get('body'):
+        return False, 'frontend /ca.crt failed (%s)' % (
+            ca_resp.get('error_class') or ca_resp.get('detail') or 'unreachable'
+        )
+    verdict = frp_doctor.classify_frontend_ca_body(
+        ca_resp.get('body'),
+        ca_resp.get('content_type') or '',
+        expected,
+    )
+    if not verdict.get('ok'):
+        return False, 'frontend /ca.crt invalid (%s)' % (
+            verdict.get('error_class') or verdict.get('detail') or 'NOT_A_CA'
+        )
+    return True, 'frontend proxy health and CA fingerprint verified'
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Write the single-443 nginx frontend config')
-    parser.add_argument('--dest', required=True)
+    parser.add_argument('--dest', default='')
     parser.add_argument('--syntax-check-from', default='')
     parser.add_argument('--syntax-check-port', type=int, default=0)
+    parser.add_argument('--verify-proxy', action='store_true')
     parser.add_argument('--public-host', default='')
     parser.add_argument('--frontend-port', type=int, default=DEFAULT_FRONTEND_PORT)
     parser.add_argument('--allocator-listen-port', type=int, default=0)
@@ -248,14 +311,31 @@ def main(argv=None):
     parser.add_argument('--ca-cert', default='')
     parser.add_argument('--server-cert', default='')
     parser.add_argument('--server-key', default='')
+    parser.add_argument('--expected-fingerprint', default='')
     parser.add_argument('--pid-path', default='/run/frp-auto-deploy/nginx.pid')
-    parser.add_argument('--error-log', default='/var/log/frp-auto-deploy/frontend.error.log')
+    parser.add_argument('--error-log', default='stderr')
     parser.add_argument('--temp-root', default='/var/lib/frp-auto-deploy/nginx')
     args = parser.parse_args(argv)
+    if args.verify_proxy:
+        ok, message = verify_frontend_proxy(
+            args.public_host,
+            args.frontend_port,
+            args.ca_cert,
+            args.expected_fingerprint,
+        )
+        if not ok:
+            sys.stderr.write('ERROR: %s\n' % message)
+            raise SystemExit(1)
+        sys.stdout.write('%s\n' % message)
+        return
     if args.syntax_check_from:
+        if not args.dest:
+            parser.error('--dest is required with --syntax-check-from')
         port = args.syntax_check_port or (49152 + (os.getpid() % 10000))
         write_syntax_check_conf(args.syntax_check_from, args.dest, listen_port=port)
         return
+    if not args.dest:
+        parser.error('--dest is required unless --verify-proxy is set')
     missing = [
         name for name, value in (
             ('--public-host', args.public_host),

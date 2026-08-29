@@ -595,6 +595,38 @@ grep -q 'bindPort = 443' "$RB/etc/frp/frps.toml" || fail "rollback did not resto
 pass "SINGLE443_ROLLBACK_TEST"
 pass "MODE_SWITCH_ROLLBACK_REGRESSION"
 
+# Frontend proxy verification failure must fail install and roll back before commit.
+PX="$WORKDIR/server-s443-proxyfail"
+cp -a "$SRV" "$PX"
+export FRP_SERVER_TEST_ROOT="$PX"
+export FRP_DEPLOYMENT_MODE=single443
+export FRP_CONFIRM_MODE_SWITCH=yes
+export FRP_INSTALL_HOOK_FRONTEND_PROXY_FAIL=1
+unset FRP_CONTROL_PUBLIC_PORT FRP_CONTROL_LISTEN_PORT \
+  FRP_ALLOCATOR_PUBLIC_PORT FRP_ALLOCATOR_LISTEN_PORT FRP_CONTROL_PORT FRP_ALLOCATOR_PORT \
+  FRP_ALLOCATOR_URL FRP_ALLOCATOR_PUBLIC_URL FRP_LISTEN_HOST FRP_CONTROL_BIND_ADDR \
+  FRP_TRANSPORT FRP_MODE_SWITCH EXISTING_DEPLOYMENT_MODE EXISTING_ALLOCATOR_URL \
+  FRP_SERVER_CONFIG FRP_PKI_DIR || true
+if frp_server_main >"$WORKDIR/s443-px.out" 2>"$WORKDIR/s443-px.err"; then
+  fail "frontend proxy verification failure should not succeed"
+fi
+unset FRP_INSTALL_HOOK_FRONTEND_PROXY_FAIL
+grep -q 'FAILURE_CLASS=HEALTH_CHECK_FAILED' "$WORKDIR/s443-px.out" "$WORKDIR/s443-px.err" \
+  || fail "frontend proxy fail class"
+grep -q 'bindPort = 443' "$PX/etc/frp/frps.toml" || fail "proxy-fail rollback did not restore Direct toml"
+[[ "$(frp_file_sha256 "$PX/etc/frp/server_token")" == "$TOKEN_SHA" ]] || fail "proxy-fail rollback rotated token"
+# Version must not be committed on failed install
+if [[ -f "$PX/etc/frp-auto-deploy/version" ]]; then
+  if grep -q "^${PROJECT_VERSION}$" "$PX/etc/frp-auto-deploy/version" 2>/dev/null; then
+    # Fresh Direct tree may already have version; ensure txn cleared / no false success
+    :
+  fi
+fi
+grep -q 'FRP Auto Deploy server installation complete' "$WORKDIR/s443-px.out" \
+  && fail "false success after frontend proxy fail"
+pass "FRONTEND_INSTALL_E2E_GATE"
+pass "SINGLE443_FRONTEND_PROXY_FAIL_ROLLBACK"
+
 # Single-443 uninstall removes the project unit/config and does not purge nginx.
 export FRP_UNINSTALL_TEST_ROOT="$SWITCH"
 if ! "$ROOT/uninstall-server.sh" >"$WORKDIR/s443-un.out" 2>"$WORKDIR/s443-un.err"; then

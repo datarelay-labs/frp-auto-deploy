@@ -117,7 +117,8 @@ grep -q -- '--ssh-user' "$WORKDIR/help.out" || fail "help --ssh-user"
 grep -q -- '--ssh-port' "$WORKDIR/help.out" || fail "help --ssh-port"
 grep -q -- '--ttl' "$WORKDIR/help.out" || fail "help --ttl"
 grep -q -- '--note' "$WORKDIR/help.out" || fail "help --note"
-grep -q 'frp-create-client --one-line --ssh --ssh-user ubuntu' "$WORKDIR/help.out" || fail "help example"
+grep -q 'frp-create-client --one-line --ssh --note client-01' "$WORKDIR/help.out" || fail "help interactive example"
+grep -q 'frp-create-client --one-line --ssh --ssh-user aella' "$WORKDIR/help.out" || fail "help explicit example"
 pass "CREATE_CLIENT_HELP"
 
 set +e
@@ -160,6 +161,113 @@ set -e
 [[ "$rc" -ne 0 ]] || fail "invalid services file should succeed? no"
 grep -qi 'not valid JSON' "$WORKDIR/badsvc.err" || fail "services-file message"
 pass "INVALID_SERVICES_FILE"
+
+ticket_count() {
+  local dir="${1:-$TREE/var/lib/frp-auto-deploy/bootstrap}"
+  python3 - "$dir" <<'PY'
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+if not path.is_dir():
+    print(0)
+    raise SystemExit(0)
+print(sum(1 for item in path.iterdir() if item.is_file() and item.suffix == '.json'))
+PY
+}
+
+ticket_ssh_user() {
+  python3 - "$TREE/var/lib/frp-auto-deploy/bootstrap" <<'PY'
+import json, sys
+from pathlib import Path
+d = Path(sys.argv[1])
+files = sorted(d.glob('*.json'))
+if not files:
+    raise SystemExit('no bootstrap ticket')
+rec = json.loads(files[-1].read_text())
+services = rec.get('services') or []
+for item in services:
+    if str(item.get('preset') or '').lower() == 'ssh':
+        print(item.get('ssh_user') or '')
+        raise SystemExit(0)
+raise SystemExit('no ssh service')
+PY
+}
+
+# ---------------------------------------------------------------------------
+# P2.17 — interactive SSH user prompt
+# ---------------------------------------------------------------------------
+BEFORE_TICKETS="$(ticket_count)"
+set +e
+FRP_DEPLOY_TEST_ROOT="$TREE" python3 "$CREATE" --one-line --ssh --note client-01 \
+  </dev/null >"$WORKDIR/nontty.out" 2>"$WORKDIR/nontty.err"
+nontty_rc=$?
+set -e
+[[ "$nontty_rc" -ne 0 ]] || fail "non-TTY --one-line --ssh without --ssh-user should fail"
+grep -qF -- '--ssh-user is required for non-interactive zero-touch SSH creation.' \
+  "$WORKDIR/nontty.err" || fail "non-TTY ssh-user error"
+[[ "$(ticket_count)" == "$BEFORE_TICKETS" ]] || fail "non-TTY created a ticket"
+if grep -q 'ubuntu' "$WORKDIR/nontty.out" "$WORKDIR/nontty.err"; then
+  fail "non-TTY guessed ubuntu"
+fi
+if grep -q 'Client SSH user' "$WORKDIR/nontty.out" "$WORKDIR/nontty.err"; then
+  fail "non-TTY prompted"
+fi
+pass "NONINTERACTIVE_SSH_USER_REQUIRED"
+
+BEFORE_TICKETS="$(ticket_count)"
+set +e
+FRP_CREATE_CLIENT_TEST_INPUT='' FRP_DEPLOY_TEST_ROOT="$TREE" \
+  python3 "$CREATE" --one-line --ssh --note client-01 \
+  >"$WORKDIR/eof.out" 2>"$WORKDIR/eof.err"
+eof_rc=$?
+set -e
+[[ "$eof_rc" -ne 0 ]] || fail "EOF during SSH prompt should fail"
+grep -q 'SSH service setup' "$WORKDIR/eof.out" || fail "EOF did not show SSH setup"
+grep -q 'Client SSH user:' "$WORKDIR/eof.out" || fail "EOF did not prompt username"
+[[ "$(ticket_count)" == "$BEFORE_TICKETS" ]] || fail "ticket created before input completed"
+pass "TICKET_NOT_CREATED_BEFORE_INPUT"
+
+BEFORE_TICKETS="$(ticket_count)"
+FRP_CREATE_CLIENT_TEST_INPUT=$'\naella\n\n' FRP_DEPLOY_TEST_ROOT="$TREE" \
+  python3 "$CREATE" --one-line --ssh --note client-01 \
+  >"$WORKDIR/prompt.out" 2>"$WORKDIR/prompt.err"
+grep -q 'SSH service setup' "$WORKDIR/prompt.out" || fail "missing SSH setup heading"
+grep -q 'Enter the SSH login account that already exists on the client machine.' \
+  "$WORKDIR/prompt.out" || fail "missing SSH setup help"
+grep -q 'Client SSH user:' "$WORKDIR/prompt.out" || fail "missing username prompt"
+grep -qF 'SSH port [22]:' "$WORKDIR/prompt.out" || fail "missing port prompt"
+grep -q 'ERROR: SSH username cannot be blank.' "$WORKDIR/prompt.err" \
+  || fail "blank username not rejected"
+grep -q 'Client configuration' "$WORKDIR/prompt.out" || fail "missing confirmation"
+grep -q 'SSH user : aella' "$WORKDIR/prompt.out" || fail "confirmation user"
+grep -q 'SSH port : 22' "$WORKDIR/prompt.out" || fail "confirmation port"
+grep -q 'Target   : 127.0.0.1:22' "$WORKDIR/prompt.out" || fail "confirmation target"
+grep -q "FRP_SSH_USER='aella'" "$WORKDIR/prompt.out" || fail "generated command missing entered user"
+if grep -E 'FRP_SSH_USER=.ubuntu|Client SSH user: ubuntu|SSH user : ubuntu' \
+  "$WORKDIR/prompt.out" "$WORKDIR/prompt.err"; then
+  fail "prompt defaulted to ubuntu"
+fi
+if grep -E 'SSH user : root|Client SSH user: root' "$WORKDIR/prompt.out"; then
+  fail "prompt defaulted to root"
+fi
+[[ "$(ticket_count)" -gt "$BEFORE_TICKETS" ]] || fail "ticket not created after input"
+[[ "$(ticket_ssh_user)" == "aella" ]] || fail "entered username not stored in SSH service"
+pass "SSH_USER_INTERACTIVE_PROMPT"
+pass "BLANK_SSH_USER_REJECTED"
+pass "SSH_USER_STORED_IN_SERVICE"
+pass "FRP_SSH_USER_FROM_PROMPT"
+pass "TICKET_CREATED_AFTER_INPUT"
+
+FRP_DEPLOY_TEST_ROOT="$TREE" python3 "$CREATE" --one-line --ssh --ssh-user aella --note client-01 \
+  >"$WORKDIR/explicit.out" 2>"$WORKDIR/explicit.err"
+if grep -q 'SSH service setup' "$WORKDIR/explicit.out" "$WORKDIR/explicit.err"; then
+  fail "explicit --ssh-user prompted"
+fi
+if grep -q 'Client SSH user:' "$WORKDIR/explicit.out" "$WORKDIR/explicit.err"; then
+  fail "explicit --ssh-user asked for username"
+fi
+grep -q "FRP_SSH_USER='aella'" "$WORKDIR/explicit.out" || fail "explicit --ssh-user missing from command"
+pass "EXPLICIT_SSH_USER_NONINTERACTIVE"
 
 # ---------------------------------------------------------------------------
 # One-line command generation
@@ -560,10 +668,9 @@ if grep -q bootstrap_redeem "$WORKDIR/again.out.hook"; then
 fi
 pass "EXISTING_CLIENT_REENROLL_PROTECTION"
 
-# Same-machine retry of a fresh ticket after bind-but-before-success is covered by Python tests.
-# Simulate lost success: delete local state, reuse same machine + ticket within TTL.
+# Same-machine retry before enrollment completion is covered by Python tests
+# (REDEEM_RETRY_BEFORE_ENROLL). After enrollment succeeds the ticket is consumed.
 RETRY="$WORKDIR/client-retry"
-# New ticket for retry case after first machine already used LIVE_TICKET.
 issue_ticket >"$WORKDIR/retry-create.out"
 RETRY_TICKET="$(python3 - "$WORKDIR/retry-create.out" <<'PY'
 import re, sys
@@ -579,26 +686,23 @@ if ! run_zero_touch "$RETRY" "$RETRY_TICKET" 'ccddeeff00112233445566778899aa' "$
 fi
 PORT_BEFORE="$(python3 -c 'import json; print(json.load(open("'"$ALLOC_ROOT"'/registry.json"))["clients"]["ccddeeff00112233445566778899aa"]["services"]["ssh"]["remote_port"])')"
 rm -rf "$RETRY"
-if ! run_zero_touch "$RETRY" "$RETRY_TICKET" 'ccddeeff00112233445566778899aa' "$WORKDIR/retry2.out"; then
-  cat "$WORKDIR/retry2.out" "$WORKDIR/retry2.err" >&2
-  fail "same machine rerun"
+if run_zero_touch "$RETRY" "$RETRY_TICKET" 'ccddeeff00112233445566778899aa' "$WORKDIR/retry2.out"; then
+  fail "post-success ticket reuse should fail"
 fi
+grep -q 'BOOTSTRAP_TICKET_USED' "$WORKDIR/retry2.out" "$WORKDIR/retry2.err" \
+  || fail "post-success reuse class"
 PORT_AFTER="$(python3 -c 'import json; print(json.load(open("'"$ALLOC_ROOT"'/registry.json"))["clients"]["ccddeeff00112233445566778899aa"]["services"]["ssh"]["remote_port"])')"
-[[ "$PORT_BEFORE" == "$PORT_AFTER" ]] || fail "rerun allocated a new port"
-python3 - "$ALLOC_ROOT/registry.json" <<'PY' || fail "duplicate client on rerun"
-import json, sys
-from pathlib import Path
-state = json.loads(Path(sys.argv[1]).read_text())
-assert len(state['clients']) >= 1
-PY
-pass "SAME_MACHINE_RERUN"
+[[ "$PORT_BEFORE" == "$PORT_AFTER" ]] || fail "failed reuse mutated port"
+pass "REDEEM_AFTER_SUCCESS_REJECTED"
+pass "SAME_MACHINE_POST_SUCCESS_REJECTED"
 
-# Second machine rejected.
+# Second machine rejected (post-success → USED; bind-before-enroll BOUND is in Python tests).
 OTHER="$WORKDIR/client-other"
 if run_zero_touch "$OTHER" "$RETRY_TICKET" 'ffffffffffffffffffffffffffffffff' "$WORKDIR/other.out"; then
   fail "second machine should fail"
 fi
-grep -q 'BOOTSTRAP_TICKET_BOUND' "$WORKDIR/other.out" "$WORKDIR/other.err" || fail "bound class"
+grep -qE 'BOOTSTRAP_TICKET_(USED|BOUND)' "$WORKDIR/other.out" "$WORKDIR/other.err" \
+  || fail "second-machine reject class"
 python3 - "$ALLOC_ROOT/registry.json" <<'PY' || fail "second machine created client"
 import json, sys
 from pathlib import Path
@@ -606,6 +710,42 @@ state = json.loads(Path(sys.argv[1]).read_text())
 assert 'ffffffffffffffffffffffffffffffff' not in state['clients']
 PY
 pass "SECOND_MACHINE_REJECTED"
+
+# Bound-but-not-completed: redeem only via HTTPS, then a different machine must get BOUND.
+issue_ticket >"$WORKDIR/bound-create.out"
+BOUND_TICKET="$(python3 - "$WORKDIR/bound-create.out" <<'PY'
+import re, sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text()
+m = re.search(r"FRP_BOOTSTRAP_TICKET=(?:'([^']+)'|\"([^\"]+)\"|(\S+))", text)
+print(next(g for g in m.groups() if g) if m else '')
+PY
+)"
+python3 - "$ALLOC_PORT" "$LIVE_CA_FP" "$BOUND_TICKET" "$ALLOC_ROOT/pki/ca.crt" <<'PY'
+import json, ssl, sys, urllib.request
+port, fp, ticket, ca = sys.argv[1:5]
+body = json.dumps({
+    'ticket': ticket,
+    'machine_id': 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    'hostname': 'bound-host',
+}).encode()
+ctx = ssl.create_default_context(cafile=ca)
+req = urllib.request.Request(
+    'https://127.0.0.1:%s/bootstrap/redeem' % port,
+    data=body,
+    method='POST',
+    headers={'Content-Type': 'application/json'},
+)
+with urllib.request.urlopen(req, context=ctx, timeout=10) as resp:
+    assert resp.status == 200, resp.read()
+PY
+BOUND_OTHER="$WORKDIR/client-bound-other"
+if run_zero_touch "$BOUND_OTHER" "$BOUND_TICKET" 'cccccccccccccccccccccccccccccccc' "$WORKDIR/bound-other.out"; then
+  fail "bound second machine should fail"
+fi
+grep -q 'BOOTSTRAP_TICKET_BOUND' "$WORKDIR/bound-other.out" "$WORKDIR/bound-other.err" \
+  || fail "bound class for second machine before enroll"
+pass "SECOND_MACHINE_BOUND_BEFORE_ENROLL"
 
 # SSH user missing fails before redeem.
 issue_ticket >"$WORKDIR/missuser-create.out"
@@ -656,6 +796,7 @@ rec = json.loads(Path(sys.argv[1]).read_text())
 assert rec.get('bound_machine_id') in (None, '')
 PY
 pass "SSH_USER_MISSING_FAILS_BEFORE_REDEEM"
+pass "CLIENT_PREFLIGHT_PRESERVED"
 
 # SSH port closed fails before redeem.
 issue_ticket >"$WORKDIR/missport-create.out"

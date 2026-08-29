@@ -8,11 +8,13 @@ dist.mkdir(exist_ok=True)
 
 files=[
  'VERSION',
+ 'release-manifest.json',
  'install-server.sh',
  'lib/frp-common.sh',
  'lib/frp_mgmt_auth.py',
  'lib/frp_pki.py',
  'lib/frp_frontend.py',
+ 'lib/frp_install_txn.py',
  'lib/frp-doctor-common.sh',
  'lib/frp_doctor.py',
  'server/frp-port-allocator.py',

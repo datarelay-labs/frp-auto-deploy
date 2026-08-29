@@ -351,6 +351,34 @@ frpctl_client_menu() {
   done
 }
 
+frpctl_guided_enroll() {
+  local choice
+  echo
+  echo "Create enrollment"
+  echo "================="
+  echo
+  echo "1) Zero-touch SSH (recommended)"
+  echo "2) Manual Enrollment Code"
+  echo "3) Back"
+  echo
+  choice="$(frpctl_read "Select: " "")" || return 1
+  case "$choice" in
+    1)
+      frpctl_run frp-create-client --one-line --ssh
+      ;;
+    2)
+      frpctl_run frp-create-client
+      ;;
+    3|"")
+      return 0
+      ;;
+    *)
+      echo "ERROR: select 1-3" >&2
+      return 1
+      ;;
+  esac
+}
+
 frpctl_server_menu() {
   local choice client sid
   while true; do
@@ -365,7 +393,7 @@ frpctl_server_menu() {
     case "$choice" in
       1) frpctl_run frp-server-status ;;
       2) frpctl_run frp-clients ;;
-      3) frpctl_run frp-create-client ;;
+      3) frpctl_guided_enroll ;;
       4)
         client="$(frpctl_read "Client name: " "")"
         if [[ -z "$client" ]]; then

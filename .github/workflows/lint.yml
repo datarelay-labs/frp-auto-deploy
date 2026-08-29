@@ -2,11 +2,16 @@ name: lint
 on:
   push:
   pull_request:
+
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout@v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Full local non-Docker suite
         run: ./tests/run-all.sh
       # Live distro containers cannot validate systemd unless PID 1 is systemd.
@@ -21,6 +26,8 @@ jobs:
   portability-containers:
     name: distro ${{ matrix.image }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -33,7 +40,8 @@ jobs:
           - amazonlinux:2023
           - amazonlinux:2
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout@v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Container package and CLI portability
         run: ./tests/run-distro-matrix.sh --image ${{ matrix.image }}
         # Uses the same Docker invocation as local ./tests/run-distro-matrix.sh.

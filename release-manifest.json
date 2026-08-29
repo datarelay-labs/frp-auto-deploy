@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "project_version": "2.1.0",
+  "frp_version": "0.70.1",
+  "channel": "stable",
+  "git_ref": "v2.1.0",
+  "owner": "datarelay-labs",
+  "repo": "frp-auto-deploy",
+  "https_raw_base": "https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy",
+  "signing": false,
+  "checksum_file": "SHA256SUMS",
+  "note": "Checksums are integrity hashes from SHA256SUMS, not cryptographic signatures. Stable URLs use git_ref (vPROJECT_VERSION), never mutable main. Dev channel (FRP_RELEASE_CHANNEL=dev) is opt-in.",
+  "artifacts": {
+    "bootstrap-client.sh": {
+      "path": "dist/bootstrap-client.sh",
+      "url_path": "dist/bootstrap-client.sh",
+      "sha256": "9fda6eaa413a0d27b90b4a7d4d1a44aec8489556cc86900a551c90a59bd894b0"
+    },
+    "bootstrap-server.sh": {
+      "path": "dist/bootstrap-server.sh",
+      "url_path": "dist/bootstrap-server.sh"
+    }
+  }
+}
