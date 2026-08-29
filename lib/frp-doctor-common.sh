@@ -127,16 +127,14 @@ frp_doctor_journal() {
 
 frp_doctor_port_listening() {
   local port="$1"
-  python3 - "$port" <<'PY'
-import socket, sys
-port = int(sys.argv[1])
-s = socket.socket()
-s.settimeout(1)
-try:
-    sys.exit(0 if s.connect_ex(("127.0.0.1", port)) == 0 else 1)
-finally:
-    s.close()
-PY
+  local raw
+  command -v ss >/dev/null 2>&1 || return 2
+  raw="$(ss -H -lnt 2>/dev/null || ss -lnt 2>/dev/null)" || return 2
+  printf '%s\n' "$raw" | awk -v wanted="$port" '
+    $1 ~ /^(State|Netid)$/ { next }
+    { p=$4; gsub(/\]$/, "", p); sub(/^.*:/, "", p); if (p == wanted) found=1 }
+    END { exit(found ? 0 : 1) }
+  '
 }
 
 frp_doctor_clock_status() {
@@ -306,22 +304,39 @@ if frontend:
 PY
 )"
     python3 - "$facts_file" "${listen_frp:-}" "${listen_alloc:-}" "${listen_frontend:-}" <<'PY'
-import json, socket, sys
+import json, re, shutil, subprocess, sys
 from pathlib import Path
 path = Path(sys.argv[1])
 facts = json.loads(path.read_text(encoding='utf-8'))
 listeners = facts.setdefault('listeners', {})
+ports = set()
+known = False
+binary = shutil.which('ss')
+if binary:
+    for args in ([binary, '-H', '-lnt'], [binary, '-lnt']):
+        try:
+            proc = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  timeout=5, check=False, universal_newlines=True)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if proc.returncode != 0:
+            continue
+        known = True
+        for line in proc.stdout.splitlines():
+            fields = line.split()
+            if not fields or fields[0] in ('State', 'Netid'):
+                continue
+            for field in fields:
+                match = re.search(r':(\d+)$', field.rstrip(']'))
+                if match:
+                    ports.add(int(match.group(1)))
+                    break
+        break
 for raw in sys.argv[2:]:
     if not raw:
         continue
     port = int(raw)
-    s = socket.socket()
-    s.settimeout(1)
-    try:
-        listening = s.connect_ex(('127.0.0.1', port)) == 0
-    finally:
-        s.close()
-    listeners[str(port)] = {'listening': listening}
+    listeners[str(port)] = {'listening': (port in ports) if known else None}
 path.write_text(json.dumps(facts) + '\n', encoding='utf-8')
 PY
   fi

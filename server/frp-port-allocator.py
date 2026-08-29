@@ -610,10 +610,10 @@ def normalize_service(raw):
         'https': 'HTTPS',
     }.get(preset, sid)
     name = str(raw.get('name', '') or default_name).strip() or default_name
-    if len(name) > MAX_NAME_LEN:
-        raise ServiceValidationError('service name is too long')
-    if any(c in name for c in '\r\n'):
-        raise ServiceValidationError('service name contains invalid characters')
+    try:
+        name = CREG.validate_text_field(name, 'service name', MAX_NAME_LEN, required=True)
+    except ValueError as exc:
+        raise ServiceValidationError(str(exc))
 
     local_ip = str(raw.get('local_ip', '') or '').strip()
     if not local_ip:
@@ -634,7 +634,9 @@ def normalize_service(raw):
         'preset': preset,
     }
     if preset == 'ssh':
-        ssh_user = str(raw.get('ssh_user', '') or '').strip() or 'root'
+        ssh_user = str(raw.get('ssh_user', '') or '').strip()
+        if not ssh_user:
+            raise ServiceValidationError('ssh_user is required for ssh services')
         if not re.fullmatch(r'[A-Za-z0-9._@-]{1,32}', ssh_user):
             raise ServiceValidationError('invalid ssh_user')
         service['ssh_user'] = ssh_user
@@ -784,7 +786,9 @@ class Allocator:
             return 400, api_error('machine_id is required', 'ZERO_TOUCH_INPUT_INVALID')
         if len(machine_id) > MACHINE_ID_MAX_LEN or any(c in machine_id for c in '\r\n/\\'):
             return 400, api_error('invalid machine_id', 'ZERO_TOUCH_INPUT_INVALID')
-        if len(hostname) > HOSTNAME_MAX_LEN or any(c in hostname for c in '\r\n/\\'):
+        try:
+            hostname = CREG.validate_hostname(hostname)
+        except ValueError:
             return 400, api_error('invalid hostname', 'ZERO_TOUCH_INPUT_INVALID')
 
         provided_hash = BOOTSTRAP_DUMMY_HASH
@@ -1146,6 +1150,10 @@ class Allocator:
             return 400, api_error('machine_id is required', 'AUTH_FAILED')
         if any(c in machine_id for c in '\r\n/\\'):
             return 400, api_error('invalid machine_id', 'AUTH_FAILED')
+        try:
+            hostname = CREG.validate_hostname(hostname)
+        except ValueError:
+            return 400, api_error('invalid hostname', 'AUTH_FAILED')
 
         try:
             requested = normalize_services(payload.get('services'))
@@ -1276,7 +1284,7 @@ class Allocator:
                             'enabled': True,
                         }
                         if spec['preset'] == 'ssh':
-                            stored['ssh_user'] = spec.get('ssh_user', 'root')
+                            stored['ssh_user'] = spec['ssh_user']
                         updated[sid] = stored
                         allocated.append({
                             'id': sid,

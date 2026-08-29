@@ -8,6 +8,8 @@ import ipaddress
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -15,6 +17,7 @@ from pathlib import Path
 
 LABEL_MAX_LEN = 64
 NOTE_MAX_LEN = 1024
+HOSTNAME_MAX_LEN = 253
 SHORT_MACHINE_ID_LEN = 8
 LABEL_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._ -]{0,63}$')
 
@@ -105,7 +108,7 @@ def sanitize_display(value, max_len=None):
     text = '' if value is None else str(value)
     cleaned = []
     for ch in text:
-        if ord(ch) < 32 or ch == '\x7f':
+        if ord(ch) < 32 or 127 <= ord(ch) <= 159:
             cleaned.append(' ')
         else:
             cleaned.append(ch)
@@ -113,6 +116,71 @@ def sanitize_display(value, max_len=None):
     if max_len is not None and len(out) > int(max_len):
         out = out[: int(max_len)]
     return out
+
+
+def validate_text_field(value, field, max_len, required=False):
+    """Validate stored/displayed text while preserving normal Unicode."""
+    text = '' if value is None else str(value).strip()
+    if not text:
+        if required:
+            raise ValueError('%s is required' % field)
+        return ''
+    if len(text) > int(max_len):
+        raise ValueError('%s must be at most %s characters' % (field, max_len))
+    if any(ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in text):
+        raise ValueError('%s must not contain control characters' % field)
+    return text
+
+
+def validate_hostname(value, required=False):
+    return validate_text_field(value, 'hostname', HOSTNAME_MAX_LEN, required=required)
+
+
+def ssh_user_display(service):
+    user = sanitize_display((service or {}).get('ssh_user') or '', 32)
+    return user if user else 'legacy / unspecified'
+
+
+def passive_listening_ports():
+    """Return (ports, known) from ss without connecting to any socket."""
+    binary = shutil.which('ss')
+    if not binary:
+        return set(), False
+    for args in ([binary, '-H', '-lnt'], [binary, '-lnt']):
+        try:
+            proc = subprocess.run(
+                args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=5, check=False, universal_newlines=True,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if proc.returncode != 0:
+            continue
+        ports = set()
+        for line in proc.stdout.splitlines():
+            fields = line.split()
+            if not fields or fields[0] in ('State', 'Netid'):
+                continue
+            for field in fields:
+                match = re.search(r':(\d+)$', field.rstrip(']'))
+                if match:
+                    port = int(match.group(1))
+                    if 1 <= port <= 65535:
+                        ports.add(port)
+                    break
+        return ports, True
+    return set(), False
+
+
+def passive_port_state(port, snapshot=None):
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return 'unknown'
+    ports, known = snapshot if snapshot is not None else passive_listening_ports()
+    if not known:
+        return 'unknown'
+    return 'online' if port in ports else 'offline'
 
 
 def validate_label(value, required=False):
@@ -134,12 +202,7 @@ def validate_label(value, required=False):
 
 
 def validate_note(value):
-    text = '' if value is None else str(value)
-    if any(ord(c) < 32 for c in text):
-        raise ValueError('note must not contain control characters or newlines')
-    if len(text) > NOTE_MAX_LEN:
-        raise ValueError('note must be at most %s characters' % NOTE_MAX_LEN)
-    return text.strip()
+    return validate_text_field(value, 'note', NOTE_MAX_LEN)
 
 
 def short_machine_id(machine_id, length=SHORT_MACHINE_ID_LEN):
@@ -290,7 +353,7 @@ def seed_admin_metadata(client, label=None, note=None):
 def apply_observed_fields(client, hostname=None, source_ip=None, seen_at=None):
     if not isinstance(client, dict):
         return client
-    host = str(hostname or '').strip()
+    host = validate_hostname(hostname)
     if host:
         client['hostname'] = host
     when = seen_at or utc_now_iso()

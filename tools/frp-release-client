@@ -4,7 +4,6 @@ import fcntl
 import importlib.util
 import json
 import os
-import socket
 import tempfile
 from pathlib import Path
 
@@ -96,15 +95,24 @@ parser.add_argument('--force', action='store_true', help='release even if a publ
 args = parser.parse_args()
 
 
-def active(port):
-    if not port:
-        return False
-    s = socket.socket()
-    s.settimeout(0.3)
-    try:
-        return s.connect_ex(('127.0.0.1', int(port))) == 0
-    finally:
-        s.close()
+def ensure_releasable(services, force=False):
+    for _sid, service in services.items():
+        if not isinstance(service, dict):
+            continue
+        if str(service.get('preset') or '').lower() == 'ssh' and not service.get('ssh_user'):
+            raise SystemExit(
+                'Refusing to release a legacy SSH reservation without ssh_user metadata.'
+            )
+    snapshot = CREG.passive_listening_ports()
+    states = [
+        CREG.passive_port_state(service.get('remote_port'), snapshot)
+        for service in services.values() if isinstance(service, dict) and service.get('remote_port')
+    ]
+    if any(state != 'offline' for state in states) and not force:
+        raise SystemExit(
+            'Client state is %s. Uninstall/stop frpc first, or use --force.'
+            % ('online' if 'online' in states else 'unknown')
+        )
 
 
 cfg = json.loads(Path(ROOT + '/etc/frp-auto-deploy/config.json').read_text())
@@ -127,10 +135,10 @@ for sid, svc in sorted(services.items()):
     if port:
         ports.append((sid, int(port), svc.get('enabled', True) is not False))
 
-if any(active(port) for _sid, port, _enabled in ports) and not args.force:
-    raise SystemExit('Client appears online. Uninstall/stop frpc first, or use --force.')
+ensure_releasable(services, args.force)
 
-print(f'Releasing {CREG.display_name(client, mid)} ({mid})')
+print(f'Releasing {CREG.sanitize_display(CREG.display_name(client, mid), 64)} '
+      f'({CREG.sanitize_display(mid, 128)})')
 if ports:
     print('Services:')
     for sid, port, enabled in ports:
@@ -150,16 +158,8 @@ try:
     services = client.get('services') or {}
     if not isinstance(services, dict):
         services = {}
-    live_ports = []
-    for sid, svc in sorted(services.items()):
-        if not isinstance(svc, dict):
-            continue
-        port = svc.get('remote_port')
-        if port:
-            live_ports.append(int(port))
     # Re-check under the registry lock to close the TOCTOU window.
-    if any(active(port) for port in live_ports) and not args.force:
-        raise SystemExit('Client appears online. Uninstall/stop frpc first, or use --force.')
+    ensure_releasable(services, args.force)
     state['clients'].pop(mid)
     atomic_write_json(path, state)
 finally:

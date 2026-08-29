@@ -332,16 +332,30 @@ PY
 
 frp_port_listening() {
   local port="$1"
-  python3 - "$port" <<'PY'
-import socket, sys
-port = int(sys.argv[1])
-s = socket.socket()
-s.settimeout(1)
-try:
-    sys.exit(0 if s.connect_ex(("127.0.0.1", port)) == 0 else 1)
-finally:
-    s.close()
-PY
+  local raw=""
+  if ! frp_command_exists ss; then
+    return 2
+  fi
+  if raw="$(frp_invoke ss -H -lnt 2>/dev/null)"; then
+    :
+  elif raw="$(frp_invoke ss -lnt 2>/dev/null)"; then
+    :
+  else
+    return 2
+  fi
+  if printf '%s\n' "$raw" | awk -v wanted="$port" '
+    $1 ~ /^(State|Netid)$/ { next }
+    {
+      p=$4
+      gsub(/\]$/, "", p)
+      sub(/^.*:/, "", p)
+      if (p == wanted) found=1
+    }
+    END { exit(found ? 0 : 1) }
+  '; then
+    return 0
+  fi
+  return 1
 }
 
 frp_registry_identity() {
