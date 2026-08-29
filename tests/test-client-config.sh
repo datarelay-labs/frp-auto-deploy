@@ -132,11 +132,11 @@ FRP_SERVICES_JSON='[]' services_load_from_env
 pass "empty services accepted for management-only enrollment"
 
 services_init
-if FRP_SERVICES_JSON='[{"id":"ssh","local_ip":"127.0.0.1","local_port":22,"preset":"ssh"},{"id":"ssh","local_ip":"127.0.0.1","local_port":22,"preset":"ssh"}]' \
-  services_load_from_env 2>"$WORKDIR/dup.err"; then
+if FRP_SERVICES_JSON='[{"id":"ssh","local_ip":"127.0.0.1","local_port":22,"preset":"ssh","ssh_user":"aella"},{"id":"ssh","local_ip":"127.0.0.1","local_port":22,"preset":"ssh","ssh_user":"aella"}]' \
+  services_load_from_env >"$WORKDIR/dup.out" 2>"$WORKDIR/dup.err"; then
   fail "duplicate id should be rejected"
 fi
-grep -qi 'duplicate' "$WORKDIR/dup.err" || fail "duplicate error message"
+grep -qi 'duplicate' "$WORKDIR/dup.out" "$WORKDIR/dup.err" || fail "duplicate error message"
 pass "duplicate service id rejected"
 
 # WSS frpc.toml uses the stored allocator CA; TCP remains unchanged.
