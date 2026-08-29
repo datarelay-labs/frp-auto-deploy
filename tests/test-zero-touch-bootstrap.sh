@@ -177,15 +177,18 @@ ticket_ssh_user() {
 import json, sys
 from pathlib import Path
 d = Path(sys.argv[1])
-files = sorted(d.glob('*.json'))
+files = sorted(d.glob('*.json'), key=lambda p: p.stat().st_mtime)
 if not files:
     raise SystemExit('no bootstrap ticket')
-rec = json.loads(files[-1].read_text())
-services = rec.get('services') or []
-for item in services:
-    if str(item.get('preset') or '').lower() == 'ssh':
-        print(item.get('ssh_user') or '')
-        raise SystemExit(0)
+for path in reversed(files):
+    rec = json.loads(path.read_text())
+    if str(rec.get('label') or '') != 'seoul-groupware':
+        continue
+    for item in rec.get('services') or []:
+        if str(item.get('preset') or '').lower() == 'ssh':
+            print(item.get('ssh_user') or '')
+            raise SystemExit(0)
+    raise SystemExit('no ssh service')
 raise SystemExit('no ssh service')
 PY
 }
