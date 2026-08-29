@@ -21,6 +21,9 @@ for f in \
   "$BASE_DIR/lib/frp-server-upgrade.sh" \
   "$BASE_DIR/lib/frp_client_registry.py" \
   "$BASE_DIR/lib/frp_audit.py" \
+  "$BASE_DIR/lib/frp_project_files.py" \
+  "$BASE_DIR/lib/frp_control_locks.py" \
+  "$BASE_DIR/lib/server-project-files.manifest" \
   "$BASE_DIR/lib/frp-doctor-common.sh" \
   "$BASE_DIR/lib/frp_doctor.py" \
   "$BASE_DIR/release-manifest.json" \
@@ -132,6 +135,20 @@ frp_pki_dir() {
   else
     frp_server_fs /etc/frp-auto-deploy/pki
   fi
+}
+
+frp_server_install_manifest_files() {
+  local lib_dir="$1" sbin_dir="$2" rel mode src
+  while IFS=: read -r rel mode src; do
+    case "$rel" in
+      usr/local/lib/frp-auto-deploy/*)
+        install -m "$mode" "$BASE_DIR/$src" "${lib_dir}/$(basename "$rel")"
+        ;;
+      usr/local/sbin/*)
+        install -m "$mode" "$BASE_DIR/$src" "${sbin_dir}/$(basename "$rel")"
+        ;;
+    esac
+  done < <(frp_server_upgrade_destinations "$BASE_DIR")
 }
 
 frp_normalize_deployment_mode() {
@@ -1243,14 +1260,18 @@ frp_server_create_snapshot() {
 frp_server_rollback_snapshot() {
   local dest="${FRP_INSTALL_SNAPSHOT:-}" py
   [[ -n "$dest" && -d "$dest" ]] || return 0
+  if [[ "${FRP_SERVER_UPGRADE_HOOK_ROLLBACK_SYSTEMD:-}" == "1" ]]; then
+    echo "ERROR: simulated systemd service-state restoration failure" >&2
+    return 1
+  fi
   py="$BASE_DIR/lib/frp_install_txn.py"
   if [[ ! -f "$py" ]]; then
     py="$(frp_server_fs /usr/local/lib/frp-auto-deploy/frp_install_txn.py)"
   fi
   if frp_server_skip_systemd || frp_server_test_mode; then
-    python3 "$py" restore --root "$(frp_server_snapshot_root)" --dest "$dest" || true
+    python3 "$py" restore --root "$(frp_server_snapshot_root)" --dest "$dest"
   else
-    python3 "$py" restore --root "$(frp_server_snapshot_root)" --dest "$dest" --apply-services || true
+    python3 "$py" restore --root "$(frp_server_snapshot_root)" --dest "$dest" --apply-services
   fi
 }
 
@@ -1258,7 +1279,14 @@ frp_server_fail_after_mutation() {
   local class="$1"
   shift
   echo "ERROR: $*" >&2
-  frp_server_rollback_snapshot
+  if ! frp_server_rollback_snapshot; then
+    echo "UPGRADE_ROLLBACK=FAIL"
+    echo "RECOVERY_REQUIRED=YES"
+    echo "PENDING_MARKER_CLEARED=NO"
+    frp_emit_failure_class UPDATE_ROLLBACK_FAILED
+    frp_server_end_tmp
+    return 1
+  fi
   frp_emit_failure_class "$class"
   frp_txn_clear
   frp_server_end_tmp
@@ -1274,11 +1302,14 @@ frp_verify_frontend_proxy_health() {
   if frp_server_skip_systemd; then
     return 0
   fi
+  if [[ "${FRP_INSTALLED_RUNTIME_LOADED:-0}" != "1" || -z "${FRP_PUBLIC_HOST:-}" || -z "${FRP_CONTROL_PUBLIC_PORT:-}" ]]; then
+    frp_load_installed_server_runtime || return 1
+  fi
   py="$BASE_DIR/lib/frp_frontend.py"
   if [[ ! -f "$py" ]]; then
     py="$(frp_server_fs /usr/local/lib/frp-auto-deploy/frp_frontend.py)"
   fi
-  ca="$(frp_pki_dir)/ca.crt"
+  ca="${FRP_INSTALLED_CA_CERT:-$(frp_pki_dir)/ca.crt}"
   expected="${CA_FINGERPRINT:-}"
   python3 "$py" --verify-proxy \
     --public-host "$FRP_PUBLIC_HOST" \
@@ -1735,21 +1766,7 @@ frp_server_main() {
   [[ -f "$registry_file" ]] || { frp_server_fail_after_mutation FILE_COMMIT_FAILED "registry.json is missing"; return 1; }
   chmod 600 "$registry_file"
 
-  install -m 0700 "$BASE_DIR/server/frp-port-allocator.py" "${lib_dir}/frp-port-allocator.py"
-  install -m 0644 "$BASE_DIR/lib/frp_mgmt_auth.py" "${lib_dir}/frp_mgmt_auth.py"
-  install -m 0644 "$BASE_DIR/lib/frp_pki.py" "${lib_dir}/frp_pki.py"
-  install -m 0644 "$BASE_DIR/lib/frp_frontend.py" "${lib_dir}/frp_frontend.py"
-  install -m 0644 "$BASE_DIR/lib/frp-common.sh" "${lib_dir}/frp-common.sh"
-  install -m 0644 "$BASE_DIR/lib/frp-doctor-common.sh" "${lib_dir}/frp-doctor-common.sh"
-  install -m 0644 "$BASE_DIR/lib/frp_doctor.py" "${lib_dir}/frp_doctor.py"
-  install -m 0644 "$BASE_DIR/lib/frp_install_txn.py" "${lib_dir}/frp_install_txn.py"
-  install -m 0644 "$BASE_DIR/lib/frp-server-upgrade.sh" "${lib_dir}/frp-server-upgrade.sh"
-  install -m 0644 "$BASE_DIR/lib/frp_client_registry.py" "${lib_dir}/frp_client_registry.py"
-  install -m 0644 "$BASE_DIR/lib/frp_audit.py" "${lib_dir}/frp_audit.py"
-  install -m 0644 "$BASE_DIR/release-manifest.json" "${lib_dir}/release-manifest.json"
-  if [[ -f "$BASE_DIR/SHA256SUMS" ]]; then
-    install -m 0644 "$BASE_DIR/SHA256SUMS" "${lib_dir}/SHA256SUMS"
-  fi
+  frp_server_install_manifest_files "$lib_dir" "$sbin_dir"
   install -m 0644 "$BASE_DIR/server/frps.service" "$unit_frps"
   frp_write_compatible_systemd_unit \
     "$BASE_DIR/server/frp-port-allocator.service" \
@@ -1760,9 +1777,6 @@ frp_server_main() {
   else
     rm -f "$unit_frontend" "$frontend_conf"
   fi
-  for tool in frp-create-client frp-enrollments frp-enrollment-revoke frp-enroll-bulk frp-clients frp-client-info frp-client-set frp-release-client frp-release-service frp-revoke-client frp-set-client-installer-url frp-server-status frp-project-update frp-backup frp-restore frp-update frp-upstream frpctl; do
-    install -m 0755 "$BASE_DIR/tools/$tool" "${sbin_dir}/$tool"
-  done
 
   local need_frps_restart=0 need_alloc_restart=0 need_frontend_restart=0
   if [[ "$existing_install" != "1" ]]; then

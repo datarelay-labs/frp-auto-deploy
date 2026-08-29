@@ -2,38 +2,35 @@
 # Safe, non-interactive management-software upgrade for an installed server.
 
 FRP_SERVER_UPGRADE_BACKUP_KEEP="${FRP_SERVER_UPGRADE_BACKUP_KEEP:-5}"
+_FRP_UPGRADE_MUTATION_STARTED=0
+_FRP_UPGRADE_ROLLBACK_DONE=0
+_FRP_UPGRADE_ROLLBACK_RC=0
+_FRP_UPGRADE_IN_ROLLBACK=0
+_FRP_UPGRADE_ERRTRACE_WAS=0
+
+_frp_project_files_py() {
+  if [[ -n "${BASE_DIR:-}" && -f "$BASE_DIR/lib/frp_project_files.py" ]]; then
+    printf '%s' "$BASE_DIR/lib/frp_project_files.py"
+  elif [[ -f /usr/local/lib/frp-auto-deploy/frp_project_files.py ]]; then
+    printf '%s' /usr/local/lib/frp-auto-deploy/frp_project_files.py
+  else
+    local here
+    here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    printf '%s' "${here}/frp_project_files.py"
+  fi
+}
 
 frp_server_upgrade_destinations() {
-  # destination:mode:source
-  printf '%s\n' \
-    "usr/local/lib/frp-auto-deploy/frp-port-allocator.py:0700:server/frp-port-allocator.py" \
-    "usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py:0644:lib/frp_mgmt_auth.py" \
-    "usr/local/lib/frp-auto-deploy/frp_pki.py:0644:lib/frp_pki.py" \
-    "usr/local/lib/frp-auto-deploy/frp_frontend.py:0644:lib/frp_frontend.py" \
-    "usr/local/lib/frp-auto-deploy/frp-common.sh:0644:lib/frp-common.sh" \
-    "usr/local/lib/frp-auto-deploy/frp-doctor-common.sh:0644:lib/frp-doctor-common.sh" \
-    "usr/local/lib/frp-auto-deploy/frp_doctor.py:0644:lib/frp_doctor.py" \
-    "usr/local/lib/frp-auto-deploy/frp_install_txn.py:0644:lib/frp_install_txn.py" \
-    "usr/local/lib/frp-auto-deploy/frp-server-upgrade.sh:0644:lib/frp-server-upgrade.sh" \
-    "usr/local/lib/frp-auto-deploy/frp_client_registry.py:0644:lib/frp_client_registry.py" \
-    "usr/local/lib/frp-auto-deploy/release-manifest.json:0644:release-manifest.json" \
-    "etc/systemd/system/frps.service:0644:server/frps.service" \
-    "etc/systemd/system/frp-port-allocator.service:0644:server/frp-port-allocator.service" \
-    "usr/local/sbin/frp-create-client:0755:tools/frp-create-client" \
-    "usr/local/sbin/frp-clients:0755:tools/frp-clients" \
-    "usr/local/sbin/frp-client-info:0755:tools/frp-client-info" \
-    "usr/local/sbin/frp-client-set:0755:tools/frp-client-set" \
-    "usr/local/sbin/frp-release-client:0755:tools/frp-release-client" \
-    "usr/local/sbin/frp-release-service:0755:tools/frp-release-service" \
-    "usr/local/sbin/frp-revoke-client:0755:tools/frp-revoke-client" \
-    "usr/local/sbin/frp-set-client-installer-url:0755:tools/frp-set-client-installer-url" \
-    "usr/local/sbin/frp-server-status:0755:tools/frp-server-status" \
-    "usr/local/sbin/frp-update:0755:tools/frp-update" \
-    "usr/local/sbin/frp-project-update:0755:tools/frp-project-update" \
-    "usr/local/sbin/frpctl:0755:tools/frpctl"
+  local extra=()
   if frp_server_upgrade_is_single443; then
-    printf '%s\n' "etc/systemd/system/frp-frontend.service:0644:server/frp-frontend.service"
+    extra+=(--single443)
   fi
+  if [[ -n "${1:-}" ]]; then
+    extra+=(--source "$1")
+  elif [[ -n "${BASE_DIR:-}" ]]; then
+    extra+=(--source "$BASE_DIR")
+  fi
+  python3 "$(_frp_project_files_py)" destinations "${extra[@]}"
 }
 
 frp_server_upgrade_is_single443() {
@@ -49,10 +46,83 @@ raise SystemExit(0 if data.get("deployment_mode", "direct") == "single443" else 
 PY
 }
 
+frp_load_installed_server_runtime() {
+  # Persisted installed-server configuration. Distinct from installer input globals.
+  local config version_file line
+  config="$(frp_server_fs /etc/frp-auto-deploy/config.json)"
+  version_file="$(frp_server_fs /etc/frp-auto-deploy/version)"
+  [[ -f "$config" ]] || {
+    echo "ERROR: installed server configuration is missing" >&2
+    return 1
+  }
+  while IFS= read -r line; do
+    case "$line" in
+      FRP_DEPLOYMENT_MODE=*|FRP_PUBLIC_HOST=*|FRP_CONTROL_PUBLIC_PORT=*|FRP_CONTROL_LISTEN_PORT=*|FRP_ALLOCATOR_PUBLIC_URL=*|FRP_ALLOCATOR_LISTEN_PORT=*|FRP_INSTALLED_CA_CERT=*|CA_FINGERPRINT=*|FRP_INSTALLED_PROJECT_VERSION=*|FRP_INSTALLED_RELEASE_CHANNEL=*|FRP_INSTALLED_SOURCE_REF=*|FRP_INSTALLED_BUNDLE_SHA256=*)
+        printf -v "${line%%=*}" '%s' "${line#*=}"
+        ;;
+    esac
+  done < <(
+    python3 - "$config" "$version_file" "$(frp_pki_dir)/ca.crt" "${BASE_DIR:-}/lib/frp_pki.py" <<'PY'
+import json, sys
+from pathlib import Path
+
+config_path, version_path, ca_path, pki_mod = sys.argv[1:]
+data = json.loads(Path(config_path).read_text(encoding="utf-8"))
+values = {}
+if Path(version_path).is_file():
+    for line in Path(version_path).read_text(encoding="utf-8").splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            values[key.strip()] = value.strip()
+
+def emit(key, value):
+    print("%s=%s" % (key, value if value is not None else ""))
+
+emit("FRP_DEPLOYMENT_MODE", data.get("deployment_mode") or "direct")
+emit("FRP_PUBLIC_HOST", data.get("public_host") or data.get("public_ip") or "")
+emit("FRP_CONTROL_PUBLIC_PORT", data.get("frp_control_public_port") or "")
+emit("FRP_CONTROL_LISTEN_PORT", data.get("frp_control_listen_port") or "")
+emit("FRP_ALLOCATOR_PUBLIC_URL", data.get("allocator_public_url") or "")
+emit(
+    "FRP_ALLOCATOR_LISTEN_PORT",
+    data.get("allocator_listen_port", data.get("listen_port", 6099)),
+)
+ca = data.get("tls_ca_cert") or ca_path
+emit("FRP_INSTALLED_CA_CERT", ca)
+fp = ""
+try:
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("frp_pki", pki_mod)
+    if spec and spec.loader and Path(pki_mod).is_file() and Path(ca).is_file():
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        fp = mod.fingerprint_from_cert_file(ca)
+except Exception:
+    fp = ""
+emit("CA_FINGERPRINT", fp)
+emit("FRP_INSTALLED_PROJECT_VERSION", values.get("PROJECT_VERSION", ""))
+emit("FRP_INSTALLED_RELEASE_CHANNEL", values.get("RELEASE_CHANNEL", ""))
+emit("FRP_INSTALLED_SOURCE_REF", values.get("SOURCE_REF", ""))
+emit("FRP_INSTALLED_BUNDLE_SHA256", values.get("BUNDLE_SHA256", ""))
+PY
+  )
+  if [[ -z "${FRP_PUBLIC_HOST:-}" ]]; then
+    echo "ERROR: persisted public_host is missing from the installed configuration" >&2
+    return 1
+  fi
+  if [[ -z "${FRP_CONTROL_PUBLIC_PORT:-}" ]]; then
+    echo "ERROR: persisted frp_control_public_port is missing from the installed configuration" >&2
+    return 1
+  fi
+  FRP_INSTALLED_RUNTIME_LOADED=1
+  export FRP_DEPLOYMENT_MODE FRP_PUBLIC_HOST FRP_CONTROL_PUBLIC_PORT \
+    FRP_CONTROL_LISTEN_PORT FRP_ALLOCATOR_PUBLIC_URL FRP_ALLOCATOR_LISTEN_PORT \
+    FRP_INSTALLED_CA_CERT CA_FINGERPRINT
+}
+
 frp_server_upgrade_tree_digest() {
   python3 - "$@" <<'PY'
 import hashlib
-import os
 import sys
 from pathlib import Path
 
@@ -88,6 +158,10 @@ frp_server_upgrade_preserved_digest() {
 }
 
 frp_server_upgrade_allocator_port() {
+  if [[ -n "${FRP_ALLOCATOR_LISTEN_PORT:-}" ]]; then
+    printf '%s' "$FRP_ALLOCATOR_LISTEN_PORT"
+    return 0
+  fi
   python3 - "$(frp_server_fs /etc/frp-auto-deploy/config.json)" <<'PY'
 import json
 import sys
@@ -152,35 +226,22 @@ frp_server_upgrade_stage() {
     }
     mkdir -p "$(dirname "${staged}/${rel}")"
     install -m "$mode" "${source}/${src}" "${staged}/${rel}"
-  done < <(frp_server_upgrade_destinations)
+  done < <(frp_server_upgrade_destinations "$source")
 }
 
 frp_server_upgrade_validate_staged() {
-  local staged="$1" file
-  for file in \
-    usr/local/lib/frp-auto-deploy/frp-common.sh \
-    usr/local/lib/frp-auto-deploy/frp-doctor-common.sh \
-    usr/local/lib/frp-auto-deploy/frp-server-upgrade.sh \
-    usr/local/sbin/frp-server-status usr/local/sbin/frp-update \
-    usr/local/sbin/frp-project-update usr/local/sbin/frpctl; do
-    bash -n "${staged}/${file}" || return 1
-  done
-  python3 -m py_compile \
-    "${staged}/usr/local/lib/frp-auto-deploy/frp-port-allocator.py" \
-    "${staged}/usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py" \
-    "${staged}/usr/local/lib/frp-auto-deploy/frp_pki.py" \
-    "${staged}/usr/local/lib/frp-auto-deploy/frp_frontend.py" \
-    "${staged}/usr/local/lib/frp-auto-deploy/frp_doctor.py" \
-    "${staged}/usr/local/lib/frp-auto-deploy/frp_install_txn.py" \
-    "${staged}/usr/local/lib/frp-auto-deploy/frp_client_registry.py" \
-    "${staged}/usr/local/sbin/frp-create-client" \
-    "${staged}/usr/local/sbin/frp-clients" \
-    "${staged}/usr/local/sbin/frp-client-info" \
-    "${staged}/usr/local/sbin/frp-client-set" \
-    "${staged}/usr/local/sbin/frp-release-client" \
-    "${staged}/usr/local/sbin/frp-release-service" \
-    "${staged}/usr/local/sbin/frp-revoke-client" \
-    "${staged}/usr/local/sbin/frp-set-client-installer-url" || return 1
+  local staged="$1" file extra=()
+  if frp_server_upgrade_is_single443; then
+    extra+=(--single443)
+  fi
+  while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
+    bash -n "$file" || return 1
+  done < <(python3 "$(_frp_project_files_py)" validate-list --kind bash --staged "$staged" "${extra[@]}")
+  mapfile -t _frp_py_files < <(python3 "$(_frp_project_files_py)" validate-list --kind python --staged "$staged" "${extra[@]}")
+  if [[ "${#_frp_py_files[@]}" -gt 0 ]]; then
+    python3 -m py_compile "${_frp_py_files[@]}" || return 1
+  fi
   find "$staged" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
   if [[ "${FRP_SERVER_UPGRADE_HOOK_FAIL:-}" == "validate" ]]; then
     echo "ERROR: simulated staged update validation failure" >&2
@@ -192,6 +253,12 @@ frp_server_upgrade_changed() {
   local staged="$1" rel="$2"
   [[ "$(frp_file_sha256 "${staged}/${rel}")" != \
      "$(frp_file_sha256 "$(frp_server_fs "/${rel}")")" ]]
+}
+
+frp_server_upgrade_post_mutation_guard() {
+  [[ "${FRP_SERVER_UPGRADE_HOOK_FAIL:-}" == "unbound-after-install" ]] || return 0
+  echo "ERROR: simulated unexpected post-mutation abort" >&2
+  return 1
 }
 
 frp_server_upgrade_install_staged() {
@@ -206,18 +273,119 @@ frp_server_upgrade_install_staged() {
   done < <(frp_server_upgrade_destinations)
 }
 
+frp_server_upgrade_verify_restored() {
+  local snapshot="$1"
+  if [[ "${FRP_SERVER_UPGRADE_HOOK_ROLLBACK_FILES:-}" == "1" ]]; then
+    echo "ERROR: simulated snapshot file restore verification failure" >&2
+    return 1
+  fi
+  python3 - "$snapshot" "$(frp_server_snapshot_root)" <<'PY'
+import json, sys
+from pathlib import Path
+snap, root = Path(sys.argv[1]), Path(sys.argv[2])
+meta = json.loads((snap / "metadata.json").read_text(encoding="utf-8"))
+for item in meta.get("present") or []:
+    rel = item.get("path") or ""
+    if not rel:
+        continue
+    live = root / rel
+    src = snap / "files" / rel
+    if not src.is_file() or not live.is_file() or live.read_bytes() != src.read_bytes():
+        sys.stderr.write("ERROR: restored project file does not match snapshot: %s\n" % rel)
+        raise SystemExit(1)
+for rel in meta.get("absent") or []:
+    live = root / rel
+    if live.is_file() or live.is_symlink():
+        sys.stderr.write("ERROR: snapshot-absent project file is still present: %s\n" % rel)
+        raise SystemExit(1)
+PY
+}
+
+frp_server_upgrade_verify_rollback_health() {
+  if [[ "${FRP_SERVER_UPGRADE_HOOK_ROLLBACK_HEALTH:-}" == "1" ]]; then
+    echo "ERROR: simulated rollback health verification failure" >&2
+    return 1
+  fi
+  if frp_server_skip_systemd || frp_server_test_mode; then
+    return 0
+  fi
+  frp_server_health_frps || return 1
+  frp_server_health_allocator "$(frp_server_upgrade_allocator_port)" || return 1
+  if frp_server_upgrade_is_single443; then
+    frp_server_health_frontend || return 1
+  fi
+}
+
+_frp_server_upgrade_err() {
+  local ec=$?
+  if [[ "${_FRP_UPGRADE_MUTATION_STARTED:-0}" == "1" && \
+        "${_FRP_UPGRADE_IN_ROLLBACK:-0}" != "1" && \
+        "${_FRP_UPGRADE_ROLLBACK_DONE:-0}" != "1" ]]; then
+    frp_server_upgrade_rollback "${FRP_INSTALL_SNAPSHOT:-}" || true
+  fi
+  return "$ec"
+}
+
 frp_server_upgrade_rollback() {
   local snapshot="$1"
+  if [[ "${_FRP_UPGRADE_ROLLBACK_DONE:-0}" == "1" ]]; then
+    return "${_FRP_UPGRADE_ROLLBACK_RC:-1}"
+  fi
+  if [[ "${_FRP_UPGRADE_IN_ROLLBACK:-0}" == "1" ]]; then
+    return 1
+  fi
+  _FRP_UPGRADE_IN_ROLLBACK=1
   FRP_INSTALL_SNAPSHOT="$snapshot"
-  frp_server_rollback_snapshot
+  if ! frp_server_rollback_snapshot; then
+    echo "UPGRADE_ROLLBACK=FAIL"
+    echo "RECOVERY_REQUIRED=YES"
+    echo "LIVE_PROJECT_FILES_RESTORED=NO"
+    echo "PENDING_MARKER_CLEARED=NO"
+    _FRP_UPGRADE_ROLLBACK_RC=1
+    _FRP_UPGRADE_ROLLBACK_DONE=1
+    _FRP_UPGRADE_IN_ROLLBACK=0
+    return 1
+  fi
+  if ! frp_server_upgrade_verify_restored "$snapshot"; then
+    echo "UPGRADE_ROLLBACK=FAIL"
+    echo "RECOVERY_REQUIRED=YES"
+    echo "LIVE_PROJECT_FILES_RESTORED=NO"
+    echo "PENDING_MARKER_CLEARED=NO"
+    _FRP_UPGRADE_ROLLBACK_RC=1
+    _FRP_UPGRADE_ROLLBACK_DONE=1
+    _FRP_UPGRADE_IN_ROLLBACK=0
+    return 1
+  fi
+  if ! frp_server_upgrade_verify_rollback_health; then
+    echo "UPGRADE_ROLLBACK=FAIL"
+    echo "RECOVERY_REQUIRED=YES"
+    echo "LIVE_PROJECT_FILES_RESTORED=YES"
+    echo "PENDING_MARKER_CLEARED=NO"
+    _FRP_UPGRADE_ROLLBACK_RC=1
+    _FRP_UPGRADE_ROLLBACK_DONE=1
+    _FRP_UPGRADE_IN_ROLLBACK=0
+    return 1
+  fi
   frp_txn_clear
+  echo "LIVE_PROJECT_FILES_RESTORED=YES"
+  echo "PENDING_MARKER_CLEARED=YES"
   echo "UPGRADE_ROLLBACK=PASS"
+  _FRP_UPGRADE_ROLLBACK_RC=0
+  _FRP_UPGRADE_ROLLBACK_DONE=1
+  _FRP_UPGRADE_IN_ROLLBACK=0
+  return 0
 }
 
 frp_server_apply_project_upgrade() {
   local source="$1" check_only="${2:-0}"
   local version_file previous target staged snapshot backups preserved_before
   local restart_frps=0 restart_alloc=0 restart_frontend=0 rel
+  local resolved_channel resolved_ref
+
+  _FRP_UPGRADE_MUTATION_STARTED=0
+  _FRP_UPGRADE_ROLLBACK_DONE=0
+  _FRP_UPGRADE_ROLLBACK_RC=0
+  _FRP_UPGRADE_IN_ROLLBACK=0
 
   [[ -d "$source" ]] || { echo "ERROR: update source directory is required" >&2; return 1; }
   if [[ ${EUID} -ne 0 && -z "${FRP_SERVER_TEST_ROOT:-}" ]]; then
@@ -232,12 +400,21 @@ frp_server_apply_project_upgrade() {
     return 1
   }
 
+  frp_load_installed_server_runtime || return 1
+  if ! frp_resolve_project_update_identity; then
+    return 1
+  fi
+  resolved_channel="$FRP_RESOLVED_RELEASE_CHANNEL"
+  resolved_ref="$FRP_RESOLVED_SOURCE_REF"
+
   target="$(frp_server_upgrade_validate_source_metadata "$source")" || return 1
   version_file="$(frp_server_fs /etc/frp-auto-deploy/version)"
   previous="$(frp_read_kv_file "$version_file" PROJECT_VERSION)"
   previous="${previous:-legacy / unknown}"
   echo "Installed project version : ${previous}"
   echo "Target project version    : ${target}"
+  echo "Release channel           : ${resolved_channel}"
+  echo "Source ref                : ${resolved_ref}"
   echo "FRP binary update         : NO"
   if [[ "$previous" != "legacy / unknown" && "$(frp_version_compare "$previous" "$target")" == "gt" ]]; then
     echo "ERROR: installed project version ${previous} is newer than candidate ${target}" >&2
@@ -250,7 +427,7 @@ frp_server_apply_project_upgrade() {
   frp_server_upgrade_stage "$source" "$staged" || return 1
   if ! frp_server_upgrade_validate_staged "$staged"; then
     echo "ERROR: staged update failed validation; installed files were not changed." >&2
-    echo "UPGRADE_ROLLBACK=PASS"
+    echo "UPGRADE_ROLLBACK=NOT_REQUIRED"
     return 1
   fi
   if [[ "$check_only" == "1" ]]; then
@@ -279,8 +456,29 @@ frp_server_apply_project_upgrade() {
     frp_server_upgrade_changed "$staged" etc/systemd/system/frp-frontend.service && restart_frontend=1
   fi
 
-  frp_txn_write project-update commit "$previous" "$target"
+  if [[ "$-" == *E* ]]; then
+    _FRP_UPGRADE_ERRTRACE_WAS=1
+  else
+    _FRP_UPGRADE_ERRTRACE_WAS=0
+    set -E
+  fi
+  trap '_frp_server_upgrade_err; frp_release_server_lock; rm -rf "'"$staged"'"; if [[ "${_FRP_UPGRADE_ERRTRACE_WAS}" != "1" ]]; then set +E; fi; exit 1' ERR
+  trap 'if [[ "${_FRP_UPGRADE_ERRTRACE_WAS}" != "1" ]]; then set +E; fi; trap - ERR; frp_release_server_lock; rm -rf "'"$staged"'"' RETURN
+
+  FRP_TXN_RELEASE_CHANNEL="$resolved_channel" \
+  FRP_TXN_SOURCE_REF="$resolved_ref" \
+  FRP_TXN_BUNDLE_SHA256="${FRP_BUNDLE_SHA256:-}" \
+  FRP_TXN_SNAPSHOT_PATH="$snapshot" \
+  FRP_TXN_MUTATION_STARTED=true \
+    frp_txn_write project-update commit "$previous" "$target"
+  _FRP_UPGRADE_MUTATION_STARTED=1
+
   if ! frp_server_upgrade_install_staged "$staged"; then
+    frp_server_upgrade_rollback "$snapshot"
+    frp_emit_failure_class FILE_COMMIT_FAILED
+    return 1
+  fi
+  if ! frp_server_upgrade_post_mutation_guard; then
     frp_server_upgrade_rollback "$snapshot"
     frp_emit_failure_class FILE_COMMIT_FAILED
     return 1
@@ -331,13 +529,16 @@ frp_server_apply_project_upgrade() {
     frp_server_health_frontend || { frp_server_upgrade_rollback "$snapshot"; return 1; }
   fi
 
-  if ! PROJECT_VERSION="$target" frp_write_version_file "$version_file" server; then
+  if ! FRP_RELEASE_CHANNEL="$resolved_channel" PROJECT_VERSION="$target" \
+      frp_write_version_file "$version_file" server; then
     frp_server_upgrade_rollback "$snapshot"
     frp_emit_failure_class FILE_COMMIT_FAILED
     return 1
   fi
+  _FRP_UPGRADE_MUTATION_STARTED=0
   frp_txn_clear
   FRP_INSTALL_SNAPSHOT=""
+  frp_audit_emit project_update.completed
   echo "Server project update completed successfully."
   echo "Project version : ${previous} -> ${target}"
   echo "FRP binary      : unchanged"

@@ -429,7 +429,7 @@ echo "Checking prerequisites..."
 frp_checksum_for "$TARGET_VERSION" "$FRP_ARCH" >/dev/null
 
 TMPDIR="$(frp_secure_mktemp_dir)"
-frp_txn_write update stage "$PREVIOUS_VERSION" "$TARGET_VERSION"
+FRP_TXN_MUTATION_STARTED=false frp_txn_write frp-update stage "$PREVIOUS_VERSION" "$TARGET_VERSION"
 
 echo "Downloading FRP v${TARGET_VERSION}..."
 prepare_new_binary || fail_update "${UPDATE_FAIL_CLASS:-DOWNLOAD_FAILED}"
@@ -442,7 +442,9 @@ validate_new_binary || fail_update "${UPDATE_FAIL_CLASS:-STAGING_FAILED}"
 
 echo "Creating rollback backup..."
 create_backup || fail_update STAGING_FAILED
-frp_txn_write update commit "$PREVIOUS_VERSION" "$TARGET_VERSION"
+FRP_TXN_SNAPSHOT_PATH="$BACKUP_DIR" \
+FRP_TXN_MUTATION_STARTED=true \
+  frp_txn_write frp-update commit "$PREVIOUS_VERSION" "$TARGET_VERSION"
 
 echo "Installing FRP v${TARGET_VERSION}..."
 if [[ "$UPDATE_ROLE" == "client" ]]; then
@@ -459,6 +461,7 @@ echo "Running health checks..."
 health_check || fail_update HEALTH_CHECK_FAILED
 
 frp_txn_clear
+frp_audit_emit frp_update.completed
 echo
 echo "FRP update completed successfully."
 echo

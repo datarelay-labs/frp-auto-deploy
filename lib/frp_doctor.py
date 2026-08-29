@@ -80,6 +80,44 @@ class DoctorError(Exception):
     pass
 
 
+MARKER_NOTE = 'Do not delete the pending marker by hand unless recovering from a known-good backup. doctor does not delete the marker.'
+
+
+def _recovery_for_role(role, kind):
+    if kind == 'frp':
+        if role in ('client', 'partial_client'):
+            return 'sudo frpctl update'
+        return 'sudo frpctl frp-update'
+    if role in ('client', 'partial_client'):
+        return 'sudo frpctl update'
+    if role in ('server', 'partial_server', 'dual'):
+        return 'sudo frpctl project-update'
+    return ''
+
+
+def _recovery_for_operation(operation, role):
+    op = str(operation or '').strip()
+    extra = '\n%s' % MARKER_NOTE
+    if op == 'project-update':
+        return 'sudo frpctl project-update' + extra
+    if op in ('frp-update',):
+        return 'sudo frpctl frp-update' + extra
+    if op in ('client-update',):
+        return 'sudo frpctl update' + extra
+    if op == 'install':
+        return 're-run the server installer; do not delete the pending marker' + extra
+    if op == 'restore':
+        return 'inspect the pending restore marker and retry sudo frpctl restore only after the failure is understood' + extra
+    if op == 'update':
+        if role in ('client', 'partial_client', 'dual'):
+            return 'sudo frpctl update' + extra
+        return 'sudo frpctl frp-update' + extra
+    return (
+        'inspect /var/lib/frp-auto-deploy/update-pending.json operation=%s and re-run the matching command' % (op or 'unknown')
+        + extra
+    )
+
+
 def redact(text):
     if not text:
         return ''
@@ -1116,7 +1154,7 @@ def check_versions(report, paths, facts):
                 'project_version', WARN,
                 'installed project version file is missing',
                 '',
-                'sudo frpctl update' if report.role in ('server', 'client', 'dual') else '',
+                _recovery_for_role(report.role, 'project'),
                 'installation',
             )
     elif embedded and installed_proj != embedded:
@@ -1124,7 +1162,7 @@ def check_versions(report, paths, facts):
             'project_version', FAIL,
             'installed project version does not match this tool',
             'installed=%s tool=%s' % (installed_proj, embedded),
-            'sudo frpctl update',
+            _recovery_for_role(report.role, 'project'),
             'installation',
         )
     else:
@@ -1136,13 +1174,13 @@ def check_versions(report, paths, facts):
         for label, bpath in (('frps', '/usr/local/bin/frps'), ('frpc', '/usr/local/bin/frpc')):
             ver = parse_binary_version(paths, bpath)
             if ver == 'unknown' and not paths.is_file(bpath):
-                report.add('frp_version_%s' % label, FAIL, '%s binary is missing' % label, bpath, 'sudo frpctl update', 'installation')
+                report.add('frp_version_%s' % label, FAIL, '%s binary is missing' % label, bpath, 'sudo frpctl frp-update', 'installation')
             elif ver != pinned:
                 report.add(
                     'frp_version_%s' % label, FAIL,
                     '%s version is not the pinned release' % label,
                     'installed=%s pinned=%s' % (ver, pinned),
-                    'sudo frpctl update',
+                    'sudo frpctl frp-update',
                     'installation',
                 )
             else:
@@ -1156,13 +1194,13 @@ def check_versions(report, paths, facts):
         return
     ver = parse_binary_version(paths, bin_path)
     if not paths.is_file(bin_path):
-        report.add('frp_version', FAIL, 'FRP binary is missing', bin_path, 'sudo frpctl update', 'installation')
+        report.add('frp_version', FAIL, 'FRP binary is missing', bin_path, _recovery_for_role(role, 'frp'), 'installation')
     elif ver != pinned:
         report.add(
             'frp_version', FAIL,
             'installed FRP version is not the pinned release',
             'installed=%s pinned=%s' % (ver, pinned),
-            'sudo frpctl update',
+            _recovery_for_role(role, 'frp'),
             'installation',
         )
     else:
@@ -1181,30 +1219,41 @@ def check_pending(report, paths):
                 'pending_transaction', FAIL,
                 'update pending marker is unreadable',
                 err,
-                'inspect /var/lib/frp-auto-deploy/update-pending.json; re-run sudo frpctl update after recovering state. doctor does not delete the marker',
+                'inspect /var/lib/frp-auto-deploy/update-pending.json. %s' % MARKER_NOTE,
                 'state',
             )
         else:
             phase = str((data or {}).get('phase') or 'unknown')
             operation = str((data or {}).get('operation') or '')
             failure = str((data or {}).get('failure_class') or (data or {}).get('FAILURE_CLASS') or '')
+            recovery = _recovery_for_operation(operation, report.role)
             if phase in ('complete', 'cleanup', 'done'):
                 report.add(
                     'pending_transaction', WARN,
                     'update pending marker is still present after a completed-looking phase',
                     'phase=%s operation=%s' % (phase, operation),
-                    're-run sudo frpctl update to finish cleanup; doctor does not delete the marker',
+                    recovery,
                     'state',
                 )
             else:
                 detail = 'phase=%s operation=%s' % (phase, operation)
                 if failure:
                     detail += ' failure_class=%s' % failure
+                if operation == 'project-update':
+                    summary = 'interrupted project update is pending'
+                elif operation in ('frp-update',):
+                    summary = 'interrupted FRP binary update is pending'
+                elif operation in ('client-update', 'update') and report.role in ('client', 'partial_client'):
+                    summary = 'interrupted client update is pending'
+                elif operation == 'install':
+                    summary = 'interrupted install is pending'
+                else:
+                    summary = 'interrupted lifecycle transaction is pending'
                 report.add(
                     'pending_transaction', FAIL,
-                    'interrupted project update is pending',
+                    summary,
                     detail,
-                    'sudo frpctl update  (do not delete the pending marker by hand unless recovering from a known-good backup)',
+                    recovery,
                     'state',
                 )
             report.display['pending_update'] = {'phase': phase, 'operation': operation, 'failure_class': failure}

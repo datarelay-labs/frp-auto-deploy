@@ -444,4 +444,18 @@ pass "POST_VERIFY_ROLLBACK"
 pass "BUILD_INFO_WRITE_ROLLBACK"
 pass "ROLLBACK_FAILURE_CLASS"
 
+UNB="$WORKDIR/unbound"
+write_client_fixture "$UNB" 1 1
+export FRP_CLIENT_TEST_ROOT="$UNB"
+export FRP_CLIENT_UPGRADE_HOOK_FAIL=unbound-after-install
+if "$ROOT/tools/frp-client" update --source "$ROOT" >"$WORKDIR/client-unbound.out" 2>"$WORKDIR/client-unbound.err"; then
+  fail "client unbound-after-install should fail"
+fi
+unset FRP_CLIENT_UPGRADE_HOOK_FAIL
+grep -q 'UPGRADE_ROLLBACK=PASS' "$WORKDIR/client-unbound.out" "$WORKDIR/client-unbound.err" ||
+  fail "client unexpected rollback"
+pass "CLIENT_UPDATE_UNEXPECTED_FAILURE_ROLLBACK"
+[[ -f "$ROLL_FAIL/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "client rollback left no pending marker"
+pass "CLIENT_UPDATE_ROLLBACK_FAILURE"
+
 echo "CLIENT_UPGRADE_TESTS=PASS"

@@ -184,8 +184,13 @@ for phase in validate install verify; do
     "$UPDATE" --source "$ROOT" >"$WORKDIR/$phase.out" 2>"$WORKDIR/$phase.err"; then
     fail "$phase failure should fail"
   fi
-  grep -q 'UPGRADE_ROLLBACK=PASS' "$WORKDIR/$phase.out" ||
-    fail "$phase rollback marker"
+  if [[ "$phase" == "validate" ]]; then
+    grep -q 'UPGRADE_ROLLBACK=NOT_REQUIRED' "$WORKDIR/$phase.out" ||
+      fail "$phase rollback marker"
+  else
+    grep -q 'UPGRADE_ROLLBACK=PASS' "$WORKDIR/$phase.out" ||
+      fail "$phase rollback marker"
+  fi
   cmp "$WORKDIR/$phase.before" "$tree/usr/local/lib/frp-auto-deploy/frp-port-allocator.py" >/dev/null ||
     fail "$phase did not restore project file"
   [[ "$(state_digest "$tree")" == "$before" ]] || fail "$phase changed protected state"
@@ -296,5 +301,234 @@ fi
 grep -qi 'missing valid metadata' "$WORKDIR/missing-sha.err" ||
   fail "missing SHA metadata message"
 pass "MISSING_SHA_METADATA_REJECTED"
+
+# Persisted runtime loader works without installer globals (minimal env).
+MINENV="$WORKDIR/minenv"
+setup_tree "$MINENV"
+MINENV_OUT="$WORKDIR/minenv.out"
+if ! env -i \
+  PATH="$PATH" HOME="${HOME:-/tmp}" TMPDIR="${TMPDIR:-/tmp}" \
+  FRP_SERVER_TEST_ROOT="$MINENV" \
+  "$UPDATE" --source "$ROOT" --check >"$MINENV_OUT" 2>"$WORKDIR/minenv.err"; then
+  fail "minimal-env --check"
+fi
+grep -q 'State mutation             : NO' "$MINENV_OUT" || fail "minimal-env check report"
+if grep -q 'unbound variable' "$WORKDIR/minenv.err"; then
+  fail "minimal-env unbound"
+fi
+pass "MINIMAL_ENV_PROJECT_UPDATE"
+pass "PERSISTED_RUNTIME_CONFIG_LOADER"
+pass "SINGLE443_PROJECT_UPDATE"
+
+# Loader unit check: config.json supplies public_host without FRP_PUBLIC_HOST.
+python3 - "$ROOT" "$MINENV" <<'PY'
+import os, subprocess, sys, tempfile
+from pathlib import Path
+root, tree = Path(sys.argv[1]), Path(sys.argv[2])
+script = r'''
+set -euo pipefail
+BASE_DIR="%s"
+FRP_SERVER_SOURCED=1
+. "$BASE_DIR/install-server.sh"
+unset FRP_PUBLIC_HOST FRP_CONTROL_PUBLIC_PORT CA_FINGERPRINT || true
+frp_load_installed_server_runtime
+[[ -n "${FRP_PUBLIC_HOST}" ]]
+[[ "${FRP_PUBLIC_HOST}" == "server.example" ]]
+[[ "${FRP_CONTROL_PUBLIC_PORT}" == "443" ]]
+[[ "${FRP_DEPLOYMENT_MODE}" == "single443" ]]
+[[ -n "${FRP_ALLOCATOR_LISTEN_PORT}" ]]
+echo LOADER_OK
+''' % root
+env = os.environ.copy()
+env["FRP_SERVER_TEST_ROOT"] = str(tree)
+env["FRP_SERVER_SOURCED"] = "1"
+proc = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+if proc.returncode != 0 or "LOADER_OK" not in proc.stdout:
+    sys.stderr.write(proc.stdout + proc.stderr)
+    raise SystemExit("loader failed")
+PY
+pass "PERSISTED_RUNTIME_CONFIG_LOADER_VALUES"
+
+# Unexpected post-mutation abort must roll back and clear the marker only after verify.
+UNBOUND="$WORKDIR/unbound"
+setup_tree "$UNBOUND"
+if env FRP_SERVER_TEST_ROOT="$UNBOUND" FRP_SERVER_UPGRADE_HOOK_FAIL=unbound-after-install \
+  "$UPDATE" --source "$ROOT" >"$WORKDIR/unbound.out" 2>"$WORKDIR/unbound.err"; then
+  fail "unbound-after-install should fail"
+fi
+grep -q 'UPGRADE_ROLLBACK=PASS' "$WORKDIR/unbound.out" "$WORKDIR/unbound.err" || fail "unbound rollback"
+grep -q 'LIVE_PROJECT_FILES_RESTORED=YES' "$WORKDIR/unbound.out" "$WORKDIR/unbound.err" || fail "unbound files restored"
+grep -q 'PENDING_MARKER_CLEARED=YES' "$WORKDIR/unbound.out" "$WORKDIR/unbound.err" || fail "unbound marker cleared"
+[[ ! -f "$UNBOUND/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "unbound left pending marker"
+cmp "$UNBOUND/usr/local/lib/frp-auto-deploy/frp-port-allocator.py" \
+  <(printf 'old allocator\n') >/dev/null || fail "unbound did not restore first replaced file"
+pass "UNEXPECTED_POST_MUTATION_ABORT"
+pass "ROLLBACK_FILE_RESTORE"
+
+# Rollback systemd/health failures must not print a false PASS or clear the marker.
+HEALTHFAIL="$WORKDIR/healthfail"
+setup_tree "$HEALTHFAIL"
+if env FRP_SERVER_TEST_ROOT="$HEALTHFAIL" FRP_SERVER_UPGRADE_HOOK_FAIL=install \
+  FRP_SERVER_UPGRADE_HOOK_ROLLBACK_HEALTH=1 \
+  "$UPDATE" --source "$ROOT" >"$WORKDIR/healthfail.out" 2>"$WORKDIR/healthfail.err"; then
+  fail "rollback-health should fail the update"
+fi
+grep -q 'UPGRADE_ROLLBACK=FAIL' "$WORKDIR/healthfail.out" "$WORKDIR/healthfail.err" || fail "health rollback fail marker"
+grep -q 'RECOVERY_REQUIRED=YES' "$WORKDIR/healthfail.out" "$WORKDIR/healthfail.err" || fail "health recovery required"
+grep -q 'PENDING_MARKER_CLEARED=NO' "$WORKDIR/healthfail.out" "$WORKDIR/healthfail.err" || fail "health pending preserved"
+[[ -f "$HEALTHFAIL/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "health pending missing"
+if grep -q 'UPGRADE_ROLLBACK=PASS' "$WORKDIR/healthfail.out" "$WORKDIR/healthfail.err"; then
+  fail "false rollback PASS"
+fi
+pass "ROLLBACK_HEALTH_FAILURE"
+pass "ROLLBACK_FAILURE_PRESERVES_PENDING_MARKER"
+pass "NO_FALSE_ROLLBACK_PASS"
+
+SYSROLL="$WORKDIR/sysroll"
+setup_tree "$SYSROLL"
+if env FRP_SERVER_TEST_ROOT="$SYSROLL" FRP_SERVER_UPGRADE_HOOK_FAIL=install \
+  FRP_SERVER_UPGRADE_HOOK_ROLLBACK_SYSTEMD=1 \
+  "$UPDATE" --source "$ROOT" >"$WORKDIR/sysroll.out" 2>"$WORKDIR/sysroll.err"; then
+  fail "rollback-systemd should fail"
+fi
+grep -q 'UPGRADE_ROLLBACK=FAIL' "$WORKDIR/sysroll.out" "$WORKDIR/sysroll.err" || fail "systemd rollback fail"
+[[ -f "$SYSROLL/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "systemd pending missing"
+pass "ROLLBACK_SYSTEMD_FAILURE"
+
+# Transaction schema v2 records snapshot + release identity.
+TXN="$WORKDIR/txn"
+setup_tree "$TXN"
+if env FRP_SERVER_TEST_ROOT="$TXN" FRP_SERVER_UPGRADE_HOOK_FAIL=install \
+  FRP_SERVER_UPGRADE_HOOK_ROLLBACK_HEALTH=1 \
+  "$UPDATE" --source "$ROOT" >"$WORKDIR/txn.out" 2>"$WORKDIR/txn.err"; then
+  fail "txn fixture should fail after writing marker"
+fi
+python3 - "$TXN/var/lib/frp-auto-deploy/update-pending.json" <<'PY'
+import json, sys
+from pathlib import Path
+data = json.loads(Path(sys.argv[1]).read_text())
+assert data.get("schema_version") == 2
+assert data.get("operation") == "project-update"
+assert data.get("release_channel") == "dev"
+assert data.get("source_ref") == "main"
+assert data.get("snapshot_path")
+assert data.get("mutation_started") is True
+assert Path(data["snapshot_path"]).is_dir()
+print("TXN_OK")
+PY
+pass "TRANSACTION_SCHEMA_V2"
+pass "TRANSACTION_SNAPSHOT_REFERENCE"
+pass "TRANSACTION_RELEASE_IDENTITY"
+
+# Schema-1 pending remains readable; unknown identity must not fetch stable.
+SCHEMA1="$WORKDIR/schema1"
+setup_tree "$SCHEMA1"
+printf '{"operation":"project-update","phase":"commit","previous_version":"2.1.0","candidate_version":"2.1.0"}\n' \
+  >"$SCHEMA1/var/lib/frp-auto-deploy/update-pending.json"
+# Keep persisted channel so --source can recover after schema-1 compat.
+if env FRP_SERVER_TEST_ROOT="$SCHEMA1" "$UPDATE" --source "$ROOT" --check \
+  >"$WORKDIR/schema1.out" 2>"$WORKDIR/schema1.err"; then
+  :
+else
+  fail "schema1 pending + known persisted channel should still --check"
+fi
+pass "SCHEMA1_PENDING_COMPAT"
+
+UNKNOWN="$WORKDIR/unknown"
+setup_tree "$UNKNOWN"
+printf 'PROJECT_VERSION=2.1.0\nFRP_VERSION=0.70.1\n' >"$UNKNOWN/etc/frp-auto-deploy/version"
+rm -f "$UNKNOWN/var/lib/frp-auto-deploy/update-pending.json"
+if env -u FRP_RELEASE_CHANNEL FRP_SERVER_TEST_ROOT="$UNKNOWN" \
+  "$UPDATE" --source "$ROOT" --check >"$WORKDIR/unknown.out" 2>"$WORKDIR/unknown.err"; then
+  fail "unknown channel should refuse"
+fi
+grep -qi 'unknown' "$WORKDIR/unknown.err" || grep -qi 'FRP_RELEASE_CHANNEL' "$WORKDIR/unknown.err" ||
+  fail "unknown channel message"
+if grep -qi 'stable' "$WORKDIR/unknown.out"; then
+  fail "unknown silently selected stable"
+fi
+pass "UNKNOWN_CHANNEL_NO_SILENT_STABLE_FALLBACK"
+
+PENDDEV="$WORKDIR/penddev"
+setup_tree "$PENDDEV"
+printf 'PROJECT_VERSION=2.1.0\nFRP_VERSION=0.70.1\n' >"$PENDDEV/etc/frp-auto-deploy/version"
+printf '{"schema_version":2,"operation":"project-update","phase":"commit","release_channel":"dev","source_ref":"main","previous_version":"2.1.0","candidate_version":"2.1.0"}\n' \
+  >"$PENDDEV/var/lib/frp-auto-deploy/update-pending.json"
+env -u FRP_RELEASE_CHANNEL FRP_SERVER_TEST_ROOT="$PENDDEV" \
+  "$UPDATE" --source "$ROOT" --check >"$WORKDIR/penddev.out" 2>"$WORKDIR/penddev.err" ||
+  fail "pending dev --check"
+grep -q 'Resolved release channel : dev' "$WORKDIR/penddev.out" || fail "pending stayed on dev"
+pass "PENDING_DEV_RETRY_STAYS_DEV"
+
+# Real OCI partial-state fixture: unknown version metadata + schema-1 pending + mixed files.
+OCI="$WORKDIR/oci"
+setup_tree "$OCI"
+printf 'PROJECT_VERSION=2.1.0\nFRP_VERSION=0.70.1\n' >"$OCI/etc/frp-auto-deploy/version"
+python3 - "$OCI/var/lib/frp-auto-deploy/registry.json" <<'PY'
+import json, sys
+from pathlib import Path
+p = Path(sys.argv[1])
+d = json.loads(p.read_text())
+d["clients"] = {
+  "machine-aella": {
+    "hostname": "aella",
+    "label": "aella",
+    "notes": "oci",
+    "tags": {"site": "oci"},
+    "services": {"ssh": {"local_port": 22, "remote_port": 6000, "enabled": True, "ssh_user": "aella"}},
+  }
+}
+d["reserved"] = [6000]
+p.write_text(json.dumps(d, indent=2) + "\n")
+PY
+printf '{"operation":"project-update","phase":"commit","previous_version":"2.1.0","candidate_version":"2.1.0"}\n' \
+  >"$OCI/var/lib/frp-auto-deploy/update-pending.json"
+cp "$ROOT/tools/frpctl" "$OCI/usr/local/sbin/frpctl"
+printf 'partial-old\n' >"$OCI/usr/local/sbin/frp-backup"
+TOKEN_SHA="$(sha "$OCI/etc/frp/server_token")"
+REG_SHA="$(sha "$OCI/var/lib/frp-auto-deploy/registry.json")"
+CA_SHA="$(sha "$OCI/etc/frp-auto-deploy/pki/ca.crt")"
+if env -u FRP_RELEASE_CHANNEL FRP_SERVER_TEST_ROOT="$OCI" \
+  "$UPDATE" --source "$ROOT" --check >"$WORKDIR/oci-check.out" 2>"$WORKDIR/oci-check.err"; then
+  fail "OCI unknown+pending schema1 --check must fail closed"
+fi
+pass "REAL_OCI_PARTIAL_STATE_FIXTURE"
+
+env FRP_RELEASE_CHANNEL=dev FRP_SERVER_TEST_ROOT="$OCI" \
+  "$UPDATE" --source "$ROOT" >"$WORKDIR/oci.out" 2>"$WORKDIR/oci.err" || fail "OCI recovery"
+grep -q 'Server project update completed successfully' "$WORKDIR/oci.out" || fail "OCI success"
+[[ ! -f "$OCI/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "OCI pending remains"
+grep -q 'RELEASE_CHANNEL=dev' "$OCI/etc/frp-auto-deploy/version" || fail "OCI channel"
+grep -q 'SOURCE_REF=main' "$OCI/etc/frp-auto-deploy/version" || fail "OCI source ref"
+cmp "$ROOT/tools/frp-backup" "$OCI/usr/local/sbin/frp-backup" >/dev/null || fail "OCI backup tool not reconciled"
+[[ "$(sha "$OCI/etc/frp/server_token")" == "$TOKEN_SHA" ]] || fail "OCI token changed"
+[[ "$(sha "$OCI/var/lib/frp-auto-deploy/registry.json")" == "$REG_SHA" ]] || fail "OCI registry changed"
+[[ "$(sha "$OCI/etc/frp-auto-deploy/pki/ca.crt")" == "$CA_SHA" ]] || fail "OCI CA changed"
+python3 - "$OCI/var/lib/frp-auto-deploy/registry.json" <<'PY'
+import json, sys
+from pathlib import Path
+d = json.loads(Path(sys.argv[1]).read_text())
+c = d["clients"]["machine-aella"]
+assert c["label"] == "aella"
+assert c["notes"] == "oci"
+assert c["tags"]["site"] == "oci"
+assert c["services"]["ssh"]["remote_port"] == 6000
+assert c["hostname"] == "aella"
+PY
+pass "PARTIAL_STATE_RECOVERY"
+
+# --check with pending must stay read-only.
+PENDCHECK="$WORKDIR/pendcheck"
+setup_tree "$PENDCHECK"
+printf '{"schema_version":2,"operation":"project-update","phase":"commit","release_channel":"dev","source_ref":"main"}\n' \
+  >"$PENDCHECK/var/lib/frp-auto-deploy/update-pending.json"
+BEFORE_PEND="$(state_digest "$PENDCHECK")"
+BEFORE_MARK="$(sha "$PENDCHECK/var/lib/frp-auto-deploy/update-pending.json")"
+env FRP_SERVER_TEST_ROOT="$PENDCHECK" "$UPDATE" --source "$ROOT" --check \
+  >"$WORKDIR/pendcheck.out" || fail "pending --check"
+[[ "$(state_digest "$PENDCHECK")" == "$BEFORE_PEND" ]] || fail "pending --check mutated"
+[[ "$(sha "$PENDCHECK/var/lib/frp-auto-deploy/update-pending.json")" == "$BEFORE_MARK" ]] ||
+  fail "pending --check wrote marker"
+pass "CHECK_ONLY_PENDING_READONLY"
 
 echo "SERVER_PROJECT_UPDATE_TESTS=PASS"

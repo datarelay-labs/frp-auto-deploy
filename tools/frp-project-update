@@ -15,13 +15,14 @@ fi
 
 usage() {
   cat <<'EOF'
-Usage: frp-project-update [--check] [--source DIR]
+Usage: frp-project-update [--check] [--source DIR] [--channel CHANNEL]
 
 Safely refresh frp-auto-deploy server management software without changing the
 FRP binary or asking installation questions.
 
   --check, --dry-run  verify the candidate and report update availability only
   --source DIR        use a local source tree (tests/development)
+  --channel CHANNEL   explicit release line: dev or stable
   -h, --help          show this help
 EOF
 }
@@ -36,6 +37,12 @@ while [[ $# -gt 0 ]]; do
       SOURCE="$2"
       shift 2
       ;;
+    --channel)
+      [[ $# -ge 2 ]] || { echo "ERROR: --channel requires dev or stable" >&2; exit 2; }
+      FRP_RELEASE_CHANNEL="$2"
+      export FRP_RELEASE_CHANNEL
+      shift 2
+      ;;
     -h|--help) usage; exit 0 ;;
     *) echo "ERROR: unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -45,6 +52,13 @@ if [[ ${EUID} -ne 0 && -z "${FRP_SERVER_TEST_ROOT:-}" ]]; then
   echo "ERROR: run with sudo" >&2
   exit 1
 fi
+
+if ! frp_resolve_project_update_identity; then
+  exit 1
+fi
+export FRP_RELEASE_CHANNEL="$FRP_RESOLVED_RELEASE_CHANNEL"
+echo "Resolved release channel : ${FRP_RESOLVED_RELEASE_CHANNEL}"
+echo "Resolved source ref      : ${FRP_RESOLVED_SOURCE_REF}"
 
 if [[ -n "$SOURCE" ]]; then
   source_args=(--upgrade --source "$SOURCE")
@@ -97,7 +111,8 @@ args=(--upgrade)
 if [[ "$CHECK_ONLY" == "1" ]]; then
   args+=(--check)
 fi
-FRP_EXPECTED_SOURCE_REF="$(frp_release_git_ref)" \
-FRP_EXPECTED_RELEASE_CHANNEL="$(frp_release_channel)" \
+FRP_EXPECTED_SOURCE_REF="$FRP_RESOLVED_SOURCE_REF" \
+FRP_EXPECTED_RELEASE_CHANNEL="$FRP_RESOLVED_RELEASE_CHANNEL" \
 FRP_BUNDLE_SHA256="$expected" \
+FRP_RELEASE_CHANNEL="$FRP_RESOLVED_RELEASE_CHANNEL" \
   exec bash "$bundle" "${args[@]}"

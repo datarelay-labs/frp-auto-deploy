@@ -53,6 +53,26 @@ class AuditLogTests(unittest.TestCase):
         ok = self.audit.emit("backup.created")
         self.assertFalse(ok)
 
+    def test_rotation_on_emit(self):
+        os.environ["FRP_AUDIT_ROTATE_BYTES"] = "80"
+        os.environ["FRP_AUDIT_ROTATE_KEEP"] = "2"
+        for index in range(20):
+            self.audit.emit("backup.created", details={"n": index, "pad": "x" * 20})
+        path = self.audit.audit_path()
+        rotated = Path(str(path) + ".1")
+        self.assertTrue(path.is_file())
+        self.assertTrue(rotated.is_file())
+
+    def test_installed_module_path(self):
+        installed = Path(self.root) / "usr" / "local" / "lib" / "frp-auto-deploy"
+        installed.mkdir(parents=True)
+        src = Path(__file__).resolve().parents[1] / "lib" / "frp_audit.py"
+        (installed / "frp_audit.py").write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+        tool = Path(self.root) / "usr" / "local" / "sbin" / "frp-backup"
+        tool.parent.mkdir(parents=True, exist_ok=True)
+        path = self.audit.discover_audit_path(str(tool))
+        self.assertEqual(path, installed / "frp_audit.py")
+
 
 if __name__ == "__main__":
     unittest.main()

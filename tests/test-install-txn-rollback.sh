@@ -94,4 +94,23 @@ grep -q 'frp_server_create_snapshot' "$ROOT/install-server.sh" || fail "missing 
 grep -q 'frp_verify_frontend_proxy_health' "$ROOT/install-server.sh" || fail "missing frontend proxy gate"
 pass "TXN_FAILURE_HOOKS_PRESENT"
 
+python3 - "$ROOT" <<'PY'
+import os, sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / "lib"))
+import frp_install_txn
+os.environ["FRP_INSTALL_TXN_HOOK_SYSTEMD_FAIL"] = "1"
+os.environ.pop("FRP_SERVER_TEST_ROOT", None)
+ok = frp_install_txn.apply_service_states({
+    "services": {
+        "skipped": False,
+        "units": [{"unit": "frps.service", "enabled": "enabled", "active": "active"}],
+    }
+}, skip=False)
+if ok:
+    raise SystemExit("systemd hook should fail apply_service_states")
+print("SYSTEMD_HOOK_OK")
+PY
+pass "ROLLBACK_SYSTEMD_FAILURE_TEST"
+
 echo "INSTALL_TXN_ROLLBACK_TEST=PASS"

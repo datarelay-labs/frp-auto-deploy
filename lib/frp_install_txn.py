@@ -3,6 +3,8 @@
 
 Never rotates or deletes CA material, the FRP token, the registry, or
 reservations. Those paths are excluded from both snapshot and restore.
+
+Managed project-file lists come from server-project-files.manifest.
 """
 from __future__ import annotations
 
@@ -15,58 +17,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-PROTECTED_EXACT = (
-    'etc/frp/server_token',
-    'var/lib/frp-auto-deploy/registry.json',
-)
-PROTECTED_PREFIXES = (
-    'etc/frp-auto-deploy/pki/',
-    'var/lib/frp-auto-deploy/enrollments/',
-    'var/lib/frp-auto-deploy/bootstrap/',
-)
+from frp_project_files import protected_exact, protected_prefixes, snapshot_rels
 
-SNAPSHOT_RELS = (
-    'etc/frp-auto-deploy/config.json',
-    'etc/frp/frps.toml',
-    'etc/frp-auto-deploy/frontend.conf',
-    'var/lib/frp-auto-deploy/nginx-ownership',
-    'etc/systemd/system/frps.service',
-    'etc/systemd/system/frp-port-allocator.service',
-    'etc/systemd/system/frp-frontend.service',
-    'usr/local/bin/frps',
-    'usr/local/lib/frp-auto-deploy/frp-port-allocator.py',
-    'usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py',
-    'usr/local/lib/frp-auto-deploy/frp_pki.py',
-    'usr/local/lib/frp-auto-deploy/frp_frontend.py',
-    'usr/local/lib/frp-auto-deploy/frp-common.sh',
-    'usr/local/lib/frp-auto-deploy/frp-doctor-common.sh',
-    'usr/local/lib/frp-auto-deploy/frp_doctor.py',
-    'usr/local/lib/frp-auto-deploy/frp_install_txn.py',
-    'usr/local/lib/frp-auto-deploy/frp-server-upgrade.sh',
-    'usr/local/lib/frp-auto-deploy/frp_client_registry.py',
-    'usr/local/lib/frp-auto-deploy/frp_audit.py',
-    'usr/local/lib/frp-auto-deploy/release-manifest.json',
-    'usr/local/lib/frp-auto-deploy/SHA256SUMS',
-    'usr/local/sbin/frp-create-client',
-    'usr/local/sbin/frp-enrollments',
-    'usr/local/sbin/frp-enrollment-revoke',
-    'usr/local/sbin/frp-enroll-bulk',
-    'usr/local/sbin/frp-clients',
-    'usr/local/sbin/frp-client-info',
-    'usr/local/sbin/frp-client-set',
-    'usr/local/sbin/frp-release-client',
-    'usr/local/sbin/frp-release-service',
-    'usr/local/sbin/frp-revoke-client',
-    'usr/local/sbin/frp-set-client-installer-url',
-    'usr/local/sbin/frp-server-status',
-    'usr/local/sbin/frp-project-update',
-    'usr/local/sbin/frp-backup',
-    'usr/local/sbin/frp-restore',
-    'usr/local/sbin/frp-update',
-    'usr/local/sbin/frp-upstream',
-    'usr/local/sbin/frpctl',
-    'etc/frp-auto-deploy/version',
-)
+PROTECTED_EXACT = protected_exact()
+PROTECTED_PREFIXES = protected_prefixes()
+SNAPSHOT_RELS = tuple(snapshot_rels())
 
 UNIT_NAMES = (
     'frps.service',
@@ -119,7 +74,6 @@ def _unit_state(unit):
 def capture_service_states(root):
     """Capture project unit and nginx ownership-relevant service state."""
     root = Path(root)
-    # Under a test root, systemd state is not meaningful for the host.
     if str(root) not in ('', '/', '.') and os.environ.get('FRP_SERVER_TEST_ROOT'):
         return {'units': [], 'skipped': True}
     units = [_unit_state(name) for name in UNIT_NAMES]
@@ -192,6 +146,24 @@ def restore(root, dest):
     return meta
 
 
+def _systemctl(args, timeout=30):
+    if os.environ.get('FRP_INSTALL_TXN_HOOK_SYSTEMD_FAIL') == '1':
+        return False
+    if not shutil.which('systemctl'):
+        return False
+    try:
+        result = subprocess.run(
+            ['systemctl', *args],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+            check=False,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def apply_service_states(meta, skip=False):
     """Restore enabled/active semantics for project units after file restore."""
     if skip or not meta:
@@ -201,98 +173,68 @@ def apply_service_states(meta, skip=False):
         return True
     if not shutil.which('systemctl'):
         return True
-    ok = True
-    try:
-        subprocess.run(
-            ['systemctl', 'daemon-reload'],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=30,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        ok = False
+    if not _systemctl(['daemon-reload'], timeout=30):
+        return False
     for item in services.get('units') or []:
         unit = str(item.get('unit') or '')
         if not unit:
             continue
         enabled = item.get('enabled')
         active = item.get('active')
-        try:
-            if enabled in ('enabled', 'enabled-runtime'):
-                subprocess.run(
-                    ['systemctl', 'enable', unit],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=30,
-                    check=False,
-                )
-            elif enabled in ('disabled', 'disabled-runtime'):
-                subprocess.run(
-                    ['systemctl', 'disable', unit],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=30,
-                    check=False,
-                )
-            if active == 'active':
-                subprocess.run(
-                    ['systemctl', 'restart', unit],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=60,
-                    check=False,
-                )
-            elif active in ('inactive', 'failed'):
-                subprocess.run(
-                    ['systemctl', 'stop', unit],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=60,
-                    check=False,
-                )
-        except (OSError, subprocess.SubprocessError):
-            ok = False
+        if enabled in ('enabled', 'enabled-runtime'):
+            if not _systemctl(['enable', unit], timeout=30):
+                return False
+        elif enabled in ('disabled', 'disabled-runtime'):
+            if not _systemctl(['disable', unit], timeout=30):
+                return False
+        if active == 'active':
+            if not _systemctl(['restart', unit], timeout=60):
+                return False
+        elif active in ('inactive', 'failed'):
+            if not _systemctl(['stop', unit], timeout=60):
+                return False
     nginx = services.get('nginx') or {}
     if nginx:
         enabled = nginx.get('enabled')
         active = nginx.get('active')
-        try:
-            if enabled in ('enabled', 'enabled-runtime'):
-                subprocess.run(
-                    ['systemctl', 'enable', 'nginx.service'],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=30,
-                    check=False,
-                )
-            elif enabled in ('disabled', 'disabled-runtime'):
-                subprocess.run(
-                    ['systemctl', 'disable', 'nginx.service'],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=30,
-                    check=False,
-                )
-            if active == 'active':
-                subprocess.run(
-                    ['systemctl', 'restart', 'nginx.service'],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=60,
-                    check=False,
-                )
-            elif active in ('inactive', 'failed'):
-                subprocess.run(
-                    ['systemctl', 'stop', 'nginx.service'],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=60,
-                    check=False,
-                )
-        except (OSError, subprocess.SubprocessError):
-            ok = False
-    return ok
+        if enabled in ('enabled', 'enabled-runtime'):
+            if not _systemctl(['enable', 'nginx.service'], timeout=30):
+                return False
+        elif enabled in ('disabled', 'disabled-runtime'):
+            if not _systemctl(['disable', 'nginx.service'], timeout=30):
+                return False
+        if active == 'active':
+            if not _systemctl(['restart', 'nginx.service'], timeout=60):
+                return False
+        elif active in ('inactive', 'failed'):
+            if not _systemctl(['stop', 'nginx.service'], timeout=60):
+                return False
+    return True
+
+
+def verify_service_states(meta, skip=False):
+    if skip or not meta:
+        return True
+    services = meta.get('services') or {}
+    if services.get('skipped'):
+        return True
+    if not shutil.which('systemctl'):
+        return True
+    for item in services.get('units') or []:
+        unit = str(item.get('unit') or '')
+        if not unit:
+            continue
+        current = _unit_state(unit)
+        expected_enabled = item.get('enabled')
+        expected_active = item.get('active')
+        if expected_enabled in ('enabled', 'enabled-runtime'):
+            if current.get('enabled') not in ('enabled', 'enabled-runtime', 'static'):
+                return False
+        if expected_active == 'active' and current.get('active') != 'active':
+            return False
+        if expected_active in ('inactive', 'failed') and current.get('active') == 'active':
+            return False
+    return True
 
 
 def main(argv=None):
@@ -313,8 +255,14 @@ def main(argv=None):
     if meta is None:
         sys.stderr.write('ERROR: install snapshot metadata is missing\n')
         return 1
+    skip = bool(os.environ.get('FRP_SERVER_TEST_ROOT'))
     if args.apply_services:
-        apply_service_states(meta, skip=bool(os.environ.get('FRP_SERVER_TEST_ROOT')))
+        if not apply_service_states(meta, skip=skip):
+            sys.stderr.write('ERROR: service-state restoration failed\n')
+            return 1
+        if not verify_service_states(meta, skip=skip):
+            sys.stderr.write('ERROR: restored service state verification failed\n')
+            return 1
     return 0
 
 

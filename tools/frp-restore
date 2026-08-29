@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -278,6 +279,148 @@ def apply_payload(root: Path, extracted: Path, allow_hook: bool = True) -> None:
             raise RestoreError("simulated restore failure")
 
 
+def _load_module(name, filename):
+    here = Path(__file__).resolve()
+    candidates = (
+        here.parent.parent / "lib" / filename,
+        Path("/usr/local/lib/frp-auto-deploy") / filename,
+    )
+    for path in candidates:
+        if path.is_file():
+            spec = importlib.util.spec_from_file_location(name, str(path))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+    return None
+
+
+def _audit_emit(event, **kwargs):
+    try:
+        audit = _load_module("frp_audit", "frp_audit.py")
+        if audit is not None:
+            audit.try_emit(event, **kwargs)
+    except Exception:
+        return
+
+
+def _write_txn(root: Path, snapshot: Path | None = None) -> None:
+    marker = root / "var/lib/frp-auto-deploy/update-pending.json"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "schema_version": 2,
+        "operation": "restore",
+        "phase": "commit",
+        "previous_version": "",
+        "candidate_version": "",
+        "started_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "mutation_started": True,
+    }
+    if snapshot is not None:
+        record["snapshot_path"] = str(snapshot)
+    marker.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+    os.chmod(marker, 0o644)
+
+
+def _clear_txn(root: Path) -> None:
+    marker = root / "var/lib/frp-auto-deploy/update-pending.json"
+    if marker.is_file():
+        marker.unlink()
+
+
+def verify_restored_control_state(root: Path, in_rollback: bool = False) -> None:
+    if os.environ.get("FRP_RESTORE_HOOK_HEALTH_FAIL") == "1" and not in_rollback:
+        raise RestoreError("simulated post-restore health failure")
+    if in_rollback and os.environ.get("FRP_RESTORE_HOOK_ROLLBACK_HEALTH_FAIL") == "1":
+        raise RestoreError("simulated rollback health failure")
+    registry_path = root / "var/lib/frp-auto-deploy/registry.json"
+    config_path = root / "etc/frp-auto-deploy/config.json"
+    toml_path = root / "etc/frp/frps.toml"
+    token_path = root / "etc/frp/server_token"
+    ca_path = root / "etc/frp-auto-deploy/pki/ca.crt"
+    try:
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RestoreError("restored control-state JSON is invalid") from exc
+    if not isinstance(registry, dict) or registry.get("schema_version") != 2:
+        raise RestoreError("restored registry schema is invalid")
+    if not isinstance(config, dict):
+        raise RestoreError("restored server configuration is invalid")
+    if not toml_path.is_file():
+        raise RestoreError("restored frps.toml is missing")
+    text = toml_path.read_text(encoding="utf-8", errors="replace")
+    if "bindPort" not in text:
+        raise RestoreError("restored frps.toml is missing bindPort")
+    if not token_path.is_file() or not token_path.read_bytes().strip():
+        raise RestoreError("restored FRP token is missing")
+    if not ca_path.is_file():
+        raise RestoreError("restored CA certificate is missing")
+    if os.environ.get("FRP_SKIP_SYSTEMD") or os.environ.get("FRP_DEPLOY_TEST_ROOT"):
+        return
+    units = ["frps.service", "frp-port-allocator.service"]
+    frontend = (root / "etc/frp-auto-deploy/frontend.conf").is_file()
+    if frontend:
+        units.append("frp-frontend.service")
+    for unit in units:
+        active = subprocess.run(
+            ["systemctl", "is-active", unit],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if (active.stdout or "").strip() != "active":
+            raise RestoreError(f"{unit} is not active after restore")
+    listen = None
+    for line in text.splitlines():
+        if line.strip().startswith("bindPort"):
+            _, _, raw = line.partition("=")
+            listen = raw.strip().strip('"')
+            break
+    if listen:
+        probe = subprocess.run(
+            ["ss", "-lnt"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if probe.returncode == 0 and listen not in (probe.stdout or ""):
+            raise RestoreError("frps control port is not listening after restore")
+    listen_port = int(config.get("allocator_listen_port") or config.get("listen_port") or 6099)
+    try:
+        import urllib.request
+
+        urllib.request.urlopen(
+            f"http://127.0.0.1:{listen_port}/healthz",
+            timeout=5,
+        ).read()
+    except Exception as exc:
+        raise RestoreError("allocator /healthz failed after restore") from exc
+    if frontend:
+        host = str(config.get("public_host") or "")
+        port = int(config.get("frp_control_public_port") or 443)
+        if host:
+            py = Path("/usr/local/lib/frp-auto-deploy/frp_frontend.py")
+            if not py.is_file():
+                py = Path(__file__).resolve().parent.parent / "lib" / "frp_frontend.py"
+            if py.is_file():
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(py),
+                        "--verify-proxy",
+                        "--public-host",
+                        host,
+                        "--frontend-port",
+                        str(port),
+                        "--ca-cert",
+                        str(ca_path),
+                    ],
+                    check=False,
+                )
+                if result.returncode != 0:
+                    raise RestoreError("verified frontend proxy health check failed after restore")
+
+
 def restart_services(root: Path, allow_hook: bool = True) -> None:
     if os.environ.get("FRP_SKIP_SYSTEMD") or os.environ.get("FRP_DEPLOY_TEST_ROOT"):
         return
@@ -304,10 +447,13 @@ def make_snapshot(root: Path) -> Path:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     snapshot = backup_dir / f"pre-restore-{stamp}-{os.getpid()}.tar.gz"
     backup_tool = Path(__file__).resolve().with_name("frp-backup")
+    env = os.environ.copy()
+    env["FRP_BACKUP_ALREADY_LOCKED"] = "1"
     subprocess.run(
         [sys.executable, str(backup_tool), str(snapshot)],
         stdout=subprocess.DEVNULL,
         check=True,
+        env=env,
     )
     os.chmod(snapshot, 0o600)
     return snapshot
@@ -329,27 +475,47 @@ def main() -> int:
 
     candidate_temp = None
     rollback_temp = None
+    locks = _load_module("frp_control_locks", "frp_control_locks.py")
     try:
         candidate_temp, candidate = validate_to_temp(archive)
-        snapshot = make_snapshot(root)
-        rollback_temp, rollback = validate_to_temp(snapshot)
+        timeout = float(os.environ.get("FRP_RESTORE_LOCK_TIMEOUT", "30"))
+        lock_cm = locks.acquire_control_locks(root, timeout=timeout) if locks is not None else None
+        if lock_cm is not None:
+            lock_cm.__enter__()
         try:
-            apply_payload(root, candidate)
-            restart_services(root)
-        except Exception as restore_exc:
+            snapshot = make_snapshot(root)
+            _write_txn(root, snapshot)
+            rollback_temp, rollback = validate_to_temp(snapshot)
             try:
-                apply_payload(root, rollback, allow_hook=False)
-                restart_services(root, allow_hook=False)
-            except Exception as rollback_exc:
-                raise RestoreError(
-                    f"restore failed and rollback also failed: {rollback_exc}"
-                ) from restore_exc
-            raise RestoreError(f"restore failed; previous state was restored: {restore_exc}")
+                apply_payload(root, candidate)
+                restart_services(root)
+                verify_restored_control_state(root)
+            except Exception as restore_exc:
+                try:
+                    apply_payload(root, rollback, allow_hook=False)
+                    restart_services(root, allow_hook=False)
+                    verify_restored_control_state(root, in_rollback=True)
+                except Exception as rollback_exc:
+                    print("RESTORE_ROLLBACK_FAILED", file=sys.stderr)
+                    print("RECOVERY_REQUIRED", file=sys.stderr)
+                    _audit_emit("restore.failed", details={"rollback": "failed"})
+                    raise RestoreError(
+                        f"restore failed and rollback also failed: {rollback_exc}"
+                    ) from restore_exc
+                _clear_txn(root)
+                _audit_emit("restore.failed", details={"rollback": "pass"})
+                raise RestoreError(f"restore failed; previous state was restored: {restore_exc}")
+            _clear_txn(root)
+        finally:
+            if lock_cm is not None:
+                lock_cm.__exit__(None, None, None)
         print("WARNING: the restored backup contained private keys, authentication tokens, and enrollment secrets.")
         print(f"Restore completed. Pre-restore snapshot: {snapshot}")
+        _audit_emit("restore.completed", details={"snapshot": snapshot.name})
         return 0
     except (RestoreError, OSError, subprocess.SubprocessError, ValueError) as exc:
         error(str(exc))
+        _audit_emit("restore.failed", details={"error": type(exc).__name__})
         return 1
     finally:
         if rollback_temp is not None:

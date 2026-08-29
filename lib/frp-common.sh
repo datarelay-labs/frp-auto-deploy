@@ -36,12 +36,95 @@ frp_normalize_release_channel() {
 }
 
 frp_version_state_file() {
-  local root="${FRP_DEPLOY_TEST_ROOT:-${FRP_CLIENT_TEST_ROOT:-${FRP_CTL_TEST_ROOT:-${FRP_UPDATE_ROOT:-}}}}"
+  local root="${FRP_DEPLOY_TEST_ROOT:-${FRP_CLIENT_TEST_ROOT:-${FRP_CTL_TEST_ROOT:-${FRP_UPDATE_ROOT:-${FRP_SERVER_TEST_ROOT:-}}}}}"
   if [[ -n "$root" ]]; then
     printf '%s' "${root}/etc/frp-auto-deploy/version"
   else
     printf '%s' '/etc/frp-auto-deploy/version'
   fi
+}
+
+frp_parse_known_release_channel() {
+  local ch
+  ch="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  case "$ch" in
+    dev|main|development) printf 'dev' ;;
+    stable) printf 'stable' ;;
+    *) return 1 ;;
+  esac
+}
+
+frp_txn_field() {
+  local field="$1" marker
+  marker="$(frp_txn_marker_path)"
+  [[ -f "$marker" ]] || return 0
+  python3 - "$marker" "$field" <<'PY'
+import json, sys
+from pathlib import Path
+try:
+    data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(0)
+value = data.get(sys.argv[2])
+if value is None or value == "":
+    raise SystemExit(0)
+if isinstance(value, bool):
+    print("true" if value else "false")
+else:
+    print(value)
+PY
+}
+
+frp_resolve_project_update_identity() {
+  # Sets FRP_RESOLVED_RELEASE_CHANNEL and FRP_RESOLVED_SOURCE_REF.
+  # Never silently defaults an unknown install to stable.
+  local txn_ch txn_ref persisted persisted_ref
+  FRP_RESOLVED_RELEASE_CHANNEL=""
+  FRP_RESOLVED_SOURCE_REF=""
+  if [[ -n "${FRP_RELEASE_CHANNEL:-}" ]]; then
+    if ! FRP_RESOLVED_RELEASE_CHANNEL="$(frp_parse_known_release_channel "$FRP_RELEASE_CHANNEL")"; then
+      echo "ERROR: FRP_RELEASE_CHANNEL must be dev or stable" >&2
+      return 1
+    fi
+    if [[ "$FRP_RESOLVED_RELEASE_CHANNEL" == "dev" ]]; then
+      FRP_RESOLVED_SOURCE_REF="main"
+    else
+      FRP_RESOLVED_SOURCE_REF="v${PROJECT_VERSION}"
+    fi
+    return 0
+  fi
+  txn_ch="$(frp_txn_field release_channel)"
+  txn_ref="$(frp_txn_field source_ref)"
+  if [[ -n "$txn_ch" || -n "$txn_ref" ]]; then
+    if [[ -z "$txn_ch" || -z "$txn_ref" ]] || \
+       ! FRP_RESOLVED_RELEASE_CHANNEL="$(frp_parse_known_release_channel "$txn_ch")"; then
+      echo "ERROR: pending transaction does not identify a safe release line." >&2
+      echo "Set FRP_RELEASE_CHANNEL=dev or FRP_RELEASE_CHANNEL=stable explicitly." >&2
+      return 1
+    fi
+    FRP_RESOLVED_SOURCE_REF="$txn_ref"
+    return 0
+  fi
+  persisted="$(frp_read_kv_file "$(frp_version_state_file)" RELEASE_CHANNEL)"
+  persisted_ref="$(frp_read_kv_file "$(frp_version_state_file)" SOURCE_REF)"
+  if [[ -n "$persisted" ]] && FRP_RESOLVED_RELEASE_CHANNEL="$(frp_parse_known_release_channel "$persisted")"; then
+    if [[ -n "$persisted_ref" ]]; then
+      FRP_RESOLVED_SOURCE_REF="$persisted_ref"
+    elif [[ "$FRP_RESOLVED_RELEASE_CHANNEL" == "dev" ]]; then
+      FRP_RESOLVED_SOURCE_REF="main"
+    else
+      FRP_RESOLVED_SOURCE_REF="v${PROJECT_VERSION}"
+    fi
+    return 0
+  fi
+  if [[ -f "$(frp_txn_marker_path)" ]]; then
+    echo "ERROR: pending transaction does not identify a safe release line." >&2
+    echo "Set FRP_RELEASE_CHANNEL=dev or FRP_RELEASE_CHANNEL=stable explicitly." >&2
+    return 1
+  fi
+  echo "ERROR: installed release channel is unknown; refusing to guess stable." >&2
+  echo "Set FRP_RELEASE_CHANNEL=dev or FRP_RELEASE_CHANNEL=stable explicitly." >&2
+  return 1
 }
 
 frp_persisted_release_channel() {
@@ -1196,15 +1279,37 @@ frp_txn_write() {
   mkdir -p "$dir"
   chmod 700 "$dir" 2>/dev/null || true
   tmp="$(mktemp "${dir}/.update-pending.XXXXXX")"
-  python3 - "$tmp" "$operation" "$phase" "$previous" "$candidate" <<'PY'
+  python3 - "$tmp" "$operation" "$phase" "$previous" "$candidate" \
+    "${FRP_TXN_RELEASE_CHANNEL:-}" "${FRP_TXN_SOURCE_REF:-}" \
+    "${FRP_TXN_BUNDLE_SHA256:-}" "${FRP_TXN_SNAPSHOT_PATH:-}" \
+    "${FRP_TXN_MUTATION_STARTED:-true}" <<'PY'
 import json, sys
+from datetime import datetime, timezone
 from pathlib import Path
-Path(sys.argv[1]).write_text(json.dumps({
+
+def optional(value):
+    value = str(value or "").strip()
+    return value or None
+
+record = {
+    "schema_version": 2,
     "operation": sys.argv[2],
     "phase": sys.argv[3],
     "previous_version": sys.argv[4],
     "candidate_version": sys.argv[5],
-}, sort_keys=True) + "\n", encoding="utf-8")
+    "started_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+    "mutation_started": sys.argv[10].lower() in ("1", "true", "yes"),
+}
+for key, raw in (
+    ("release_channel", sys.argv[6]),
+    ("source_ref", sys.argv[7]),
+    ("bundle_sha256", sys.argv[8]),
+    ("snapshot_path", sys.argv[9]),
+):
+    value = optional(raw)
+    if value is not None:
+        record[key] = value
+Path(sys.argv[1]).write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
 PY
   chmod 0644 "$tmp"
   mv -f "$tmp" "$marker"
@@ -1214,6 +1319,21 @@ frp_txn_clear() {
   local marker
   marker="$(frp_txn_marker_path)"
   rm -f "$marker"
+}
+
+frp_audit_emit() {
+  local event="$1" py=""
+  if [[ -n "${BASE_DIR:-}" && -f "$BASE_DIR/lib/frp_audit.py" ]]; then
+    py="$BASE_DIR/lib/frp_audit.py"
+  elif [[ -f /usr/local/lib/frp-auto-deploy/frp_audit.py ]]; then
+    py=/usr/local/lib/frp-auto-deploy/frp_audit.py
+  else
+    local here
+    here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    [[ -f "${here}/frp_audit.py" ]] && py="${here}/frp_audit.py"
+  fi
+  [[ -n "$py" && -f "$py" ]] || return 0
+  python3 "$py" emit --event "$event" 2>/dev/null || true
 }
 
 frp_role_fs() {

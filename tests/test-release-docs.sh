@@ -138,4 +138,17 @@ grep -q 'REAL_ARM_SYSTEMD=NOT_TESTED' docs/RELEASE_VALIDATION.md || fail "ARM64 
 grep -q 'REAL_OPENSSL_1_0_2_TLS_ENROLLMENT=NOT_TESTED' docs/RELEASE_VALIDATION.md || fail "OpenSSL 1.0.2 limitation missing"
 pass "REAL_ACCEPTANCE_RECORDED"
 
+chmod +x "$ROOT/scripts/validate-release-tag.sh"
+TMPERR="$(mktemp)"
+if "$ROOT/scripts/validate-release-tag.sh" v2.1.1 >/dev/null 2>"$TMPERR"; then
+  rm -f "$TMPERR"
+  fail "v2.1.1 must not validate against PROJECT_VERSION=2.1.0"
+fi
+grep -q 'PROJECT_VERSION=2.1.0' "$TMPERR" || fail "tag mismatch diagnostic"
+rm -f "$TMPERR"
+"$ROOT/scripts/validate-release-tag.sh" "v${PROJECT_VERSION}" >/dev/null || fail "current VERSION tag should validate"
+grep -q 'Do \*\*not\*\* tag the current `PROJECT_VERSION=2.1.0`' docs/RELEASE_CHECKLIST.md ||
+  fail "checklist missing 2.1.1 procedure"
+pass "P1_RELEASE_VERSION_GATE"
+
 echo "RELEASE_DOCS_TEST=PASS"

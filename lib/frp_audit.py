@@ -103,6 +103,10 @@ def emit(event, actor="local-root", details=None, fail_closed=False, **fields):
         record["details"] = _redact(details)
     record = _redact(record)
     try:
+        rotate_if_needed(
+            max_bytes=int(os.environ.get("FRP_AUDIT_ROTATE_BYTES", str(5 * 1024 * 1024))),
+            keep=int(os.environ.get("FRP_AUDIT_ROTATE_KEEP", "5")),
+        )
         payload = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
         if len(payload.encode("utf-8")) > MAX_RECORD_BYTES:
             raise AuditError("audit record too large")
@@ -112,6 +116,50 @@ def emit(event, actor="local-root", details=None, fail_closed=False, **fields):
         if fail_closed:
             raise AuditError(str(exc)) from exc
         sys_stderr_warn(f"WARNING: audit log write failed: {exc}")
+        return False
+
+
+def try_emit(event, **kwargs):
+    """Emit an audit event; never raise to the caller."""
+    try:
+        return emit(event, **kwargs)
+    except Exception:
+        return False
+
+
+def discover_audit_path(caller_file=None):
+    candidates = []
+    if caller_file:
+        here = Path(caller_file).resolve()
+        candidates.append(here.parent.parent / "lib" / "frp_audit.py")
+        candidates.append(here.parent.parent / "lib" / "frp-auto-deploy" / "frp_audit.py")
+    root = os.environ.get("FRP_DEPLOY_TEST_ROOT", "")
+    if root:
+        candidates.append(Path(root) / "usr/local/lib/frp-auto-deploy/frp_audit.py")
+    candidates.append(Path("/usr/local/lib/frp-auto-deploy/frp_audit.py"))
+    here = Path(__file__).resolve()
+    candidates.append(here)
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+def emit_from_tool(caller_file, event, **kwargs):
+    """Load this module from the repo or installed path, then emit. Never raises."""
+    try:
+        import importlib.util
+
+        path = discover_audit_path(caller_file)
+        if path is None:
+            return False
+        spec = importlib.util.spec_from_file_location("frp_audit", str(path))
+        if spec is None or spec.loader is None:
+            return False
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.try_emit(event, **kwargs)
+    except Exception:
         return False
 
 

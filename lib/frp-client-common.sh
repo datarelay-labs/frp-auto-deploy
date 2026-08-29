@@ -3243,18 +3243,49 @@ frp_client_upgrade_verify_restored() {
   esac
 }
 
+frp_client_upgrade_post_mutation_guard() {
+  [[ "${FRP_CLIENT_UPGRADE_HOOK_FAIL:-}" == "unbound-after-install" ]] || return 0
+  echo "ERROR: simulated unexpected post-mutation abort" >&2
+  return 1
+}
+
+_frp_client_upgrade_err() {
+  local ec=$?
+  if [[ "${_FRP_CLIENT_UPGRADE_MUTATION_STARTED:-0}" == "1" && \
+        "${_FRP_CLIENT_UPGRADE_IN_ROLLBACK:-0}" != "1" && \
+        "${_FRP_CLIENT_UPGRADE_ROLLBACK_DONE:-0}" != "1" && \
+        -n "${_FRP_CLIENT_UPGRADE_BACKUP:-}" ]]; then
+    frp_client_upgrade_rollback "$_FRP_CLIENT_UPGRADE_BACKUP" FILE_COMMIT_FAILED || true
+  fi
+  return "$ec"
+}
+
 frp_client_upgrade_rollback() {
   local backup="$1" failure_class="${2:-FILE_COMMIT_FAILED}"
+  if [[ "${_FRP_CLIENT_UPGRADE_ROLLBACK_DONE:-0}" == "1" ]]; then
+    return "${_FRP_CLIENT_UPGRADE_ROLLBACK_RC:-1}"
+  fi
+  if [[ "${_FRP_CLIENT_UPGRADE_IN_ROLLBACK:-0}" == "1" ]]; then
+    return 1
+  fi
+  _FRP_CLIENT_UPGRADE_IN_ROLLBACK=1
   if frp_client_upgrade_restore_tools "$backup" \
     && frp_client_upgrade_verify_restored "$backup"; then
     echo "UPGRADE_ROLLBACK=PASS"
     frp_emit_failure_class "$failure_class"
     frp_txn_clear
+    _FRP_CLIENT_UPGRADE_ROLLBACK_RC=0
+    _FRP_CLIENT_UPGRADE_ROLLBACK_DONE=1
+    _FRP_CLIENT_UPGRADE_IN_ROLLBACK=0
     return 0
   fi
   echo "UPGRADE_ROLLBACK=FAIL"
   frp_emit_failure_class UPDATE_ROLLBACK_FAILED
   echo "RECOVERY_REQUIRED" >&2
+  echo "PENDING_MARKER_CLEARED=NO"
+  _FRP_CLIENT_UPGRADE_ROLLBACK_RC=1
+  _FRP_CLIENT_UPGRADE_ROLLBACK_DONE=1
+  _FRP_CLIENT_UPGRADE_IN_ROLLBACK=0
   return 1
 }
 
@@ -3333,33 +3364,27 @@ frp_client_apply_upgrade() {
     return 1
   fi
 
+  _FRP_CLIENT_UPGRADE_ROLLBACK_DONE=0
+  _FRP_CLIENT_UPGRADE_ROLLBACK_RC=0
+  _FRP_CLIENT_UPGRADE_IN_ROLLBACK=0
+  _FRP_CLIENT_UPGRADE_MUTATION_STARTED=0
+  _FRP_CLIENT_UPGRADE_SET_E=0
   frp_client_upgrade_validate_existing || return 1
   if [[ -f "$(frp_txn_marker_path)" ]]; then
     echo "A previous software update was interrupted."
     local recovered=""
-    recovered="$(python3 - "$(frp_client_upgrade_backup_root)" <<'PY'
-from pathlib import Path
-import sys
-root = Path(sys.argv[1])
-if not root.is_dir():
-    raise SystemExit(0)
-dirs = sorted([p for p in root.iterdir() if p.is_dir()], key=lambda p: p.name)
-if dirs:
-    print(str(dirs[-1]))
-PY
-)"
-    if [[ -n "$recovered" && -d "$recovered" ]]; then
-      if ! frp_client_upgrade_restore_tools "$recovered"; then
-        echo "ERROR: interrupted update could not be rolled back automatically." >&2
-        frp_emit_failure_class RECOVERY_REQUIRED
-        return 1
-      fi
-      echo "Restored the previous management files from backup."
-    else
-      echo "ERROR: interrupted update left the installation incomplete." >&2
+    recovered="$(frp_txn_field snapshot_path)"
+    if [[ -z "$recovered" || ! -d "$recovered" ]]; then
+      echo "ERROR: pending client update does not name a usable snapshot; refusing to guess the newest backup." >&2
       frp_emit_failure_class RECOVERY_REQUIRED
       return 1
     fi
+    if ! frp_client_upgrade_restore_tools "$recovered" || ! frp_client_upgrade_verify_restored "$recovered"; then
+      echo "ERROR: interrupted update could not be rolled back automatically." >&2
+      frp_emit_failure_class RECOVERY_REQUIRED
+      return 1
+    fi
+    echo "Restored the previous management files from backup."
     frp_txn_clear
   fi
   frp_client_upgrade_source_version "$source"
@@ -3440,68 +3465,91 @@ PY
 
   echo "Backing up replaceable project files..."
   backup="$(frp_client_upgrade_backup_tools)" || return 1
-  frp_txn_write update commit "$previous" "$target"
+  FRP_TXN_SNAPSHOT_PATH="$backup" \
+  FRP_TXN_RELEASE_CHANNEL="${FRP_RELEASE_CHANNEL:-$(frp_read_kv_file "$(frp_client_version_file)" RELEASE_CHANNEL)}" \
+  FRP_TXN_SOURCE_REF="${FRP_RESOLVED_SOURCE_REF:-$(frp_read_kv_file "$(frp_client_version_file)" SOURCE_REF)}" \
+  FRP_TXN_BUNDLE_SHA256="${FRP_BUNDLE_SHA256:-}" \
+  FRP_TXN_MUTATION_STARTED=true \
+    frp_txn_write client-update commit "$previous" "$target"
+  _FRP_CLIENT_UPGRADE_MUTATION_STARTED=1
+  _FRP_CLIENT_UPGRADE_BACKUP="$backup"
+  trap '_frp_client_upgrade_err; rm -rf "'"$staged"'"; return 1' ERR
+  if [[ "$-" != *E* ]]; then
+    set -E
+    _FRP_CLIENT_UPGRADE_SET_E=1
+  fi
 
   echo "Installing management files..."
   if ! frp_client_upgrade_install_staged "$staged"; then
     echo "ERROR: tool install failed; restoring previous management files." >&2
-    frp_client_upgrade_rollback "$backup" FILE_COMMIT_FAILED || true
+    frp_client_upgrade_rollback "$backup" FILE_COMMIT_FAILED || return 2
+    return 1
+  fi
+  if ! frp_client_upgrade_post_mutation_guard; then
+    echo "ERROR: unexpected post-mutation failure; restoring previous management files." >&2
+    frp_client_upgrade_rollback "$backup" FILE_COMMIT_FAILED || return 2
     return 1
   fi
 
   echo "Verifying upgrade..."
   if ! frp_client_upgrade_verify "$ident_before"; then
     echo "ERROR: post-upgrade verification failed; restoring previous management files." >&2
-    frp_client_upgrade_rollback "$backup" HEALTH_CHECK_FAILED || true
+    frp_client_upgrade_rollback "$backup" HEALTH_CHECK_FAILED || return 2
     return 1
   fi
 
   echo "Writing project version..."
   if [[ "${FRP_CLIENT_UPGRADE_HOOK_FAIL:-}" == "version" ]]; then
     echo "ERROR: simulated version/build-info write failure" >&2
-    frp_client_upgrade_rollback "$backup" BUILD_INFO_WRITE_FAILED || true
+    frp_client_upgrade_rollback "$backup" BUILD_INFO_WRITE_FAILED || return 2
     return 1
   fi
   if ! frp_client_write_version_file; then
     echo "ERROR: failed to write version file; restoring previous management files." >&2
-    frp_client_upgrade_rollback "$backup" BUILD_INFO_WRITE_FAILED || true
+    frp_client_upgrade_rollback "$backup" BUILD_INFO_WRITE_FAILED || return 2
     return 1
   fi
 
   if [[ "$(frp_client_digest "$(frp_client_state_path)")" != "$state_before" ]]; then
     echo "ERROR: client-state.json changed during software upgrade; restoring tools." >&2
-    frp_client_upgrade_rollback "$backup" STATE_PRESERVATION_FAILED || true
+    frp_client_upgrade_rollback "$backup" STATE_PRESERVATION_FAILED || return 2
     return 1
   fi
   if [[ -n "$toml_before" && "$(frp_client_digest "$(frp_client_toml_path)")" != "$toml_before" ]]; then
     echo "ERROR: frpc.toml changed during software upgrade; restoring tools." >&2
-    frp_client_upgrade_rollback "$backup" STATE_PRESERVATION_FAILED || true
+    frp_client_upgrade_rollback "$backup" STATE_PRESERVATION_FAILED || return 2
     return 1
   fi
   if [[ -n "$access_before" && "$(frp_client_digest "$(frp_client_access_path)")" != "$access_before" ]]; then
     echo "ERROR: access-info.txt changed during software upgrade; restoring tools." >&2
-    frp_client_upgrade_rollback "$backup" STATE_PRESERVATION_FAILED || true
+    frp_client_upgrade_rollback "$backup" STATE_PRESERVATION_FAILED || return 2
     return 1
   fi
   if [[ -n "$key_before" && "$(frp_client_digest "$(frp_client_identity_key_path)")" != "$key_before" ]]; then
     echo "ERROR: management identity changed during software upgrade; restoring tools." >&2
-    frp_client_upgrade_rollback "$backup" STATE_PRESERVATION_FAILED || true
+    frp_client_upgrade_rollback "$backup" STATE_PRESERVATION_FAILED || return 2
     return 1
   fi
   if [[ -n "$pub_before" && "$(frp_client_digest "$(frp_client_identity_pub_path)")" != "$pub_before" ]]; then
     echo "ERROR: management public identity changed during software upgrade; restoring tools." >&2
-    frp_client_upgrade_rollback "$backup" STATE_PRESERVATION_FAILED || true
+    frp_client_upgrade_rollback "$backup" STATE_PRESERVATION_FAILED || return 2
     return 1
   fi
   if [[ -n "$mac_before" && "$(frp_client_digest "$(frp_client_identity_mac_path)")" != "$mac_before" ]]; then
     echo "ERROR: management identity MAC changed during software upgrade; restoring tools." >&2
-    frp_client_upgrade_rollback "$backup" STATE_PRESERVATION_FAILED || true
+    frp_client_upgrade_rollback "$backup" STATE_PRESERVATION_FAILED || return 2
     return 1
   fi
 
   ident_after="$(frp_identity_label)"
   frp_after="${FRP_VERSION}"
+  _FRP_CLIENT_UPGRADE_MUTATION_STARTED=0
+  trap - ERR
+  if [[ "${_FRP_CLIENT_UPGRADE_SET_E:-0}" == "1" ]]; then
+    set +E
+  fi
   frp_txn_clear
+  frp_audit_emit client_update.completed
   echo
   echo "Upgrade complete."
   echo "Project version : ${previous} -> ${target}"

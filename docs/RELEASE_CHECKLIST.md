@@ -50,3 +50,19 @@ For **2.1.0**, the required real gates that were chosen for this tag (Ubuntu
 24.04 x86_64, direct public-IP server, enterprise-restricted client, single-443
 HTTPS/WSS/SSH, reboot recovery) are recorded PASS in
 `docs/RELEASE_VALIDATION.md`. Remaining recommended gates stay `NOT_TESTED`.
+
+## After OCI acceptance: 2.1.1
+
+Do **not** tag the current `PROJECT_VERSION=2.1.0` `main` tree as `v2.1.1`.
+`./scripts/validate-release-tag.sh` rejects that mismatch automatically.
+
+A dedicated release commit must, in order:
+
+1. Set `PROJECT_VERSION=2.1.1` in `VERSION` and `lib/frp-common.sh` default
+2. Set `release-manifest.json` `channel=stable` and `git_ref=v2.1.1`
+3. Rebuild bundles and regenerate `SHA256SUMS`
+4. Run all automated gates in this checklist
+5. Only then create the immutable `v2.1.1` tag
+
+Until that commit exists, `main` may continue to report `PROJECT_VERSION=2.1.0`
+with `channel=dev` / `source_ref=main` during OCI acceptance.

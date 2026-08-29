@@ -52,4 +52,35 @@ for ticket,record in zip(sorted(tickets), sorted(records,key=lambda r:r['id'])):
 assert any(r.get('services')==[] for r in records)
 assert any((r.get('services') or [{}])[0].get('preset')=='ssh' for r in records if r.get('services'))
 PY
+# Pre-validate all rows: a bad later row issues zero tickets.
+BAD="$WORK/bad.csv"
+cat >"$BAD" <<'CSV'
+label,ssh_user,note
+good-one,aella,ok
+BAD LABEL!!,aella,no
+CSV
+BEFORE_TICKETS="$(find "$TREE/var/lib/frp-auto-deploy/bootstrap" -name '*.json' | wc -l)"
+if python3 "$ROOT/tools/frp-enroll-bulk" --csv "$BAD" >"$WORK/bad.out" 2>"$WORK/bad.err"; then
+  echo "FAIL bad row accepted" >&2
+  exit 1
+fi
+AFTER_TICKETS="$(find "$TREE/var/lib/frp-auto-deploy/bootstrap" -name '*.json' | wc -l)"
+[[ "$AFTER_TICKETS" -eq "$BEFORE_TICKETS" ]] || { echo "FAIL bad row issued tickets" >&2; exit 1; }
+echo "PASS BULK_PREVALIDATE_ALL"
+echo "PASS BULK_BAD_ROW_ZERO_ISSUED"
+
+# Mid-batch failure rolls back only this batch.
+EXISTING="$(ls "$TREE/var/lib/frp-auto-deploy/bootstrap"/*.json | wc -l)"
+if FRP_ENROLL_BULK_HOOK_FAIL_AFTER=1 \
+  python3 "$ROOT/tools/frp-enroll-bulk" --count 3 --label-prefix mid \
+  >"$WORK/mid.out" 2>"$WORK/mid.err"; then
+  echo "FAIL mid-batch succeeded" >&2
+  exit 1
+fi
+AFTER_MID="$(ls "$TREE/var/lib/frp-auto-deploy/bootstrap"/*.json | wc -l)"
+[[ "$AFTER_MID" -eq "$EXISTING" ]] || { echo "FAIL mid-batch left tickets" >&2; exit 1; }
+echo "PASS BULK_MID_FAILURE_ROLLBACK"
+echo "PASS BULK_EXISTING_RECORDS_PRESERVED"
+echo "PASS BULK_ATOMICITY_TEST"
+
 echo "ENROLL_BULK_TEST=PASS"

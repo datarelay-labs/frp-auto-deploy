@@ -171,4 +171,92 @@ grep -q 'ca-key-rollback-source' "$TREE/etc/frp-auto-deploy/pki/ca.key" \
 grep -q 'previous state was restored' "$WORKDIR/rollback.stderr" || fail "rollback diagnostic"
 pass "RESTORE_FAILURE_ROLLBACK"
 
+# Concurrent registry mutation cannot interleave with a locked backup copy.
+CONC="$WORKDIR/conc"
+seed_state "$CONC" concurrent
+export FRP_DEPLOY_TEST_ROOT="$CONC"
+READY="$WORKDIR/backup.ready"
+GO="$WORKDIR/backup.go"
+rm -f "$READY" "$GO"
+CONC_BACKUP="$WORKDIR/conc.tar.gz"
+FRP_BACKUP_HOOK_READY="$READY" FRP_BACKUP_HOOK_GO="$GO" FRP_BACKUP_HOOK_WAIT=15 \
+  python3 "$ROOT/tools/frp-backup" "$CONC_BACKUP" >"$WORKDIR/conc.stdout" 2>"$WORKDIR/conc.stderr" &
+BACK_PID=$!
+for _ in $(seq 1 80); do
+  [[ -f "$READY" ]] && break
+  sleep 0.05
+done
+[[ -f "$READY" ]] || { kill "$BACK_PID" 2>/dev/null || true; fail "backup lock hook"; }
+python3 - "$CONC" "$WORKDIR/writer.started" "$WORKDIR/writer.done" <<'PY' &
+import json, os, sys, time
+from pathlib import Path
+root = Path(sys.argv[1])
+sys.path.insert(0, str(Path(os.environ.get("FRP_TEST_LOCKS_LIB", ""))))
+# Non-blocking attempt: writer must not observe a half-copied registry.
+lock = root / "var/lib/frp-auto-deploy/registry.lock"
+import fcntl
+fd = os.open(str(lock), os.O_CREAT | os.O_RDWR, 0o600)
+Path(sys.argv[2]).write_text("started\n")
+deadline = time.time() + 8
+got = False
+while time.time() < deadline:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        got = True
+        break
+    except BlockingIOError:
+        time.sleep(0.05)
+if got:
+    path = root / "var/lib/frp-auto-deploy/registry.json"
+    json.loads(path.read_text())
+    path.write_text(json.dumps({"schema_version":2,"clients":{"mutated":{}},"reserved":[]}) + "\n")
+    fcntl.flock(fd, fcntl.LOCK_UN)
+Path(sys.argv[3]).write_text("got=%s\n" % got)
+os.close(fd)
+PY
+sleep 0.2
+touch "$GO"
+wait "$BACK_PID" || fail "concurrent backup"
+python3 - "$CONC_BACKUP" <<'PY'
+import json, tarfile, sys, tempfile
+from pathlib import Path
+with tempfile.TemporaryDirectory() as name:
+    dest = Path(name)
+    with tarfile.open(sys.argv[1], "r:gz") as archive:
+        archive.extractall(dest)
+    data = json.loads((dest / "payload/var/lib/frp-auto-deploy/registry.json").read_text())
+    assert data.get("schema_version") == 2
+    assert "client-a" in data.get("clients", {})
+    assert data["clients"]["client-a"]["label"] == "concurrent"
+print("BACKUP_JSON_OK")
+PY
+pass "BACKUP_CONCURRENT_REGISTRY_MUTATION"
+pass "BACKUP_CONSISTENCY"
+
+# Health-gated restore rollback.
+HEALTH="$WORKDIR/health-tree"
+seed_state "$HEALTH" health
+export FRP_DEPLOY_TEST_ROOT="$HEALTH"
+python3 "$ROOT/tools/frp-backup" "$WORKDIR/health.tar.gz" >/dev/null
+seed_state "$HEALTH" mutated
+if FRP_RESTORE_HOOK_HEALTH_FAIL=1 \
+  python3 "$ROOT/tools/frp-restore" "$WORKDIR/health.tar.gz" \
+  >"$WORKDIR/health.stdout" 2>"$WORKDIR/health.stderr"; then
+  fail "health-fail restore should fail"
+fi
+grep -q 'token-mutated-super-secret' "$HEALTH/etc/frp/server_token" || fail "health rollback token"
+grep -q 'previous state was restored' "$WORKDIR/health.stderr" || fail "health rollback message"
+pass "RESTORE_HEALTH_GATE"
+pass "RESTORE_HEALTH_FAILURE_ROLLBACK"
+
+if FRP_RESTORE_HOOK_HEALTH_FAIL=1 FRP_RESTORE_HOOK_ROLLBACK_HEALTH_FAIL=1 \
+  python3 "$ROOT/tools/frp-restore" "$WORKDIR/health.tar.gz" \
+  >"$WORKDIR/rbhealth.stdout" 2>"$WORKDIR/rbhealth.stderr"; then
+  fail "rollback health failure should fail"
+fi
+grep -q 'RESTORE_ROLLBACK_FAILED' "$WORKDIR/rbhealth.stderr" || fail "RESTORE_ROLLBACK_FAILED"
+grep -q 'RECOVERY_REQUIRED' "$WORKDIR/rbhealth.stderr" || fail "restore recovery required"
+[[ -f "$HEALTH/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "restore pending missing"
+pass "RESTORE_ROLLBACK_FAILURE"
+
 echo "BACKUP_RESTORE_TEST=PASS"
