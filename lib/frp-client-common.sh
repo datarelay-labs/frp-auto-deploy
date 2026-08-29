@@ -520,20 +520,7 @@ frp_client_upgrade_backup_root() {
 }
 
 frp_client_write_version_file() {
-  local dest dir tmp
-  dest="$(frp_client_version_file)"
-  dir="$(dirname "$dest")"
-  mkdir -p "$dir"
-  tmp="$(mktemp "${dir}/.version.XXXXXX")"
-  cat >"$tmp" <<EOF
-PROJECT_VERSION=${PROJECT_VERSION}
-FRP_VERSION=${FRP_VERSION}
-EOF
-  chmod 0644 "$tmp"
-  if [[ ${EUID} -eq 0 ]]; then
-    chown root:root "$tmp" 2>/dev/null || true
-  fi
-  mv -f "$tmp" "$dest"
+  frp_write_version_file "$(frp_client_version_file)" client
 }
 
 frp_client_read_kv() {
@@ -562,6 +549,36 @@ frp_client_installed_frp_version() {
     return 0
   fi
   printf '%s' "${FRP_VERSION:-0.70.1}"
+}
+
+frp_client_installed_release_channel() {
+  local v
+  v="$(frp_client_read_kv "$(frp_client_version_file)" RELEASE_CHANNEL)"
+  if [[ -z "$v" ]]; then
+    printf '%s' "unknown"
+    return 0
+  fi
+  printf '%s' "$v"
+}
+
+frp_client_installed_source_ref() {
+  local v
+  v="$(frp_client_read_kv "$(frp_client_version_file)" SOURCE_REF)"
+  if [[ -z "$v" ]]; then
+    printf '%s' "unknown"
+    return 0
+  fi
+  printf '%s' "$v"
+}
+
+frp_client_installed_bundle_sha256() {
+  local v
+  v="$(frp_client_read_kv "$(frp_client_version_file)" BUNDLE_SHA256)"
+  if [[ -z "$v" ]]; then
+    printf '%s' "unknown"
+    return 0
+  fi
+  printf '%s' "$v"
 }
 
 frp_client_has_existing_install() {

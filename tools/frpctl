@@ -71,6 +71,36 @@ frpctl_frp_version() {
   printf '%s' "0.70.1"
 }
 
+frpctl_release_channel() {
+  local ch
+  ch="$(frpctl_read_kv "$(frpctl_path /etc/frp-auto-deploy/version)" RELEASE_CHANNEL)"
+  if [[ -z "$ch" ]]; then
+    printf '%s' "unknown"
+    return 0
+  fi
+  printf '%s' "$ch"
+}
+
+frpctl_source_ref() {
+  local ref
+  ref="$(frpctl_read_kv "$(frpctl_path /etc/frp-auto-deploy/version)" SOURCE_REF)"
+  if [[ -z "$ref" ]]; then
+    printf '%s' "unknown"
+    return 0
+  fi
+  printf '%s' "$ref"
+}
+
+frpctl_bundle_sha256() {
+  local sha
+  sha="$(frpctl_read_kv "$(frpctl_path /etc/frp-auto-deploy/version)" BUNDLE_SHA256)"
+  if [[ -z "$sha" ]]; then
+    printf '%s' "unknown"
+    return 0
+  fi
+  printf '%s' "$sha"
+}
+
 frpctl_role_label() {
   local client=0 server=0
   frpctl_is_client && client=1
@@ -225,14 +255,20 @@ frpctl_header() {
   echo
   echo "Role            : $(frpctl_role_label)"
   echo "Project version : $(frpctl_project_version)"
+  echo "Release channel : $(frpctl_release_channel)"
+  echo "Source ref      : $(frpctl_source_ref)"
   echo "FRP version     : $(frpctl_frp_version)"
+  echo "Bundle SHA256   : $(frpctl_bundle_sha256)"
   echo
 }
 
 frpctl_print_version() {
   echo "Role            : $(frpctl_role_label)"
   echo "Project version : $(frpctl_project_version)"
+  echo "Release channel : $(frpctl_release_channel)"
+  echo "Source ref      : $(frpctl_source_ref)"
   echo "FRP version     : $(frpctl_frp_version)"
+  echo "Bundle SHA256   : $(frpctl_bundle_sha256)"
 }
 
 frpctl_print_client_menu() {
@@ -1497,7 +1533,10 @@ frpctl_repl_banner() {
   echo
   echo "Role            : $(frpctl_role_label)"
   echo "Project version : $(frpctl_project_version)"
+  echo "Release channel : $(frpctl_release_channel)"
+  echo "Source ref      : $(frpctl_source_ref)"
   echo "FRP version     : $(frpctl_frp_version)"
+  echo "Bundle SHA256   : $(frpctl_bundle_sha256)"
   echo
   echo "Type 'help' or '?' for available commands."
   if [[ "${_FRP_CTL_BOUND_TAB:-}" == "1" || -n "${FRP_CTL_TEST_INPUT:-}" ]]; then

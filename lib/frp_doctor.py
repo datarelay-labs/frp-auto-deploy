@@ -1102,6 +1102,9 @@ def check_versions(report, paths, facts):
     pinned = str(facts.get('pinned_frp') or PINNED_FRP_DEFAULT)
     report.project_version = installed_proj or 'legacy / unknown'
     report.frp_version = installed_frp or pinned
+    report.release_channel = kv_file(paths, '/etc/frp-auto-deploy/version', 'RELEASE_CHANNEL') or 'unknown'
+    report.source_ref = kv_file(paths, '/etc/frp-auto-deploy/version', 'SOURCE_REF') or 'unknown'
+    report.bundle_sha256 = kv_file(paths, '/etc/frp-auto-deploy/version', 'BUNDLE_SHA256') or 'unknown'
     report.embedded_version = embedded
     report.pinned_frp = pinned
 
@@ -2126,7 +2129,10 @@ def render_human(report, quiet=False, verbose=False):
             'Role            : %s' % report.role_label,
             'Confidence      : %s' % report.confidence,
             'Project version : %s' % (report.project_version or 'unknown'),
+            'Release channel : %s' % (getattr(report, 'release_channel', None) or 'unknown'),
+            'Source ref      : %s' % (getattr(report, 'source_ref', None) or 'unknown'),
             'FRP version     : %s' % (report.frp_version or report.pinned_frp),
+            'Bundle SHA256   : %s' % (getattr(report, 'bundle_sha256', None) or 'unknown'),
             '',
         ])
         role_check = next((c for c in report.checks if c['id'] == 'host_role'), None)
@@ -2250,6 +2256,9 @@ def render_json(report):
         'role_label': report.role_label,
         'confidence': report.confidence,
         'project_version': report.project_version,
+        'release_channel': getattr(report, 'release_channel', 'unknown'),
+        'source_ref': getattr(report, 'source_ref', 'unknown'),
+        'bundle_sha256': getattr(report, 'bundle_sha256', 'unknown'),
         'frp_version': report.frp_version,
         'summary': {
             'pass': counts[PASS],

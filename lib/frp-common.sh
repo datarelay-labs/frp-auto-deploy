@@ -26,13 +26,46 @@ FRP_GITHUB_OWNER="${FRP_GITHUB_OWNER:-datarelay-labs}"
 FRP_GITHUB_REPO="${FRP_GITHUB_REPO:-frp-auto-deploy}"
 FRP_GITHUB_RAW_HOST="${FRP_GITHUB_RAW_HOST:-raw.githubusercontent.com}"
 
-frp_release_channel() {
+frp_normalize_release_channel() {
   local ch
-  ch="$(printf '%s' "${FRP_RELEASE_CHANNEL:-stable}" | tr '[:upper:]' '[:lower:]')"
+  ch="$(printf '%s' "${1:-stable}" | tr '[:upper:]' '[:lower:]')"
   case "$ch" in
     dev|main|development) printf 'dev' ;;
     *) printf 'stable' ;;
   esac
+}
+
+frp_version_state_file() {
+  local root="${FRP_DEPLOY_TEST_ROOT:-${FRP_CLIENT_TEST_ROOT:-${FRP_CTL_TEST_ROOT:-${FRP_UPDATE_ROOT:-}}}}"
+  if [[ -n "$root" ]]; then
+    printf '%s' "${root}/etc/frp-auto-deploy/version"
+  else
+    printf '%s' '/etc/frp-auto-deploy/version'
+  fi
+}
+
+frp_persisted_release_channel() {
+  local file ch
+  file="$(frp_version_state_file)"
+  ch="$(frp_read_kv_file "$file" RELEASE_CHANNEL)"
+  if [[ -z "$ch" ]]; then
+    return 0
+  fi
+  frp_normalize_release_channel "$ch"
+}
+
+frp_release_channel() {
+  local ch
+  if [[ -n "${FRP_RELEASE_CHANNEL:-}" ]]; then
+    frp_normalize_release_channel "$FRP_RELEASE_CHANNEL"
+    return 0
+  fi
+  ch="$(frp_persisted_release_channel)"
+  if [[ -n "$ch" ]]; then
+    printf '%s' "$ch"
+    return 0
+  fi
+  printf 'stable'
 }
 
 frp_release_git_ref() {
@@ -222,15 +255,56 @@ frp_atomic_install() {
 
 frp_write_version_file() {
   local dest="$1"
-  local dir tmp
+  local dir tmp channel source_ref bundle existing
   dir="$(dirname "$dest")"
   mkdir -p "$dir"
+  if [[ -n "${FRP_RELEASE_CHANNEL:-}" ]]; then
+    channel="$(frp_normalize_release_channel "$FRP_RELEASE_CHANNEL")"
+  else
+    existing="$(frp_read_kv_file "$dest" RELEASE_CHANNEL)"
+    if [[ -n "$existing" ]]; then
+      channel="$(frp_normalize_release_channel "$existing")"
+    else
+      channel="$(frp_release_channel)"
+    fi
+  fi
+  if [[ "$channel" == "dev" ]]; then
+    source_ref="main"
+  else
+    source_ref="v${PROJECT_VERSION}"
+  fi
+  bundle="${FRP_BUNDLE_SHA256:-}"
+  if [[ -z "$bundle" && -n "${FRP_BUNDLE_FILE:-}" && -f "${FRP_BUNDLE_FILE}" ]]; then
+    bundle="$(sha256sum "${FRP_BUNDLE_FILE}" | awk '{print $1}')"
+  fi
+  if [[ -z "$bundle" ]]; then
+    bundle="$(frp_read_kv_file "$dest" BUNDLE_SHA256)"
+  fi
+  if [[ -z "$bundle" ]]; then
+    local cand=""
+    if [[ "${2:-}" == "client" ]]; then
+      cand="${_FRP_COMMON_DIR}/../dist/bootstrap-client.sh"
+    else
+      cand="${_FRP_COMMON_DIR}/../dist/bootstrap-server.sh"
+    fi
+    if [[ -f "$cand" ]]; then
+      bundle="$(sha256sum "$cand" | awk '{print $1}')"
+    fi
+  fi
   tmp="$(mktemp "${dir}/.version.XXXXXX")"
-  cat >"$tmp" <<EOF
-PROJECT_VERSION=${PROJECT_VERSION}
-FRP_VERSION=${FRP_VERSION}
-EOF
+  {
+    printf 'PROJECT_VERSION=%s\n' "${PROJECT_VERSION}"
+    printf 'FRP_VERSION=%s\n' "${FRP_VERSION}"
+    printf 'RELEASE_CHANNEL=%s\n' "${channel}"
+    printf 'SOURCE_REF=%s\n' "${source_ref}"
+    if [[ -n "$bundle" ]]; then
+      printf 'BUNDLE_SHA256=%s\n' "$bundle"
+    fi
+  } >"$tmp"
   chmod 0644 "$tmp"
+  if [[ ${EUID} -eq 0 ]]; then
+    chown root:root "$tmp" 2>/dev/null || true
+  fi
   mv -f "$tmp" "$dest"
 }
 

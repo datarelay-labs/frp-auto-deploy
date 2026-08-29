@@ -32,11 +32,20 @@ fi
 
 project_version="unknown"
 tested_frp="${FRP_VERSION:-unknown}"
+release_channel="unknown"
+source_ref="unknown"
+bundle_sha256="unknown"
 if [[ -f "$version_file" ]] && type frp_read_kv_file >/dev/null 2>&1; then
   _pv="$(frp_read_kv_file "$version_file" PROJECT_VERSION)"
   _tv="$(frp_read_kv_file "$version_file" FRP_VERSION)"
+  _ch="$(frp_read_kv_file "$version_file" RELEASE_CHANNEL)"
+  _ref="$(frp_read_kv_file "$version_file" SOURCE_REF)"
+  _sha="$(frp_read_kv_file "$version_file" BUNDLE_SHA256)"
   [[ -n "${_pv:-}" ]] && project_version="$_pv"
   [[ -n "${_tv:-}" ]] && tested_frp="$_tv"
+  [[ -n "${_ch:-}" ]] && release_channel="$_ch"
+  [[ -n "${_ref:-}" ]] && source_ref="$_ref"
+  [[ -n "${_sha:-}" ]] && bundle_sha256="$_sha"
 fi
 
 installed_frp="unknown"
@@ -265,8 +274,11 @@ FRP Auto Deploy
 
 Role            : ${host_role}
 Project version : ${project_version}
+Release channel : ${release_channel}
+Source ref      : ${source_ref}
 Installed FRP   : ${installed_frp}
 Tested FRP      : ${tested_frp}
+Bundle SHA256   : ${bundle_sha256}
 Upstream latest : ${upstream_latest}
 Update status   : ${update_status}
 

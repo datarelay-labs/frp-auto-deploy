@@ -144,7 +144,7 @@ frp_client_status() {
   local path
   path="$(frp_client_state_path)"
   frp_load_client_state "$path"
-  python3 - "$path" "$(frp_client_installed_frp_version)" "${FRP_CLIENT_TEST_ROOT:-}" "${FRP_SKIP_SYSTEMD:-}" "$(frp_identity_label)" "$(frp_client_installed_project_version)" <<'PY'
+  python3 - "$path" "$(frp_client_installed_frp_version)" "${FRP_CLIENT_TEST_ROOT:-}" "${FRP_SKIP_SYSTEMD:-}" "$(frp_identity_label)" "$(frp_client_installed_project_version)" "$(frp_client_installed_release_channel)" "$(frp_client_installed_source_ref)" "$(frp_client_installed_bundle_sha256)" <<'PY'
 import json, subprocess, sys
 from pathlib import Path
 data = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
@@ -152,6 +152,9 @@ tested = sys.argv[2]
 test_root = sys.argv[3]
 skip_systemd = sys.argv[4]
 project_version = sys.argv[6]
+release_channel = sys.argv[7]
+source_ref = sys.argv[8]
+bundle_sha256 = sys.argv[9]
 services = data.get('services') or {}
 enabled = sum(1 for s in services.values() if s.get('enabled', True) is not False)
 disabled = len(services) - enabled
@@ -170,11 +173,14 @@ print('==========')
 print()
 print(f"Role            : Client")
 print(f"Project version : {project_version}")
+print(f"Release channel : {release_channel}")
+print(f"Source ref      : {source_ref}")
 print(f"Hostname        : {data.get('hostname', '')}")
 print(f"FRP server      : {data.get('frp_server', '')}:{data.get('frp_server_port', '')}")
 print(f"Allocator       : {allocator}")
 print(f"Management identity : {sys.argv[5]}")
 print(f"FRP version     : {tested}")
+print(f"Bundle SHA256   : {bundle_sha256}")
 print(f"frpc            : {active}")
 print()
 print(f"Services        : {enabled} enabled / {disabled} disabled")

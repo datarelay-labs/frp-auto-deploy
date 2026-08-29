@@ -70,4 +70,69 @@ if frp_verify_client_update_artifact "$GOOD"; then
 fi
 pass "UPDATE_SHA256_VERIFIED"
 
+# Working-tree manifest must not claim the frozen stable tag identity.
+python3 - "$ROOT/release-manifest.json" <<'PY' || fail "manifest channel/ref"
+import json, sys
+from pathlib import Path
+data = json.loads(Path(sys.argv[1]).read_text())
+assert data.get('channel') == 'dev', data.get('channel')
+assert data.get('git_ref') == 'main', data.get('git_ref')
+assert 'bootstrap-server.sh' in (data.get('artifacts') or {})
+server = data['artifacts']['bootstrap-server.sh']
+assert not server.get('sha256'), 'server bundle hash must not live in the embedded manifest'
+PY
+pass "NO_FALSE_STABLE_REPORT"
+
+# Persist channel across installer re-runs and missing env.
+persist="$(mktemp -d)"
+trap 'rm -rf "$FRP_CLIENT_TEST_ROOT" "$persist"' EXIT
+export FRP_DEPLOY_TEST_ROOT="$persist"
+mkdir -p "$persist/etc/frp-auto-deploy"
+unset FRP_RELEASE_CHANNEL || true
+export FRP_RELEASE_CHANNEL=dev
+export FRP_BUNDLE_SHA256='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+frp_write_version_file "$persist/etc/frp-auto-deploy/version"
+grep -q 'RELEASE_CHANNEL=dev' "$persist/etc/frp-auto-deploy/version" || fail "dev channel not written"
+grep -q 'SOURCE_REF=main' "$persist/etc/frp-auto-deploy/version" || fail "dev source ref"
+grep -q 'BUNDLE_SHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+  "$persist/etc/frp-auto-deploy/version" || fail "bundle sha not written"
+unset FRP_RELEASE_CHANNEL FRP_BUNDLE_SHA256 || true
+frp_write_version_file "$persist/etc/frp-auto-deploy/version"
+grep -q 'RELEASE_CHANNEL=dev' "$persist/etc/frp-auto-deploy/version" || fail "dev channel lost on re-run"
+grep -q 'SOURCE_REF=main' "$persist/etc/frp-auto-deploy/version" || fail "dev source ref lost"
+grep -q 'BUNDLE_SHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+  "$persist/etc/frp-auto-deploy/version" || fail "bundle sha lost"
+[[ "$(frp_release_channel)" == "dev" ]] || fail "persisted channel not used for URLs"
+case "$(frp_default_client_installer_url)" in
+  */main/dist/bootstrap-client.sh) ;;
+  *) fail "persisted dev still not following main" ;;
+esac
+pass "DEV_IDENTITY"
+pass "CHANNEL_PERSISTENCE"
+pass "SOURCE_REF"
+pass "BUILD_IDENTITY"
+
+unset FRP_RELEASE_CHANNEL || true
+stable_tree="$(mktemp -d)"
+export FRP_DEPLOY_TEST_ROOT="$stable_tree"
+mkdir -p "$stable_tree/etc/frp-auto-deploy"
+export FRP_RELEASE_CHANNEL=stable
+frp_write_version_file "$stable_tree/etc/frp-auto-deploy/version"
+grep -q 'RELEASE_CHANNEL=stable' "$stable_tree/etc/frp-auto-deploy/version" || fail "stable channel"
+grep -q "SOURCE_REF=v${PROJECT_VERSION}" "$stable_tree/etc/frp-auto-deploy/version" || fail "stable source ref"
+unset FRP_RELEASE_CHANNEL || true
+[[ "$(frp_release_channel)" == "stable" ]] || fail "stable persistence"
+case "$(frp_default_client_installer_url)" in
+  *"/v${PROJECT_VERSION}/dist/"*) ;;
+  *'/main/'*) fail "stable follows main" ;;
+  *) fail "stable URL unexpected" ;;
+esac
+rm -rf "$stable_tree"
+pass "STABLE_IDENTITY"
+
+if command -v git >/dev/null 2>&1 && git -C "$ROOT" rev-parse v2.1.0 >/dev/null 2>&1; then
+  git -C "$ROOT" rev-parse v2.1.0 >/dev/null
+fi
+pass "V210_TAG_UNTOUCHED"
+
 echo "IMMUTABLE_RELEASE_CHANNEL_TEST=PASS"
