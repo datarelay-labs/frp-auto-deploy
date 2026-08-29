@@ -716,14 +716,6 @@ read_tty() {
   printf '%s' "${value:-$default}"
 }
 
-infer_ssh_user() {
-  local user="${FRP_SSH_USER:-${SUDO_USER:-root}}"
-  if [[ "$user" == "root" && -n "${LOGNAME:-}" && "$LOGNAME" != root ]]; then
-    user="$LOGNAME"
-  fi
-  printf '%s' "$user"
-}
-
 probe_tcp() {
   local host="$1" port="$2"
   # Host and port are argv, never interpolated into a shell command string.
@@ -800,7 +792,9 @@ payload = {
   'preset': preset,
 }
 if preset == 'ssh':
-    payload['ssh_user'] = sys.argv[6] if len(sys.argv) > 6 else 'root'
+    if len(sys.argv) <= 6 or not sys.argv[6].strip():
+        raise SystemExit('ERROR: ssh_user is required for ssh services')
+    payload['ssh_user'] = sys.argv[6].strip()
 print(json.dumps(payload))
 PY
 }
@@ -1065,10 +1059,17 @@ frp_prompt_target_port() {
 
 frp_prompt_ssh_user() {
   local -n _frp_user_out="$1"
-  local default
-  default="${2:-$(infer_ssh_user)}"
+  local default="${2:-${FRP_SSH_USER:-}}"
+  _frp_user_out=""
   frp_ux_ssh_user_help
-  _frp_user_out="$(read_tty "SSH user [${default}]: " "$default")"
+  while [[ -z "$_frp_user_out" ]]; do
+    if [[ -n "$default" ]]; then
+      _frp_user_out="$(read_tty "SSH user [${default}]: " "$default")"
+    else
+      _frp_user_out="$(read_tty "SSH user (required): ")"
+    fi
+    [[ -n "$_frp_user_out" ]] || echo "ERROR: SSH user is required." >&2
+  done
 }
 
 frp_ux_prompt_new_service() {
@@ -1416,8 +1417,8 @@ for item in items:
     }
     if 'remote_port' in item and item['remote_port'] is not None:
         rec['remote_port'] = int(item['remote_port'])
-    if rec['preset'] == 'ssh':
-        rec['ssh_user'] = item.get('ssh_user') or 'root'
+    if rec['preset'] == 'ssh' and item.get('ssh_user'):
+        rec['ssh_user'] = item['ssh_user']
     services[rec['id']] = rec
 state = {
     'schema_version': schema,
@@ -1505,7 +1506,9 @@ item = {
     'preset': preset,
 }
 if preset == 'ssh':
-    ssh_user = str(raw.get('ssh_user', '') or 'root').strip() or 'root'
+    ssh_user = str(raw.get('ssh_user', '') or '').strip()
+    if not ssh_user:
+        raise SystemExit('ERROR: ssh_user is required for ssh services')
     if not re.fullmatch(r'[A-Za-z0-9._@-]{1,32}', ssh_user):
         raise SystemExit('ERROR: invalid ssh_user')
     item['ssh_user'] = ssh_user
@@ -1559,7 +1562,9 @@ def add(path, raw):
         'preset': preset,
     }
     if preset == 'ssh':
-        ssh_user = str(raw.get('ssh_user', '') or 'root').strip() or 'root'
+        ssh_user = str(raw.get('ssh_user', '') or '').strip()
+        if not ssh_user:
+            raise SystemExit('ERROR: ssh_user is required for ssh services')
         if not re.fullmatch(r'[A-Za-z0-9._@-]{1,32}', ssh_user):
             raise SystemExit('ERROR: invalid ssh_user')
         item['ssh_user'] = ssh_user
@@ -1757,9 +1762,12 @@ for item in services:
     lines.append(f'  Target : {local_ip}:{local_port}')
     lines.append(f'  Public : {server}:{remote_port}')
     if preset == 'ssh':
-        user = item.get('ssh_user') or 'root'
-        lines.append('  Connect:')
-        lines.append(f'    ssh -p {remote_port} {user}@{server}')
+        user = item.get('ssh_user')
+        if user:
+            lines.append('  Connect:')
+            lines.append(f'    ssh -p {remote_port} {user}@{server}')
+        else:
+            lines.append('  SSH user: legacy / unspecified')
     elif preset == 'http':
         lines.append('  URL:')
         lines.append(f'    http://{server}:{remote_port}')
@@ -2117,7 +2125,8 @@ for item in services:
         'preset': item.get('preset') or 'custom',
     }
     if out['preset']=='ssh':
-        out['ssh_user']=item.get('ssh_user') or 'root'
+        if item.get('ssh_user'):
+            out['ssh_user']=item['ssh_user']
     enabled.append(out)
 payload={
   'machine_id': sys.argv[1],
@@ -2335,8 +2344,8 @@ def pair_notes(a, b):
     if (a.get('name') or '') != (b.get('name') or ''):
         notes.append(('local', f"Display name: {a.get('name')} -> {b.get('name')}"))
     if a.get('preset') == 'ssh' or b.get('preset') == 'ssh':
-        old_user = a.get('ssh_user') or 'root'
-        new_user = b.get('ssh_user') or 'root'
+        old_user = a.get('ssh_user') or 'legacy / unspecified'
+        new_user = b.get('ssh_user') or 'legacy / unspecified'
         if old_user != new_user:
             notes.append(('local', f'SSH user: {old_user} -> {new_user}'))
     return notes

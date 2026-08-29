@@ -2,7 +2,6 @@
 import importlib.util
 import json
 import os
-import socket
 from pathlib import Path
 
 ROOT = os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
@@ -54,22 +53,15 @@ def require_v2(state):
             )
 
 
-def active(port):
-    if not port:
-        return False
-    s = socket.socket()
-    s.settimeout(0.25)
-    try:
-        return s.connect_ex(('127.0.0.1', int(port))) == 0
-    finally:
-        s.close()
-
-
-def client_online(services):
+def client_state(services, snapshot):
+    states = []
     for _sid, svc in services:
-        if active(svc.get('remote_port')):
-            return True
-    return False
+        states.append(CREG.passive_port_state(svc.get('remote_port'), snapshot))
+    if 'online' in states:
+        return 'online'
+    if states and all(state == 'offline' for state in states):
+        return 'offline'
+    return 'unknown'
 
 
 cfg = json.loads(CFG.read_text())
@@ -79,8 +71,9 @@ if ROOT and not str(reg).startswith(ROOT):
 state = json.loads(reg.read_text()) if reg.exists() else {'schema_version': 2, 'clients': {}}
 require_v2(state)
 
-public_ip = str(cfg.get('public_host') or cfg.get('public_ip') or '')
+public_ip = CREG.sanitize_display(cfg.get('public_host') or cfg.get('public_ip') or '', 253)
 clients = CREG.sorted_clients(state)
+listener_snapshot = CREG.passive_listening_ports()
 
 print('Registered clients')
 print('==================')
@@ -99,18 +92,18 @@ for idx, (mid, client) in enumerate(clients, start=1):
     label = CREG.sanitize_display(CREG.display_name(client, mid), 18)
     hostname = CREG.sanitize_display(client.get('hostname') or '-', 14)
     short_id = CREG.short_machine_id(mid)
-    state_txt = 'online' if client_online(services) else 'offline'
+    state_txt = client_state(services, listener_snapshot)
     mgmt = CREG.mgmt_status(client)
     ssh_txt = '-'
     _sid, ssh = CREG.first_ssh_service(client)
     if ssh:
-        user = CREG.sanitize_display(ssh.get('ssh_user') or '', 32)
+        user = CREG.ssh_user_display(ssh)
         port = ssh.get('remote_port') or '-'
-        if user:
+        if ssh.get('ssh_user'):
             ssh_txt = '%s@%s:%s' % (user, public_ip or 'host', port)
         else:
-            ssh_txt = '%s:%s' % (public_ip or 'host', port)
-        ssh_txt = CREG.sanitize_display(ssh_txt, 36)
+            ssh_txt = 'legacy / unspecified'
+        ssh_txt = CREG.sanitize_display(ssh_txt, 48)
     print(
         f'{idx:<3} {label:<18} {hostname:<14} {short_id:<10} '
         f'{str(len(services)):<8} {state_txt:<8} {mgmt:<10} {ssh_txt}'

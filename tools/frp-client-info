@@ -66,7 +66,7 @@ state = json.loads(reg.read_text())
 require_v2(state)
 
 mid, client = CREG.resolve_client_or_exit(state, q)
-public_ip = str(cfg.get('public_host') or cfg.get('public_ip') or '')
+public_ip = CREG.sanitize_display(cfg.get('public_host') or cfg.get('public_ip') or '', 253)
 services = client.get('services') or {}
 if not isinstance(services, dict):
     services = {}
@@ -100,7 +100,7 @@ if not enabled:
 
 for sid, svc in enabled:
     protocol = str(svc.get('protocol') or 'tcp').upper()
-    local_ip = svc.get('local_ip') or ''
+    local_ip = CREG.sanitize_display(svc.get('local_ip') or '', 253)
     local_port = svc.get('local_port')
     remote_port = svc.get('remote_port')
     preset = svc.get('preset') or 'custom'
@@ -111,9 +111,12 @@ for sid, svc in enabled:
     print(f'  Target    : {local_ip}:{local_port}')
     print(f'  Public    : {public_ip}:{remote_port}')
     if preset == 'ssh':
-        ssh_user = svc.get('ssh_user') or 'root'
-        print('  Connect   :')
-        print(f'    ssh -p {remote_port} {ssh_user}@{public_ip}')
+        ssh_user = CREG.ssh_user_display(svc)
+        if svc.get('ssh_user'):
+            print('  Connect   :')
+            print(f'    ssh -p {remote_port} {ssh_user}@{public_ip}')
+        else:
+            print(f'  SSH user  : {ssh_user}')
     elif preset == 'http':
         print('  URL       :')
         print(f'    http://{public_ip}:{remote_port}')

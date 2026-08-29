@@ -158,11 +158,14 @@ for item in services:
     preset = item.get('preset') or 'custom'
     remote_port = item.get('remote_port')
     if preset == 'ssh':
-        user = item.get('ssh_user') or 'root'
+        user = item.get('ssh_user')
         print('SSH tunnel ready')
         print()
-        print('Connect:')
-        print('  ssh -p %s %s@%s' % (remote_port, user, server))
+        if user:
+            print('Connect:')
+            print('  ssh -p %s %s@%s' % (remote_port, user, server))
+        else:
+            print('SSH user: legacy / unspecified')
         print()
     elif preset == 'http':
         print('Connect:')
@@ -203,10 +206,13 @@ for item in services:
     print(f"  Public port  : {remote_port}")
     print()
     if preset == 'ssh':
-        user = item.get('ssh_user') or 'root'
-        print('Connect from another machine with:')
-        print()
-        print(f'  ssh -p {remote_port} {user}@{server}')
+        user = item.get('ssh_user')
+        if user:
+            print('Connect from another machine with:')
+            print()
+            print(f'  ssh -p {remote_port} {user}@{server}')
+        else:
+            print('SSH user: legacy / unspecified')
     elif preset == 'http':
         print('Access:')
         print()
