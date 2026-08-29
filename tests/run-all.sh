@@ -9,7 +9,7 @@ export PYTHONDONTWRITEBYTECODE=1
 echo "=== shell syntax ==="
 git ls-files '*.sh' | xargs -r bash -n
 git ls-files -o --exclude-standard '*.sh' | xargs -r bash -n
-bash -n tools/frp-server-status tools/frp-update tools/frp-upstream tools/frp-client tools/frpctl
+bash -n tools/frp-server-status tools/frp-project-update tools/frp-update tools/frp-upstream tools/frp-client tools/frpctl
 
 echo "=== Python compile ==="
 python3 -m py_compile server/frp-port-allocator.py server/migrate_token.py scripts/build-bundles.py lib/frp_mgmt_auth.py lib/frp_pki.py lib/frp_frontend.py lib/frp_doctor.py lib/frp_install_txn.py lib/frp_client_registry.py lib/frp_audit.py
@@ -49,6 +49,7 @@ bash ./tests/test-installed-client-update.sh
 python3 tests/test-frontend-proxy.py
 ./tests/test-distro-matrix.sh
 ./tests/test-frp-update.sh
+./tests/test-server-project-update.sh
 ./tests/test-frp-server-status.sh
 ./tests/test-release-docs.sh
 ./tests/test-probe-tcp-injection.sh
