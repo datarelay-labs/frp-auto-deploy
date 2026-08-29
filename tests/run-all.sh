@@ -46,6 +46,7 @@ python3 tests/test-client-registry.py
 ./tests/test-guided-ux.sh
 ./tests/test-client-upgrade.sh
 bash ./tests/test-installed-client-update.sh
+./tests/test-legacy-client-secure-bridge.sh
 ./tests/test-install-lifecycle.sh
 ./tests/test-frpctl.sh
 ./tests/test-frpctl-completion.sh

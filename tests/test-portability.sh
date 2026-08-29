@@ -258,6 +258,7 @@ grep -q 'sbin_dir' "$ROOT/install-server.sh" || fail "server tools in sbin"
 grep -q '/usr/local/bin/frpc' "$ROOT/install-client.sh" || fail "client frpc path"
 grep -q 'frp_client_path /usr/local/bin' "$ROOT/lib/frp-client-common.sh" || fail "client tools in bin"
 grep -q 'lib/frp-common.sh' "$ROOT/scripts/build-bundles.py" || fail "client bundle missing common lib"
+grep -q "'release-manifest.json'" "$ROOT/scripts/build-bundles.py" || fail "client bundle missing release-manifest"
 grep -q 'lib/frp_doctor.py' "$ROOT/scripts/build-bundles.py" || fail "bundle missing doctor engine"
 grep -q 'lib/frp-doctor-common.sh' "$ROOT/scripts/build-bundles.py" || fail "bundle missing doctor lib"
 if grep -q 'Debian/Ubuntu only' "$ROOT/install-server.sh"; then

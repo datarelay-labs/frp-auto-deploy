@@ -241,6 +241,60 @@ frp_is_official_main_installer_url() {
   [[ "$url" == "https://${FRP_GITHUB_RAW_HOST}/${FRP_GITHUB_OWNER}/${FRP_GITHUB_REPO}/main/dist/bootstrap-client.sh" ]]
 }
 
+frp_validate_release_source_metadata() {
+  # Validate VERSION + release-manifest.json agreement.
+  # Prints: project_version<TAB>channel<TAB>git_ref
+  local source="$1"
+  local expected_ref="${2:-${FRP_EXPECTED_SOURCE_REF:-}}"
+  local expected_channel="${3:-${FRP_EXPECTED_RELEASE_CHANNEL:-}}"
+  python3 - "${source}/release-manifest.json" "${source}/VERSION" \
+    "$expected_ref" "$expected_channel" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+manifest_path, version_path, expected_ref, expected_channel = sys.argv[1:]
+try:
+    data = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+except Exception:
+    sys.stderr.write("ERROR: missing or invalid release-manifest.json\n")
+    raise SystemExit(1)
+values = {}
+try:
+    for line in Path(version_path).read_text(encoding="utf-8").splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            values[key.strip()] = value.strip().strip('"').strip("'")
+except OSError:
+    sys.stderr.write("ERROR: missing VERSION metadata\n")
+    raise SystemExit(1)
+project = values.get("PROJECT_VERSION", "")
+if not re.fullmatch(r"\d+\.\d+\.\d+", project):
+    sys.stderr.write("ERROR: invalid project version metadata\n")
+    raise SystemExit(1)
+if str(data.get("project_version") or "") != project:
+    sys.stderr.write("ERROR: release metadata project version mismatch\n")
+    raise SystemExit(1)
+channel = str(data.get("channel") or "").strip().lower()
+git_ref = str(data.get("git_ref") or "").strip()
+if channel not in ("dev", "stable"):
+    sys.stderr.write("ERROR: release metadata channel must be dev or stable\n")
+    raise SystemExit(1)
+expected_git_ref = "main" if channel == "dev" else "v%s" % project
+if git_ref != expected_git_ref:
+    sys.stderr.write("ERROR: release metadata channel/ref disagreement\n")
+    raise SystemExit(1)
+if expected_ref and git_ref != expected_ref:
+    sys.stderr.write("ERROR: release metadata source ref mismatch\n")
+    raise SystemExit(1)
+if expected_channel and channel != expected_channel:
+    sys.stderr.write("ERROR: release metadata channel mismatch\n")
+    raise SystemExit(1)
+sys.stdout.write("%s\t%s\t%s\n" % (project, channel, git_ref))
+PY
+}
+
 frp_release_manifest_path() {
   if [[ -n "${FRP_RELEASE_MANIFEST:-}" && -f "${FRP_RELEASE_MANIFEST}" ]]; then
     printf '%s' "$FRP_RELEASE_MANIFEST"
@@ -418,21 +472,27 @@ frp_write_version_file() {
     source_ref="v${PROJECT_VERSION}"
   fi
   bundle="${FRP_BUNDLE_SHA256:-}"
-  if [[ -z "$bundle" && -n "${FRP_BUNDLE_FILE:-}" && -f "${FRP_BUNDLE_FILE}" ]]; then
-    bundle="$(sha256sum "${FRP_BUNDLE_FILE}" | awk '{print $1}')"
-  fi
-  if [[ -z "$bundle" ]]; then
-    bundle="$(frp_read_kv_file "$dest" BUNDLE_SHA256)"
-  fi
-  if [[ -z "$bundle" ]]; then
-    local cand=""
-    if [[ "${2:-}" == "client" ]]; then
-      cand="${_FRP_COMMON_DIR}/../dist/bootstrap-client.sh"
-    else
-      cand="${_FRP_COMMON_DIR}/../dist/bootstrap-server.sh"
+  if [[ "${FRP_VERSION_REQUIRE_VERIFIED_BUNDLE:-}" == "1" ]]; then
+    if [[ ! "$bundle" =~ ^[0-9a-fA-F]{64}$ ]]; then
+      bundle=""
     fi
-    if [[ -f "$cand" ]]; then
-      bundle="$(sha256sum "$cand" | awk '{print $1}')"
+  else
+    if [[ -z "$bundle" && -n "${FRP_BUNDLE_FILE:-}" && -f "${FRP_BUNDLE_FILE}" ]]; then
+      bundle="$(sha256sum "${FRP_BUNDLE_FILE}" | awk '{print $1}')"
+    fi
+    if [[ -z "$bundle" ]]; then
+      bundle="$(frp_read_kv_file "$dest" BUNDLE_SHA256)"
+    fi
+    if [[ -z "$bundle" ]]; then
+      local cand=""
+      if [[ "${2:-}" == "client" ]]; then
+        cand="${_FRP_COMMON_DIR}/../dist/bootstrap-client.sh"
+      else
+        cand="${_FRP_COMMON_DIR}/../dist/bootstrap-server.sh"
+      fi
+      if [[ -f "$cand" ]]; then
+        bundle="$(sha256sum "$cand" | awk '{print $1}')"
+      fi
     fi
   fi
   tmp="$(mktemp "${dir}/.version.XXXXXX")"

@@ -80,6 +80,48 @@ operator cycle PASSes.
 Follow `docs/RELEASE_CHECKLIST.md` and `docs/RELEASE_VALIDATION.md`.
 Do not move or rewrite the frozen `v2.1.0` tag.
 
+## Legacy client secure bridge
+
+Legacy clients installed before secure project-update metadata
+require a one-time verified bridge.
+
+Those installs have no trustworthy persisted `RELEASE_CHANNEL`,
+`SOURCE_REF`, or `BUNDLE_SHA256`. The updater that was on the host
+then cannot retroactively verify an artifact before executing it.
+A later bundle that hashes itself only proves **artifact identity**,
+not **externally verified artifact integrity**. Do not pipe a mutable
+`main` URL into `sudo`.
+
+One-time verified bridge (development line: `channel=dev`,
+`source_ref=main`):
+
+1. Choose an **immutable commit SHA** (logical identity stays `dev` / `main`).
+2. Download `SHA256SUMS` and `dist/bootstrap-client.sh` from **that same commit**.
+3. Extract the expected digest for `dist/bootstrap-client.sh`.
+4. Hash the downloaded bundle. Require `expected == actual`.
+5. Run the verified bundle with explicit channel and source-ref.
+
+```bash
+COMMIT=<immutable-commit-sha>
+BASE="https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/${COMMIT}"
+curl -fsSL "${BASE}/SHA256SUMS" -o SHA256SUMS
+curl -fsSL "${BASE}/dist/bootstrap-client.sh" -o bootstrap-client.sh
+expected="$(awk '$2=="dist/bootstrap-client.sh" {print $1; exit}' SHA256SUMS)"
+actual="$(sha256sum bootstrap-client.sh | awk '{print $1}')"
+[[ "$expected" == "$actual" ]] || { echo "SHA256 mismatch"; exit 1; }
+sudo env FRP_RELEASE_CHANNEL=dev FRP_EXPECTED_SOURCE_REF=main \
+  FRP_BUNDLE_SHA256="$actual" bash bootstrap-client.sh --upgrade
+```
+
+`sudo frpctl update --check` is read-only. If it reports
+`LEGACY_CLIENT_SECURE_BRIDGE_REQUIRED` or `Legacy secure bridge required`,
+do not mutate the host until the procedure above succeeds.
+
+A client that was incorrectly labeled `stable` / `v2.1.0` with
+`BUNDLE_SHA256` unknown is not automatically `dev`. Recover it the same
+way: explicit `FRP_RELEASE_CHANNEL=dev`, expected `source_ref=main`, and
+a verified candidate whose manifest is `dev` / `main`.
+
 ## Rollback
 
 - Server FRP binary: `frp-update` restores the previous binary on health failure.

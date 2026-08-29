@@ -281,10 +281,14 @@ frp_client_existing_install_message() {
 frp_client_upgrade_from_this_tree() {
   local source="${FRP_CLIENT_UPDATE_SOURCE:-${_FRP_INSTALL_CLIENT_DIR}}"
   local check_only=0
+  local kind="bundle"
   if [[ "${FRP_CLIENT_UPDATE_CHECK:-}" == "1" ]]; then
     check_only=1
   fi
-  frp_client_apply_upgrade "$source" "$check_only"
+  if [[ -n "${FRP_CLIENT_UPDATE_SOURCE:-}" ]]; then
+    kind="source"
+  fi
+  _FRP_CLIENT_UPDATE_KIND="$kind" frp_client_apply_upgrade "$source" "$check_only"
 }
 
 frp_client_main() {

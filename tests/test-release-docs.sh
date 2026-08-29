@@ -128,6 +128,11 @@ if grep -nE 'raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/
   fail "stable docs still point bootstrap installs at mutable main"
 fi
 grep -q 'FRP_RELEASE_CHANNEL=dev' README.md || fail "README missing opt-in dev channel note"
+grep -q 'one-time verified bridge' README.md || fail "README missing legacy client bridge"
+grep -q 'one-time verified bridge' docs/FRP_UPGRADE.md || fail "upgrade doc missing legacy bridge"
+grep -q 'cannot retroactively verify' docs/FRP_UPGRADE.md || fail "upgrade doc missing old-updater limit"
+grep -q 'do not pipe' docs/FRP_UPGRADE.md || grep -q 'Do not pipe' docs/FRP_UPGRADE.md ||
+  fail "upgrade doc must not recommend piping main"
 pass "IMMUTABLE_RELEASE_URLS_IN_DOCS"
 
 grep -q 'REAL_ENTERPRISE_RESTRICTED_NETWORK_E2E=PASS' docs/RELEASE_VALIDATION.md || fail "missing enterprise-network evidence"

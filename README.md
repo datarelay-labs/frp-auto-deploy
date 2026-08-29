@@ -489,6 +489,14 @@ curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1
 Update is not re-enrollment. Already enrolled 1.9.1 clients remain compatible
 with a 2.0.0 server (management protocol schema 1 is unchanged).
 
+Legacy clients installed before secure project-update metadata
+require a one-time verified bridge. The old updater cannot retroactively
+verify an artifact before executing it. Do not pipe a mutable `main` URL
+into `sudo`. Download `SHA256SUMS` and `dist/bootstrap-client.sh` from the
+same immutable commit, require the checksums to match, then run the bundle
+with explicit `FRP_RELEASE_CHANNEL` / `FRP_EXPECTED_SOURCE_REF` and
+`FRP_BUNDLE_SHA256`. See `docs/FRP_UPGRADE.md`.
+
 ---
 
 # Uninstall and purge

@@ -584,6 +584,73 @@ frp_client_installed_bundle_sha256() {
   printf '%s' "$v"
 }
 
+frp_client_external_bundle_sha256() {
+  # Artifact SHA passed in from an external verifier (SHA256SUMS), not a
+  # self-hash of the bundle that is about to execute.
+  local digest=""
+  if [[ "${FRP_BUNDLE_SHA256:-}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    digest="$(printf '%s' "$FRP_BUNDLE_SHA256" | tr '[:upper:]' '[:lower:]')"
+  elif [[ "${FRP_VERIFIED_CLIENT_UPDATE_SHA256:-}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    digest="$(printf '%s' "$FRP_VERIFIED_CLIENT_UPDATE_SHA256" | tr '[:upper:]' '[:lower:]')"
+  elif [[ "${FRP_CLIENT_UPDATE_SHA256:-}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    digest="$(printf '%s' "$FRP_CLIENT_UPDATE_SHA256" | tr '[:upper:]' '[:lower:]')"
+  fi
+  printf '%s' "$digest"
+}
+
+frp_client_known_release_channel() {
+  local raw="${1:-}" parsed=""
+  parsed="$(frp_parse_known_release_channel "$raw" 2>/dev/null)" || return 1
+  [[ -n "$parsed" ]] || return 1
+  printf '%s' "$parsed"
+}
+
+frp_client_has_trustworthy_release_line() {
+  local channel ref
+  channel="$(frp_client_installed_release_channel)"
+  ref="$(frp_client_installed_source_ref)"
+  frp_client_known_release_channel "$channel" >/dev/null || return 1
+  [[ -n "$ref" && "$ref" != "unknown" ]] || return 1
+  return 0
+}
+
+frp_client_has_verified_build_identity() {
+  local sha
+  sha="$(frp_client_installed_bundle_sha256)"
+  [[ "$sha" =~ ^[0-9a-f]{64}$ ]]
+}
+
+frp_client_explicit_expected_channel() {
+  local raw="${FRP_EXPECTED_RELEASE_CHANNEL:-${FRP_RELEASE_CHANNEL:-}}"
+  [[ -n "$raw" ]] || return 1
+  frp_client_known_release_channel "$raw"
+}
+
+frp_client_emit_legacy_secure_bridge() {
+  echo "ERROR: this client has no trustworthy persisted release identity." >&2
+  echo "A pre-P2.20 updater cannot retroactively verify an artifact before executing it." >&2
+  echo "A bundle hashing itself is identity, not external verification." >&2
+  echo "Perform the documented one-time verified bridge; do not pipe main into sudo." >&2
+  echo "Legacy secure bridge required"
+  echo "State mutation           : NO"
+  frp_emit_failure_class LEGACY_CLIENT_SECURE_BRIDGE_REQUIRED
+}
+
+frp_client_report_identity() {
+  local installed_version="$1" target_version="$2"
+  local installed_channel="$3" target_channel="$4"
+  local installed_ref="$5" target_ref="$6"
+  local installed_bundle="$7" target_bundle="$8"
+  echo "Installed project version : ${installed_version}"
+  echo "Target project version    : ${target_version}"
+  echo "Installed release channel : ${installed_channel}"
+  echo "Target release channel    : ${target_channel}"
+  echo "Installed source ref      : ${installed_ref}"
+  echo "Target source ref         : ${target_ref}"
+  echo "Installed bundle SHA256   : ${installed_bundle}"
+  echo "Target bundle SHA256      : ${target_bundle}"
+}
+
 frp_client_has_existing_install() {
   if [[ -f "$(frp_client_state_path)" ]]; then
     return 0
@@ -3364,6 +3431,11 @@ frp_client_apply_upgrade() {
     return 1
   fi
 
+  local kind="${_FRP_CLIENT_UPDATE_KIND:-bundle}"
+  local candidate_meta candidate_channel="unknown" candidate_ref="unknown"
+  local installed_channel installed_ref expected_channel="" expected_ref=""
+  local target_channel_out target_ref_out target_bundle_out
+
   _FRP_CLIENT_UPGRADE_ROLLBACK_DONE=0
   _FRP_CLIENT_UPGRADE_ROLLBACK_RC=0
   _FRP_CLIENT_UPGRADE_IN_ROLLBACK=0
@@ -3387,22 +3459,56 @@ frp_client_apply_upgrade() {
     echo "Restored the previous management files from backup."
     frp_txn_clear
   fi
-  frp_client_upgrade_source_version "$source"
+
   previous="$(frp_client_installed_project_version)"
   installed_bundle="$(frp_client_installed_bundle_sha256)"
-  target_bundle="${FRP_BUNDLE_SHA256:-}"
-  target="${PROJECT_VERSION}"
+  installed_channel="$(frp_client_installed_release_channel)"
+  installed_ref="$(frp_client_installed_source_ref)"
+  target_bundle="$(frp_client_external_bundle_sha256)"
+  expected_channel="$(frp_client_explicit_expected_channel || true)"
+  expected_ref="${FRP_EXPECTED_SOURCE_REF:-}"
   frp_before="$(frp_client_installed_frp_version)"
   ident_before="$(frp_identity_status)"
 
-  echo "Installed project version : ${previous}"
-  echo "Target project version    : ${target}"
-  if [[ "$installed_bundle" != "unknown" ]]; then
-    echo "Installed bundle SHA256   : ${installed_bundle}"
+  if [[ "$kind" != "source" && -z "$target_bundle" ]]; then
+    frp_client_report_identity "$previous" "unknown" \
+      "$installed_channel" "unknown" "$installed_ref" "unknown" \
+      "$installed_bundle" "unknown"
+    echo "FRP version               : ${FRP_VERSION}"
+    echo
+    frp_client_emit_legacy_secure_bridge
+    return 1
   fi
-  if [[ -n "$target_bundle" ]]; then
-    echo "Target bundle SHA256      : ${target_bundle}"
+  if [[ "$kind" != "source" ]] && ! frp_client_has_trustworthy_release_line \
+      && [[ -z "$expected_channel" ]]; then
+    frp_client_report_identity "$previous" "unknown" \
+      "$installed_channel" "unknown" "$installed_ref" "unknown" \
+      "$installed_bundle" "${target_bundle:-unknown}"
+    echo "FRP version               : ${FRP_VERSION}"
+    echo
+    frp_client_emit_legacy_secure_bridge
+    return 1
   fi
+
+  if ! candidate_meta="$(frp_validate_release_source_metadata "$source" \
+      "$expected_ref" "$expected_channel")"; then
+    frp_emit_failure_class WRONG_METADATA
+    return 1
+  fi
+  target="$(printf '%s' "$candidate_meta" | awk -F'\t' '{print $1}')"
+  candidate_channel="$(printf '%s' "$candidate_meta" | awk -F'\t' '{print $2}')"
+  candidate_ref="$(printf '%s' "$candidate_meta" | awk -F'\t' '{print $3}')"
+  PROJECT_VERSION="$target"
+  frp_client_upgrade_source_version "$source"
+  PROJECT_VERSION="$target"
+
+  target_channel_out="$candidate_channel"
+  target_ref_out="$candidate_ref"
+  target_bundle_out="${target_bundle:-unknown}"
+  frp_client_report_identity "$previous" "$target" \
+    "$installed_channel" "$target_channel_out" \
+    "$installed_ref" "$target_ref_out" \
+    "$installed_bundle" "$target_bundle_out"
   echo "FRP version               : ${FRP_VERSION}"
   echo
 
@@ -3415,12 +3521,13 @@ frp_client_apply_upgrade() {
       frp_emit_failure_class DOWNGRADE_REFUSED
       return 1
     fi
-  fi
-
-  if [[ -n "$target_bundle" && "$installed_bundle" == "$target_bundle" ]]; then
-    update_needed=0
-  elif [[ -z "$target_bundle" && "$previous" == "$target" ]]; then
-    update_needed=0
+    if [[ "$vcmp" == "eq" ]]; then
+      if [[ -n "$target_bundle" && "$installed_bundle" == "$target_bundle" ]]; then
+        update_needed=0
+      else
+        update_needed=1
+      fi
+    fi
   fi
 
   if [[ "$check_only" == "1" ]]; then
@@ -3429,13 +3536,14 @@ frp_client_apply_upgrade() {
     else
       echo "Update                    : available"
     fi
+    echo "State mutation           : NO"
     echo
     echo "A software update does not require an Enrollment Code."
     echo "Client state, public ports, and management identity are preserved."
     return 0
   fi
 
-  if [[ "$update_needed" == "0" && -n "$target_bundle" ]]; then
+  if [[ "$update_needed" == "0" ]]; then
     echo "Update                    : not needed"
     return 0
   fi
@@ -3466,9 +3574,9 @@ frp_client_apply_upgrade() {
   echo "Backing up replaceable project files..."
   backup="$(frp_client_upgrade_backup_tools)" || return 1
   FRP_TXN_SNAPSHOT_PATH="$backup" \
-  FRP_TXN_RELEASE_CHANNEL="${FRP_RELEASE_CHANNEL:-$(frp_read_kv_file "$(frp_client_version_file)" RELEASE_CHANNEL)}" \
-  FRP_TXN_SOURCE_REF="${FRP_RESOLVED_SOURCE_REF:-$(frp_read_kv_file "$(frp_client_version_file)" SOURCE_REF)}" \
-  FRP_TXN_BUNDLE_SHA256="${FRP_BUNDLE_SHA256:-}" \
+  FRP_TXN_RELEASE_CHANNEL="$candidate_channel" \
+  FRP_TXN_SOURCE_REF="$candidate_ref" \
+  FRP_TXN_BUNDLE_SHA256="${target_bundle:-}" \
   FRP_TXN_MUTATION_STARTED=true \
     frp_txn_write client-update commit "$previous" "$target"
   _FRP_CLIENT_UPGRADE_MUTATION_STARTED=1
@@ -3504,7 +3612,11 @@ frp_client_apply_upgrade() {
     frp_client_upgrade_rollback "$backup" BUILD_INFO_WRITE_FAILED || return 2
     return 1
   fi
-  if ! frp_client_write_version_file; then
+  if ! FRP_RELEASE_CHANNEL="$candidate_channel" \
+      FRP_BUNDLE_SHA256="${target_bundle:-}" \
+      FRP_VERSION_REQUIRE_VERIFIED_BUNDLE=1 \
+      PROJECT_VERSION="$target" \
+      frp_client_write_version_file; then
     echo "ERROR: failed to write version file; restoring previous management files." >&2
     frp_client_upgrade_rollback "$backup" BUILD_INFO_WRITE_FAILED || return 2
     return 1
@@ -3553,6 +3665,11 @@ frp_client_apply_upgrade() {
   echo
   echo "Upgrade complete."
   echo "Project version : ${previous} -> ${target}"
+  echo "Release channel : ${candidate_channel}"
+  echo "Source ref      : ${candidate_ref}"
+  if [[ -n "$target_bundle" ]]; then
+    echo "Bundle SHA256   : ${target_bundle}"
+  fi
   if [[ "$previous" == "$target" ]]; then
     echo "Same-version update : refreshed management files"
   fi
@@ -3602,9 +3719,9 @@ frp_verify_client_update_artifact() {
 frp_client_fetch_and_upgrade() {
   local source="${1:-}"
   local check_only="${2:-0}"
-  local tmp archive metadata channel source_ref
+  local tmp archive metadata channel source_ref explicit_channel=""
   if [[ -n "$source" ]]; then
-    frp_client_apply_upgrade "$source" "$check_only"
+    _FRP_CLIENT_UPDATE_KIND=source frp_client_apply_upgrade "$source" "$check_only"
     return $?
   fi
   if [[ "${FRP_CLIENT_UPGRADE_HOOK_DOWNLOAD_FAIL:-}" == "1" ]]; then
@@ -3615,13 +3732,6 @@ frp_client_fetch_and_upgrade() {
     echo "ERROR: run with sudo" >&2
     return 1
   fi
-  tmp="$(mktemp -d)"
-  archive="${tmp}/bootstrap-client.sh"
-  metadata="${tmp}/SHA256SUMS"
-  trap 'rm -rf "'"$tmp"'"' RETURN
-  echo "Downloading frp-auto-deploy client update bundle..."
-  channel="$(frp_release_channel)"
-  source_ref="$(frp_release_git_ref)"
   if ! frp_validate_https_url "$FRP_CLIENT_UPDATE_URL"; then
     echo "ERROR: client update URL must be a valid HTTPS URL" >&2
     return 1
@@ -3630,11 +3740,42 @@ frp_client_fetch_and_upgrade() {
     echo "ERROR: client update metadata URL must be a valid HTTPS URL" >&2
     return 1
   fi
+  explicit_channel="$(frp_client_explicit_expected_channel || true)"
+  if frp_client_has_existing_install; then
+    if ! frp_client_has_trustworthy_release_line && [[ -z "$explicit_channel" ]]; then
+      frp_client_report_identity \
+        "$(frp_client_installed_project_version)" "unknown" \
+        "$(frp_client_installed_release_channel)" "unknown" \
+        "$(frp_client_installed_source_ref)" "unknown" \
+        "$(frp_client_installed_bundle_sha256)" "unknown"
+      frp_client_emit_legacy_secure_bridge
+      return 1
+    fi
+  fi
+  if [[ -n "$explicit_channel" ]]; then
+    channel="$explicit_channel"
+  elif frp_client_has_trustworthy_release_line; then
+    channel="$(frp_client_known_release_channel "$(frp_client_installed_release_channel)")"
+  else
+    channel="$(frp_release_channel)"
+  fi
+  if [[ -n "${FRP_EXPECTED_SOURCE_REF:-}" ]]; then
+    source_ref="$FRP_EXPECTED_SOURCE_REF"
+  elif [[ "$channel" == "dev" ]]; then
+    source_ref="main"
+  else
+    source_ref="v${PROJECT_VERSION}"
+  fi
   if ! frp_url_has_source_ref "$FRP_CLIENT_UPDATE_URL" "$source_ref" \
     || ! frp_url_has_source_ref "$FRP_CLIENT_UPDATE_METADATA_URL" "$source_ref"; then
     echo "ERROR: client update artifact and metadata URLs must use source ref ${source_ref}" >&2
     return 1
   fi
+  tmp="$(mktemp -d)"
+  archive="${tmp}/bootstrap-client.sh"
+  metadata="${tmp}/SHA256SUMS"
+  trap 'rm -rf "'"$tmp"'"' RETURN
+  echo "Downloading frp-auto-deploy client update bundle..."
   curl -fL --retry 3 --connect-timeout 10 --max-time 120 -o "$metadata" "$FRP_CLIENT_UPDATE_METADATA_URL" || {
     echo "ERROR: failed to download client update integrity metadata" >&2
     frp_emit_failure_class INTEGRITY_FAILED
@@ -3651,13 +3792,20 @@ frp_client_fetch_and_upgrade() {
   chmod 0755 "$archive"
   echo "Applying update from downloaded bundle..."
   # The bundle extracts a source tree and runs install-client.sh --upgrade.
+  # FRP_BUNDLE_SHA256 is the externally verified digest from SHA256SUMS.
   if [[ "$check_only" == "1" ]]; then
     FRP_BUNDLE_SHA256="$FRP_VERIFIED_CLIENT_UPDATE_SHA256" \
       FRP_BUNDLE_FILE="$archive" FRP_RELEASE_CHANNEL="$channel" \
+      FRP_EXPECTED_RELEASE_CHANNEL="$channel" \
+      FRP_EXPECTED_SOURCE_REF="$source_ref" \
+      _FRP_CLIENT_UPDATE_KIND=bundle \
       bash "$archive" --upgrade --check
   else
     FRP_BUNDLE_SHA256="$FRP_VERIFIED_CLIENT_UPDATE_SHA256" \
       FRP_BUNDLE_FILE="$archive" FRP_RELEASE_CHANNEL="$channel" \
+      FRP_EXPECTED_RELEASE_CHANNEL="$channel" \
+      FRP_EXPECTED_SOURCE_REF="$source_ref" \
+      _FRP_CLIENT_UPDATE_KIND=bundle \
       bash "$archive" --upgrade
   fi
 }
