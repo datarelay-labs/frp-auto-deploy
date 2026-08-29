@@ -31,6 +31,8 @@ for f in \
   "$BASE_DIR/tools/frp-client-set" \
   "$BASE_DIR/tools/frp-set-client-installer-url" \
   "$BASE_DIR/tools/frp-server-status" \
+  "$BASE_DIR/tools/frp-backup" \
+  "$BASE_DIR/tools/frp-restore" \
   "$BASE_DIR/tools/frp-update" \
   "$BASE_DIR/tools/frpctl"; do
   [[ -f "$f" ]] || { echo "ERROR: missing project file: $f" >&2; exit 1; }
@@ -1746,7 +1748,7 @@ frp_server_main() {
   else
     rm -f "$unit_frontend" "$frontend_conf"
   fi
-  for tool in frp-create-client frp-clients frp-client-info frp-client-set frp-release-client frp-release-service frp-revoke-client frp-set-client-installer-url frp-server-status frp-update frpctl; do
+  for tool in frp-create-client frp-clients frp-client-info frp-client-set frp-release-client frp-release-service frp-revoke-client frp-set-client-installer-url frp-server-status frp-backup frp-restore frp-update frpctl; do
     install -m 0755 "$BASE_DIR/tools/$tool" "${sbin_dir}/$tool"
   done
 

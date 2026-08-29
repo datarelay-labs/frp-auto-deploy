@@ -32,6 +32,8 @@ files=[
  'tools/frp-client-set',
  'tools/frp-set-client-installer-url',
  'tools/frp-server-status',
+ 'tools/frp-backup',
+ 'tools/frp-restore',
  'tools/frp-update',
  'tools/frpctl',
 ]
