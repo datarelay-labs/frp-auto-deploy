@@ -9,6 +9,14 @@
   "https_raw_base": "https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy",
   "signing": false,
   "checksum_file": "SHA256SUMS",
+  "supported_frp_versions": {
+    "0.70.1": {
+      "status": "tested",
+      "amd64_sha256": "333da23d1b9009d7c01638e9ba38cf4600f7d37d393f854e96ee1396adefa9a6",
+      "arm64_sha256": "3990f396a9a490ee7f0e5f355287750ed41520064ed999eab443b5e9a78d773d",
+      "websocket_path": "/~!frp"
+    }
+  },
   "note": "Checksums are integrity hashes from SHA256SUMS, not cryptographic signatures. This working-tree manifest describes main/dev artifacts. Stable tagged releases use git_ref vPROJECT_VERSION and never mutable main. Dev channel (FRP_RELEASE_CHANNEL=dev) is explicit opt-in. Do not treat this file as the frozen v2.1.0 tag identity.",
   "artifacts": {
     "bootstrap-client.sh": {

@@ -48,7 +48,7 @@ pass "ZERO_TOUCH_DOCS"
 
 for cmd in frpctl frp-create-client frp-client frp-client-info frp-clients \
   frp-client-set frp-release-service frp-release-client frp-revoke-client frp-update \
-  frp-server-status frp-set-client-installer-url; do
+  frp-upstream frp-server-status frp-set-client-installer-url; do
   [[ -e "$ROOT/tools/$cmd" ]] || fail "documented command missing: $cmd"
 done
 pass "DOCUMENTED_COMMANDS_EXIST"

@@ -19,6 +19,7 @@ for f in \
   "$BASE_DIR/lib/frp_frontend.py" \
   "$BASE_DIR/lib/frp_install_txn.py" \
   "$BASE_DIR/lib/frp_client_registry.py" \
+  "$BASE_DIR/lib/frp_audit.py" \
   "$BASE_DIR/lib/frp-doctor-common.sh" \
   "$BASE_DIR/lib/frp_doctor.py" \
   "$BASE_DIR/release-manifest.json" \
@@ -32,6 +33,7 @@ for f in \
   "$BASE_DIR/tools/frp-set-client-installer-url" \
   "$BASE_DIR/tools/frp-server-status" \
   "$BASE_DIR/tools/frp-update" \
+  "$BASE_DIR/tools/frp-upstream" \
   "$BASE_DIR/tools/frpctl"; do
   [[ -f "$f" ]] || { echo "ERROR: missing project file: $f" >&2; exit 1; }
 done
@@ -1732,6 +1734,7 @@ frp_server_main() {
   install -m 0644 "$BASE_DIR/lib/frp_doctor.py" "${lib_dir}/frp_doctor.py"
   install -m 0644 "$BASE_DIR/lib/frp_install_txn.py" "${lib_dir}/frp_install_txn.py"
   install -m 0644 "$BASE_DIR/lib/frp_client_registry.py" "${lib_dir}/frp_client_registry.py"
+  install -m 0644 "$BASE_DIR/lib/frp_audit.py" "${lib_dir}/frp_audit.py"
   install -m 0644 "$BASE_DIR/release-manifest.json" "${lib_dir}/release-manifest.json"
   if [[ -f "$BASE_DIR/SHA256SUMS" ]]; then
     install -m 0644 "$BASE_DIR/SHA256SUMS" "${lib_dir}/SHA256SUMS"
@@ -1746,7 +1749,7 @@ frp_server_main() {
   else
     rm -f "$unit_frontend" "$frontend_conf"
   fi
-  for tool in frp-create-client frp-clients frp-client-info frp-client-set frp-release-client frp-release-service frp-revoke-client frp-set-client-installer-url frp-server-status frp-update frpctl; do
+  for tool in frp-create-client frp-clients frp-client-info frp-client-set frp-release-client frp-release-service frp-revoke-client frp-set-client-installer-url frp-server-status frp-update frp-upstream frpctl; do
     install -m 0755 "$BASE_DIR/tools/$tool" "${sbin_dir}/$tool"
   done
 

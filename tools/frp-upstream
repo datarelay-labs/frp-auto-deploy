@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Informational upstream FRP version check. Never installs anything.
+set -euo pipefail
+
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${_SCRIPT_DIR}/../lib/frp-common.sh" ]]; then
+  # shellcheck source=../lib/frp-common.sh
+  . "${_SCRIPT_DIR}/../lib/frp-common.sh"
+elif [[ -f /usr/local/lib/frp-auto-deploy/frp-common.sh ]]; then
+  # shellcheck disable=SC1091
+  . /usr/local/lib/frp-auto-deploy/frp-common.sh
+else
+  echo "ERROR: missing lib/frp-common.sh" >&2
+  exit 1
+fi
+
+usage() {
+  cat <<'EOF'
+Usage: frp-upstream [--check]
+
+Compare the pinned/tested FRP version with the latest GitHub release.
+This command is informational only. It never downloads or installs FRP.
+EOF
+}
+
+CHECK_ONLY=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --check) CHECK_ONLY=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "ERROR: unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+installed="unknown"
+bin="$(frp_path /usr/local/bin/frps)"
+if [[ -x "$bin" ]]; then
+  installed="$("$bin" --version 2>/dev/null | awk '{print $NF; exit}' || true)"
+  installed="${installed:-unknown}"
+fi
+
+tested="${FRP_VERSION}"
+upstream="${FRP_UPSTREAM_VERSION_OVERRIDE:-}"
+if [[ -z "$upstream" ]]; then
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "ERROR: curl is required to query upstream" >&2
+    exit 1
+  fi
+  upstream="$(
+    curl -fsSL --connect-timeout 10 --max-time 30 \
+      https://api.github.com/repos/fatedier/frp/releases/latest \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin).get("tag_name","").lstrip("v"))' \
+      2>/dev/null || true
+  )"
+fi
+if [[ -z "$upstream" ]]; then
+  echo "ERROR: could not determine the latest upstream FRP release" >&2
+  exit 1
+fi
+
+echo "Installed FRP : ${installed}"
+echo "Tested FRP    : ${tested}"
+echo "Upstream      : ${upstream}"
+echo
+if [[ "$upstream" == "$tested" ]]; then
+  echo "The latest upstream FRP release matches the version tested by frp-auto-deploy."
+  echo "No update was performed."
+else
+  echo "A newer or different upstream FRP release exists."
+  echo "It has NOT been validated by frp-auto-deploy."
+  echo "No update was performed."
+fi
+echo
+echo "Install only a pinned, tested FRP version with: sudo frpctl frp-update"
+exit 0

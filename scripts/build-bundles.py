@@ -16,6 +16,7 @@ files=[
  'lib/frp_frontend.py',
  'lib/frp_install_txn.py',
  'lib/frp_client_registry.py',
+ 'lib/frp_audit.py',
  'lib/frp-doctor-common.sh',
  'lib/frp_doctor.py',
  'server/frp-port-allocator.py',
@@ -33,6 +34,7 @@ files=[
  'tools/frp-set-client-installer-url',
  'tools/frp-server-status',
  'tools/frp-update',
+ 'tools/frp-upstream',
  'tools/frpctl',
 ]
 

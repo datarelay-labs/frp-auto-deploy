@@ -9,10 +9,10 @@ export PYTHONDONTWRITEBYTECODE=1
 echo "=== shell syntax ==="
 git ls-files '*.sh' | xargs -r bash -n
 git ls-files -o --exclude-standard '*.sh' | xargs -r bash -n
-bash -n tools/frp-server-status tools/frp-update tools/frp-client tools/frpctl
+bash -n tools/frp-server-status tools/frp-update tools/frp-upstream tools/frp-client tools/frpctl
 
 echo "=== Python compile ==="
-python3 -m py_compile server/frp-port-allocator.py server/migrate_token.py scripts/build-bundles.py lib/frp_mgmt_auth.py lib/frp_pki.py lib/frp_frontend.py lib/frp_doctor.py lib/frp_install_txn.py lib/frp_client_registry.py
+python3 -m py_compile server/frp-port-allocator.py server/migrate_token.py scripts/build-bundles.py lib/frp_mgmt_auth.py lib/frp_pki.py lib/frp_frontend.py lib/frp_doctor.py lib/frp_install_txn.py lib/frp_client_registry.py lib/frp_audit.py
 python3 -m py_compile tools/frp-create-client tools/frp-clients tools/frp-client-info tools/frp-client-set tools/frp-release-client tools/frp-release-service tools/frp-revoke-client tools/frp-set-client-installer-url
 python3 -m py_compile tests/test-allocator.py tests/test-enrollment-security.py tests/test-mgmt-identity.py tests/test-pki-https.py tests/test-bootstrap-ticket.py tests/test-frontend-proxy.py tests/test-client-registry.py
 
@@ -53,6 +53,8 @@ python3 tests/test-frontend-proxy.py
 ./tests/test-probe-tcp-injection.sh
 ./tests/test-immutable-release-channel.sh
 ./tests/test-install-txn-rollback.sh
+python3 tests/test-audit-log.py
+./tests/test-frp-compatibility.sh
 
 echo "=== secret scan ==="
 ./scripts/secret-scan.sh

@@ -13,6 +13,7 @@ client-identity.key
 client-identity.pub
 client-identity.mac
 mgmt-nonces.json
+.frp-compat-stage/
 
 # Runtime-generated secrets, configs, and allocator state
 server_token
