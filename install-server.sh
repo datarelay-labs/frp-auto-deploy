@@ -34,6 +34,8 @@ for f in \
   "$BASE_DIR/tools/frp-set-client-installer-url" \
   "$BASE_DIR/tools/frp-server-status" \
   "$BASE_DIR/tools/frp-project-update" \
+  "$BASE_DIR/tools/frp-backup" \
+  "$BASE_DIR/tools/frp-restore" \
   "$BASE_DIR/tools/frp-update" \
   "$BASE_DIR/tools/frp-upstream" \
   "$BASE_DIR/tools/frpctl"; do
@@ -1755,7 +1757,7 @@ frp_server_main() {
   else
     rm -f "$unit_frontend" "$frontend_conf"
   fi
-  for tool in frp-create-client frp-clients frp-client-info frp-client-set frp-release-client frp-release-service frp-revoke-client frp-set-client-installer-url frp-server-status frp-project-update frp-update frp-upstream frpctl; do
+  for tool in frp-create-client frp-clients frp-client-info frp-client-set frp-release-client frp-release-service frp-revoke-client frp-set-client-installer-url frp-server-status frp-project-update frp-backup frp-restore frp-update frp-upstream frpctl; do
     install -m 0755 "$BASE_DIR/tools/$tool" "${sbin_dir}/$tool"
   done
 

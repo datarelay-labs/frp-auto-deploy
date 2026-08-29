@@ -1,0 +1,362 @@
+#!/usr/bin/env python3
+"""Validate and transactionally restore server disaster-recovery state."""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import shutil
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+FORMAT = "frp-auto-deploy-server-backup"
+SCHEMA_VERSION = 1
+REQUIRED = {
+    "etc/frp-auto-deploy/config.json",
+    "etc/frp-auto-deploy/version",
+    "etc/frp-auto-deploy/pki/ca.key",
+    "etc/frp-auto-deploy/pki/ca.crt",
+    "etc/frp-auto-deploy/pki/server.key",
+    "etc/frp-auto-deploy/pki/server.crt",
+    "etc/frp/frps.toml",
+    "etc/frp/server_token",
+    "var/lib/frp-auto-deploy/registry.json",
+}
+OPTIONAL_EXACT = {
+    "etc/frp-auto-deploy/frontend.conf",
+    "var/lib/frp-auto-deploy/mgmt-nonces.json",
+    "var/lib/frp-auto-deploy/nginx-ownership",
+}
+TREE_PREFIXES = (
+    "etc/frp-auto-deploy/pki/",
+    "var/lib/frp-auto-deploy/enrollments/",
+    "var/lib/frp-auto-deploy/bootstrap/",
+)
+TREE_ROOTS = tuple(prefix.rstrip("/") for prefix in TREE_PREFIXES)
+
+
+class RestoreError(RuntimeError):
+    pass
+
+
+def error(message: str) -> None:
+    print(f"ERROR: {message}", file=sys.stderr)
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def allowed_path(rel: str) -> bool:
+    return rel in REQUIRED or rel in OPTIONAL_EXACT or any(
+        rel.startswith(prefix) for prefix in TREE_PREFIXES
+    )
+
+
+def allowed_directory(rel: str) -> bool:
+    prefix = rel.rstrip("/") + "/"
+    candidates = REQUIRED | OPTIONAL_EXACT | set(TREE_ROOTS)
+    return any(candidate == rel or candidate.startswith(prefix) for candidate in candidates)
+
+
+def validate_rel(rel: str) -> None:
+    path = Path(rel)
+    if not rel or path.is_absolute() or ".." in path.parts or "\\" in rel:
+        raise RestoreError("archive contains an unsafe path")
+
+
+def extract_and_validate(archive_path: Path, destination: Path) -> dict:
+    try:
+        archive = tarfile.open(archive_path, "r:*")
+    except (OSError, tarfile.TarError) as exc:
+        raise RestoreError("backup is not a valid tar archive") from exc
+
+    seen_files: set[str] = set()
+    with archive:
+        for member in archive.getmembers():
+            name = member.name.rstrip("/")
+            validate_rel(name)
+            if member.issym() or member.islnk() or member.isdev() or member.isfifo():
+                raise RestoreError("archive contains a link or special file")
+            if name in {"manifest.json", "checksums.sha256", "payload"}:
+                pass
+            elif name.startswith("payload/"):
+                rel = name[len("payload/") :]
+                allowed = allowed_directory(rel) if member.isdir() else allowed_path(rel)
+                if rel and not allowed:
+                    raise RestoreError(f"archive contains unexpected file: {rel}")
+            else:
+                raise RestoreError(f"archive contains unexpected member: {name}")
+            target = destination / name
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                os.chmod(target, 0o700)
+                continue
+            if not member.isfile():
+                raise RestoreError("archive contains an unsupported member")
+            if name in seen_files:
+                raise RestoreError(f"archive contains duplicate file: {name}")
+            seen_files.add(name)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            source = archive.extractfile(member)
+            if source is None:
+                raise RestoreError(f"could not read archive member: {name}")
+            with target.open("wb") as handle:
+                shutil.copyfileobj(source, handle)
+            os.chmod(target, 0o600)
+
+    manifest_path = destination / "manifest.json"
+    checksums_path = destination / "checksums.sha256"
+    if not manifest_path.is_file() or not checksums_path.is_file():
+        raise RestoreError("backup manifest or checksum file is missing")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RestoreError("backup manifest is invalid") from exc
+    if manifest.get("format") != FORMAT or manifest.get("schema_version") != SCHEMA_VERSION:
+        raise RestoreError("unsupported backup format or schema version")
+    if not isinstance(manifest.get("created_at"), str):
+        raise RestoreError("backup creation time is missing")
+
+    declared: dict[str, dict] = {}
+    for item in manifest.get("files") or []:
+        if not isinstance(item, dict):
+            raise RestoreError("backup manifest file entry is invalid")
+        rel = str(item.get("path") or "")
+        validate_rel(rel)
+        if rel in declared or not allowed_path(rel):
+            raise RestoreError(f"backup manifest contains unexpected file: {rel}")
+        digest = str(item.get("sha256") or "").lower()
+        if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+            raise RestoreError(f"backup manifest checksum is invalid: {rel}")
+        declared[rel] = item
+    missing = REQUIRED - declared.keys()
+    if missing:
+        raise RestoreError(f"backup is missing required file: {sorted(missing)[0]}")
+
+    actual = {
+        path.relative_to(destination / "payload").as_posix()
+        for path in (destination / "payload").rglob("*")
+        if path.is_file()
+    }
+    if actual != set(declared):
+        difference = sorted(actual ^ set(declared))
+        raise RestoreError(f"backup payload/manifest mismatch: {difference[0]}")
+
+    checksum_lines = []
+    for rel in sorted(declared):
+        path = destination / "payload" / rel
+        actual_digest = sha256(path)
+        if actual_digest != declared[rel]["sha256"]:
+            raise RestoreError(f"checksum verification failed: {rel}")
+        checksum_lines.append(f"{actual_digest}  payload/{rel}")
+    supplied_lines = [
+        line.strip()
+        for line in checksums_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    if supplied_lines != checksum_lines:
+        raise RestoreError("checksum manifest does not match the backup manifest")
+
+    for rel in (
+        "etc/frp-auto-deploy/config.json",
+        "var/lib/frp-auto-deploy/registry.json",
+    ):
+        try:
+            value = json.loads((destination / "payload" / rel).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RestoreError(f"expected JSON file is invalid: {rel}") from exc
+        if not isinstance(value, dict):
+            raise RestoreError(f"expected JSON object: {rel}")
+    if not (destination / "payload/etc/frp/server_token").read_bytes().strip():
+        raise RestoreError("FRP token is empty")
+    return manifest
+
+
+def fixed_mode(rel: str) -> int:
+    if rel == "etc/frp-auto-deploy/version" or rel.endswith(".crt"):
+        return 0o644
+    return 0o600
+
+
+def atomic_file(source: Path, target: Path, rel: str) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(target.parent, 0o700)
+    if os.geteuid() == 0:
+        os.chown(target.parent, 0, 0)
+    if target.is_symlink():
+        raise RestoreError(f"refusing to restore through symlink: /{rel}")
+    fd, temp_name = tempfile.mkstemp(prefix=f".{target.name}.restore-", dir=target.parent)
+    os.close(fd)
+    temporary = Path(temp_name)
+    try:
+        shutil.copyfile(source, temporary)
+        os.chmod(temporary, fixed_mode(rel))
+        if os.geteuid() == 0:
+            os.chown(temporary, 0, 0)
+        os.replace(temporary, target)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def replace_tree(source: Path | None, target: Path, rel: str) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(target.parent, 0o700)
+    if target.is_symlink():
+        raise RestoreError(f"refusing to restore through symlink: /{rel}")
+    staged = Path(tempfile.mkdtemp(prefix=f".{target.name}.restore-", dir=target.parent))
+    old = target.with_name(f".{target.name}.restore-old-{os.getpid()}")
+    try:
+        if source is not None and source.is_dir():
+            shutil.rmtree(staged)
+            shutil.copytree(source, staged)
+            for directory in [staged, *[p for p in staged.rglob("*") if p.is_dir()]]:
+                os.chmod(directory, 0o700)
+                if os.geteuid() == 0:
+                    os.chown(directory, 0, 0)
+            for file_path in [p for p in staged.rglob("*") if p.is_file()]:
+                child = f"{rel}/{file_path.relative_to(staged).as_posix()}"
+                os.chmod(file_path, fixed_mode(child))
+                if os.geteuid() == 0:
+                    os.chown(file_path, 0, 0)
+        if old.exists():
+            shutil.rmtree(old)
+        if target.exists():
+            os.replace(target, old)
+        if source is not None and source.is_dir():
+            os.replace(staged, target)
+        if old.exists():
+            shutil.rmtree(old)
+    finally:
+        if staged.exists():
+            shutil.rmtree(staged)
+        if old.exists() and not target.exists():
+            os.replace(old, target)
+        elif old.exists():
+            shutil.rmtree(old)
+
+
+def apply_payload(root: Path, extracted: Path, allow_hook: bool = True) -> None:
+    payload = extracted / "payload"
+    count = 0
+    hook_after = int(os.environ.get("FRP_RESTORE_HOOK_FAIL_AFTER", "0") or "0")
+
+    for tree_rel in TREE_ROOTS:
+        replace_tree(
+            payload / tree_rel if (payload / tree_rel).is_dir() else None,
+            root / tree_rel,
+            tree_rel,
+        )
+        count += 1
+        if allow_hook and hook_after and count >= hook_after:
+            raise RestoreError("simulated restore failure")
+
+    tree_files = {
+        rel
+        for rel in REQUIRED | OPTIONAL_EXACT
+        if any(rel.startswith(prefix) for prefix in TREE_PREFIXES)
+    }
+    for rel in sorted((REQUIRED | OPTIONAL_EXACT) - tree_files):
+        source = payload / rel
+        target = root / rel
+        if source.is_file():
+            atomic_file(source, target, rel)
+        elif rel in OPTIONAL_EXACT and (target.is_file() or target.is_symlink()):
+            target.unlink()
+        count += 1
+        if allow_hook and hook_after and count >= hook_after:
+            raise RestoreError("simulated restore failure")
+
+
+def restart_services(root: Path, allow_hook: bool = True) -> None:
+    if os.environ.get("FRP_SKIP_SYSTEMD") or os.environ.get("FRP_DEPLOY_TEST_ROOT"):
+        return
+    if allow_hook and os.environ.get("FRP_RESTORE_HOOK_RESTART_FAIL") == "1":
+        raise RestoreError("simulated service restart failure")
+    units = ["frps.service", "frp-port-allocator.service"]
+    if (root / "etc/frp-auto-deploy/frontend.conf").is_file():
+        units.append("frp-frontend.service")
+    subprocess.run(["systemctl", "daemon-reload"], check=True)
+    subprocess.run(["systemctl", "restart", *units], check=True)
+
+
+def validate_to_temp(archive: Path, parent: Path | None = None) -> tuple[tempfile.TemporaryDirectory, Path]:
+    temp = tempfile.TemporaryDirectory(prefix="frp-restore-", dir=str(parent) if parent else None)
+    extracted = Path(temp.name)
+    extract_and_validate(archive, extracted)
+    return temp, extracted
+
+
+def make_snapshot(root: Path) -> Path:
+    backup_dir = root / "var/lib/frp-auto-deploy/backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(backup_dir, 0o700)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    snapshot = backup_dir / f"pre-restore-{stamp}-{os.getpid()}.tar.gz"
+    backup_tool = Path(__file__).resolve().with_name("frp-backup")
+    subprocess.run(
+        [sys.executable, str(backup_tool), str(snapshot)],
+        stdout=subprocess.DEVNULL,
+        check=True,
+    )
+    os.chmod(snapshot, 0o600)
+    return snapshot
+
+
+def main() -> int:
+    if len(sys.argv) != 2 or sys.argv[1] in {"-h", "--help"}:
+        print("Usage: frp-restore BACKUP.tar.gz")
+        return 0 if len(sys.argv) == 2 else 2
+    test_root = os.environ.get("FRP_DEPLOY_TEST_ROOT", "")
+    if os.geteuid() != 0 and not test_root:
+        error("run with sudo")
+        return 1
+    archive = Path(sys.argv[1]).resolve()
+    if not archive.is_file() or archive.is_symlink():
+        error("backup archive is missing or is a symlink")
+        return 1
+    root = Path(test_root or "/")
+
+    candidate_temp = None
+    rollback_temp = None
+    try:
+        candidate_temp, candidate = validate_to_temp(archive)
+        snapshot = make_snapshot(root)
+        rollback_temp, rollback = validate_to_temp(snapshot)
+        try:
+            apply_payload(root, candidate)
+            restart_services(root)
+        except Exception as restore_exc:
+            try:
+                apply_payload(root, rollback, allow_hook=False)
+                restart_services(root, allow_hook=False)
+            except Exception as rollback_exc:
+                raise RestoreError(
+                    f"restore failed and rollback also failed: {rollback_exc}"
+                ) from restore_exc
+            raise RestoreError(f"restore failed; previous state was restored: {restore_exc}")
+        print("WARNING: the restored backup contained private keys, authentication tokens, and enrollment secrets.")
+        print(f"Restore completed. Pre-restore snapshot: {snapshot}")
+        return 0
+    except (RestoreError, OSError, subprocess.SubprocessError, ValueError) as exc:
+        error(str(exc))
+        return 1
+    finally:
+        if rollback_temp is not None:
+            rollback_temp.cleanup()
+        if candidate_temp is not None:
+            candidate_temp.cleanup()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
