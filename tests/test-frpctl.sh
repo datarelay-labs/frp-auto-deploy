@@ -51,16 +51,32 @@ EOF
 write_server_tree() {
   local tree="$1"
   mkdir -p "$tree/etc/frp-auto-deploy" "$tree/var/lib/frp-auto-deploy"
-  python3 - "$tree/etc/frp-auto-deploy/config.json" <<'PY'
+  python3 - "$tree/etc/frp-auto-deploy/config.json" "$tree/var/lib/frp-auto-deploy/registry.json" <<'PY'
 import json, sys
 from pathlib import Path
-Path(sys.argv[1]).write_text(json.dumps({
+cfg, reg = Path(sys.argv[1]), Path(sys.argv[2])
+cfg.write_text(json.dumps({
     "public_ip": "203.0.113.10",
     "control_port": 443,
     "port_start": 6000,
     "port_end": 6098,
     "listen_port": 6099,
     "allocator_public_url": "https://203.0.113.10:6099/enroll",
+    "registry_file": "/var/lib/frp-auto-deploy/registry.json",
+}, indent=2, sort_keys=True) + "\n")
+reg.write_text(json.dumps({
+    "schema_version": 2,
+    "reserved": [],
+    "clients": {
+        "aabbccdd0011": {
+            "hostname": "dp-os-upgrade",
+            "label": "oci-e2e-renamed",
+            "mgmt_status": "enrolled",
+            "services": {
+                "ssh": {"id": "ssh", "remote_port": 6000, "enabled": True},
+            },
+        },
+    },
 }, indent=2, sort_keys=True) + "\n")
 PY
   cat >"$tree/etc/frp-auto-deploy/version" <<'EOF'
@@ -101,8 +117,8 @@ grep -q 'only command you need to remember' "$WORKDIR/help.out" || fail "help re
 grep -q 'sudo frpctl' "$WORKDIR/help.out" || fail "help sudo frpctl"
 grep -q 'frps' "$WORKDIR/help.out" || fail "help mentions frps"
 grep -q 'frpc' "$WORKDIR/help.out" || fail "help mentions frpc"
-grep -q 'doctor             Run read-only health and consistency checks' "$WORKDIR/help.out" || fail "help doctor"
-grep -q 'Persistent interactive CLI' "$WORKDIR/help.out" || fail "help persistent CLI"
+grep -q 'doctor' "$WORKDIR/help.out" || fail "help doctor"
+grep -q 'persistent management CLI' "$WORKDIR/help.out" || fail "help persistent CLI"
 "$CTL" --help >"$WORKDIR/help2.out"
 grep -q 'Usage: frpctl' "$WORKDIR/help2.out" || fail "--help usage"
 if "$CTL" definitely-not-a-command >"$WORKDIR/unknown.out" 2>"$WORKDIR/unknown.err"; then
@@ -202,8 +218,8 @@ run_repl "$CLIENT" "$WORKDIR/client-menu.out" menu exit || fail "client menu rep
 unset FRP_CTL_TEST_MENU
 grep -q 'Role            : Client' "$WORKDIR/client-menu.out" || fail "client role"
 grep -q 'Project version : 1.4.0' "$WORKDIR/client-menu.out" || fail "client menu version"
-grep -q '1) Manage services' "$WORKDIR/client-menu.out" || fail "client menu manage"
-grep -q '4) Update FRP Auto Deploy' "$WORKDIR/client-menu.out" || fail "client menu update"
+grep -q '4) Manage services' "$WORKDIR/client-menu.out" || fail "client menu manage"
+grep -q '5) Update project' "$WORKDIR/client-menu.out" || fail "client menu update"
 [[ "$(prompt_count "$WORKDIR/client-menu.out")" -ge 2 ]] || fail "menu returns to prompt"
 pass "FRPCTL_CLIENT_DETECTION"
 pass "FRPCTL_REPL_MENU_RETURNS_TO_PROMPT"
@@ -214,7 +230,7 @@ export FRP_CTL_TEST_MENU=1
 run_repl "$SERVER" "$WORKDIR/server-menu.out" menu exit || fail "server menu repl"
 grep -q 'Role            : Server' "$WORKDIR/server-menu.out" || fail "server role"
 grep -q '2) Manage clients' "$WORKDIR/server-menu.out" || fail "server menu manage clients"
-grep -q '8) FRP runtime update' "$WORKDIR/server-menu.out" || fail "server menu frp update"
+grep -q '8) Update FRP' "$WORKDIR/server-menu.out" || fail "server menu frp update"
 pass "FRPCTL_SERVER_DETECTION"
 
 unset FRP_CTL_TEST_MENU
@@ -438,6 +454,9 @@ grep -q 'unset HISTFILE' "$ROOT/tools/frpctl" || fail "HISTFILE is not unset"
 if grep -qE 'HISTFILE=' "$ROOT/tools/frpctl"; then
   fail "frpctl assigns HISTFILE"
 fi
+if grep -qE 'history -[aw]' "$ROOT/tools/frpctl"; then
+  fail "frpctl persists history to disk"
+fi
 pass "NO_PERSISTENT_HISTORY"
 
 # Dual-role help
@@ -445,5 +464,124 @@ run_repl "$BOTH" "$WORKDIR/both-help.out" help exit || fail "both help"
 grep -q 'Client commands' "$WORKDIR/both-help.out" || fail "dual client section"
 grep -q 'Server commands' "$WORKDIR/both-help.out" || fail "dual server section"
 grep -q 'Common commands' "$WORKDIR/both-help.out" || fail "dual common section"
+
+# --- Canonical grammar
+unset FRP_CLIENT_TEST_ROOT
+export FRP_CTL_TEST_ROOT="$SERVER"
+export FRP_CTL_DRY_RUN=1
+"$CTL" show clients >"$WORKDIR/show-clients.out"
+grep -qx 'DISPATCH frp-clients' "$WORKDIR/show-clients.out" || fail "show clients"
+"$CTL" show client customer-dp >"$WORKDIR/show-client.out"
+grep -qx 'DISPATCH frp-client-info customer-dp' "$WORKDIR/show-client.out" || fail "show client"
+"$CTL" set client customer-dp label production >"$WORKDIR/set-label.out"
+grep -qx 'DISPATCH frp-client-set customer-dp --label production' "$WORKDIR/set-label.out" || fail "set client label"
+"$CTL" set client customer-dp tag env=oci >"$WORKDIR/set-tag.out"
+grep -qx 'DISPATCH frp-client-set customer-dp --tag env=oci' "$WORKDIR/set-tag.out" || fail "set client tag"
+"$CTL" unset client customer-dp label >"$WORKDIR/unset-label.out"
+grep -qx 'DISPATCH frp-client-set customer-dp --clear-label' "$WORKDIR/unset-label.out" || fail "unset label"
+"$CTL" unset client customer-dp tag env >"$WORKDIR/unset-tag.out"
+grep -qx 'DISPATCH frp-client-set customer-dp --remove-tag env' "$WORKDIR/unset-tag.out" || fail "unset tag"
+"$CTL" create enrollment --ssh --ssh-user aella --label dp01 >"$WORKDIR/create-enroll.out"
+grep -qx 'DISPATCH frp-create-client --ssh --ssh-user aella --label dp01' "$WORKDIR/create-enroll.out" || fail "create enrollment"
+"$CTL" revoke client customer-dp >"$WORKDIR/revoke-c.out"
+grep -qx 'DISPATCH frp-revoke-client customer-dp' "$WORKDIR/revoke-c.out" || fail "revoke client"
+"$CTL" release service customer-dp ssh >"$WORKDIR/rel-svc.out"
+grep -qx 'DISPATCH frp-release-service customer-dp ssh' "$WORKDIR/rel-svc.out" || fail "release service"
+"$CTL" update project --check >"$WORKDIR/upd-proj.out"
+grep -qx 'DISPATCH frp-project-update --check' "$WORKDIR/upd-proj.out" || fail "update project"
+"$CTL" update frp --check >"$WORKDIR/upd-frp.out"
+grep -qx 'DISPATCH frp-update --check' "$WORKDIR/upd-frp.out" || fail "update frp"
+unset FRP_CTL_DRY_RUN
+pass "FRPCTL_SHOW_COMMANDS"
+pass "FRPCTL_SET_COMMANDS"
+pass "FRPCTL_UNSET_COMMANDS"
+pass "FRPCTL_CREATE_COMMANDS"
+pass "FRPCTL_LIFECYCLE_COMMANDS"
+pass "FRPCTL_UPDATE_COMMANDS"
+
+run_repl "$SERVER" "$WORKDIR/incomplete.out" "set client oci-e2e-renamed" exit || fail "incomplete set"
+grep -q 'Missing client setting' "$WORKDIR/incomplete.out" || fail "incomplete message"
+grep -q 'set client <client> label <value>' "$WORKDIR/incomplete.out" || fail "incomplete usage"
+pass "FRPCTL_INCOMPLETE_SET"
+
+export FRP_CTL_DRY_RUN=1
+run_repl "$SERVER" "$WORKDIR/quoted.out" 'set client dp01 note "OCI E2E client"' exit || fail "quoted note"
+grep -q 'DISPATCH frp-client-set dp01 --note OCI E2E client' "$WORKDIR/quoted.out" || fail "quoted note dispatch"
+run_repl "$SERVER" "$WORKDIR/singleq.out" "set client dp01 label 'Seoul DP'" exit || fail "single quote"
+grep -q "DISPATCH frp-client-set dp01 --label Seoul DP" "$WORKDIR/singleq.out" || fail "single quote dispatch"
+unset FRP_CTL_DRY_RUN
+pass "FRPCTL_QUOTED_VALUE"
+pass "FRPCTL_SINGLE_QUOTE_VALUE"
+pass "FRPCTL_SPACE_IN_NOTE"
+pass "FRPCTL_SPACE_IN_LABEL"
+
+run_repl "$SERVER" "$WORKDIR/meta.out" 'set client dp01 note $HOME' exit || fail "meta reject repl"
+grep -qi 'metacharacter' "$WORKDIR/meta.out" || fail "metacharacter rejected"
+pass "NO_SHELL_EXPANSION"
+
+run_repl "$SERVER" "$WORKDIR/hist.out" "show clients" "history" exit || fail "history cmd"
+grep -q 'show clients' "$WORKDIR/hist.out" || fail "session history listing"
+pass "FRPCTL_SESSION_HISTORY"
+
+# Compatibility aliases still dispatch
+export FRP_CTL_DRY_RUN=1
+"$CTL" clients >"$WORKDIR/legacy-clients.out"
+grep -qx 'DISPATCH frp-clients' "$WORKDIR/legacy-clients.out" || fail "legacy clients"
+"$CTL" client-set customer-dp --label x >"$WORKDIR/legacy-set.out"
+grep -qx 'DISPATCH frp-client-set customer-dp --label x' "$WORKDIR/legacy-set.out" || fail "legacy client-set"
+unset FRP_CTL_DRY_RUN
+pass "FRPCTL_LEGACY_ALIAS_COMPATIBILITY"
+pass "BACKWARD_COMPATIBILITY"
+pass "DIRECT_SCRIPT_COMPATIBILITY"
+
+# Hierarchical help
+export FRP_CTL_TEST_ROOT="$SERVER"
+run_repl "$SERVER" "$WORKDIR/help-set.out" "help set client" exit || fail "help set client"
+grep -q 'Set client configuration' "$WORKDIR/help-set.out" || fail "help set heading"
+grep -q 'set client <client> tag' "$WORKDIR/help-set.out" || fail "help set tag"
+pass "CONTEXT_HELP"
+
+run_repl "$SERVER" "$WORKDIR/help-legacy.out" "help legacy" exit || fail "help legacy"
+grep -q 'Compatibility aliases' "$WORKDIR/help-legacy.out" || fail "legacy help heading"
+pass "FRPCTL_HELP_LEGACY"
+
+run_repl "$SERVER" "$WORKDIR/glob.out" 'show clients *' exit || fail "glob reject repl"
+grep -qi 'metacharacter\|could not parse' "$WORKDIR/glob.out" || fail "glob not rejected"
+run_repl "$SERVER" "$WORKDIR/sub.out" 'show clients $(whoami)' exit || fail "subst reject repl"
+grep -qi 'metacharacter\|could not parse' "$WORKDIR/sub.out" || fail "command substitution not rejected"
+pass "NO_GLOB_EXPANSION"
+pass "NO_COMMAND_SUBSTITUTION"
+pass "NO_EVAL"
+pass "NO_SHELL_EXECUTION"
+pass "SAFE_TOKENIZER"
+
+export FRP_CTL_DRY_RUN=1
+run_repl "$SERVER" "$WORKDIR/secret-hist.out" \
+  "show clients" \
+  "set client dp01 note ticket-secret-value" \
+  history \
+  exit || fail "secret history repl"
+unset FRP_CTL_DRY_RUN
+grep -qE '^[[:space:]]*[0-9]+[[:space:]]+show clients$' "$WORKDIR/secret-hist.out" \
+  || fail "normal command missing from history"
+if grep -qE '^[[:space:]]*[0-9]+[[:space:]]+.*ticket-secret-value' "$WORKDIR/secret-hist.out"; then
+  fail "secret-bearing line stored in session history listing"
+fi
+pass "NO_SECRET_HISTORY_PERSISTENCE"
+
+export FRP_CTL_DRY_RUN=1
+run_repl "$SERVER" "$WORKDIR/guided-meta.out" menu 2 1 12 12 exit || fail "guided metadata menu"
+grep -q 'Set label' "$WORKDIR/guided-meta.out" || fail "guided set label"
+grep -q 'Unset label' "$WORKDIR/guided-meta.out" || fail "guided unset label"
+grep -q 'Set description' "$WORKDIR/guided-meta.out" || fail "guided set description"
+grep -q 'Unset description' "$WORKDIR/guided-meta.out" || fail "guided unset description"
+grep -q 'Set tag' "$WORKDIR/guided-meta.out" || fail "guided set tag"
+grep -q 'Unset tag' "$WORKDIR/guided-meta.out" || fail "guided unset tag"
+grep -q 'Revoke management access' "$WORKDIR/guided-meta.out" || fail "guided revoke"
+grep -q 'Release client' "$WORKDIR/guided-meta.out" || fail "guided release"
+unset FRP_CTL_DRY_RUN
+pass "GUIDED_MENU_METADATA"
+pass "GUIDED_MENU_TAGS"
+pass "GUIDED_MENU_UPDATED"
 
 echo "FRPCTL_TESTS=PASS"

@@ -5,6 +5,8 @@
 set -euo pipefail
 
 _FRPCTL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_FRP_CTL_SESSION_HIST=()
+_FRP_CTL_RC=0
 if [[ -f "${_FRPCTL_DIR}/../lib/frp-doctor-common.sh" ]]; then
   # shellcheck source=../lib/frp-doctor-common.sh
   . "${_FRPCTL_DIR}/../lib/frp-doctor-common.sh"
@@ -196,6 +198,107 @@ frpctl_invoke() {
   fi
 }
 
+frpctl_grammar_py() {
+  local here
+  if [[ -n "${_FRPCTL_DIR:-}" && -f "${_FRPCTL_DIR}/../lib/frp_ctl_grammar.py" ]]; then
+    printf '%s' "${_FRPCTL_DIR}/../lib/frp_ctl_grammar.py"
+    return 0
+  fi
+  if [[ -f /usr/local/lib/frp-auto-deploy/frp_ctl_grammar.py ]]; then
+    printf '%s' /usr/local/lib/frp-auto-deploy/frp_ctl_grammar.py
+    return 0
+  fi
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  if [[ -f "${here}/../lib/frp_ctl_grammar.py" ]]; then
+    printf '%s' "${here}/../lib/frp_ctl_grammar.py"
+    return 0
+  fi
+  echo "ERROR: missing frp_ctl_grammar.py" >&2
+  return 1
+}
+
+frpctl_role_token() {
+  local client=0 server=0
+  frpctl_is_client && client=1
+  frpctl_is_server && server=1
+  if [[ "$client" == "1" && "$server" == "1" ]]; then
+    printf '%s' "both"
+  elif [[ "$client" == "1" ]]; then
+    printf '%s' "client"
+  elif [[ "$server" == "1" ]]; then
+    printf '%s' "server"
+  else
+    printf '%s' "unknown"
+  fi
+}
+
+frpctl_grammar_payload() {
+  python3 - "$(frpctl_role_token)" "$(frpctl_path /etc/frp-auto-deploy/config.json)" \
+    "${FRP_CTL_TEST_ROOT:-${FRP_DEPLOY_TEST_ROOT:-}}" "$(frpctl_path /etc/frp/client-state.json)" <<'PY'
+import json, sys
+from pathlib import Path
+role, cfg_path, root, state_path = sys.argv[1:5]
+names, services, local_services = [], {}, []
+cfg = Path(cfg_path)
+if cfg.is_file():
+    try:
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        reg = Path(str((data or {}).get("registry_file") or ""))
+        if root and str(reg) and not str(reg).startswith(root):
+            reg = Path(root + str(reg))
+        if reg.is_file():
+            state = json.loads(reg.read_text(encoding="utf-8"))
+            for client in (state.get("clients") or {}).values():
+                if not isinstance(client, dict):
+                    continue
+                label = str(client.get("label") or "").strip()
+                host = str(client.get("hostname") or "").strip()
+                name = label or host
+                if name and "\n" not in name and "\r" not in name:
+                    names.append(name)
+                    sids = []
+                    for sid in (client.get("services") or {}):
+                        sid = str(sid)
+                        if sid and "\n" not in sid and "\r" not in sid:
+                            sids.append(sid)
+                    services[name] = sorted(sids)
+                    if host and host != name:
+                        services[host] = list(services[name])
+    except Exception:
+        pass
+st = Path(state_path)
+if st.is_file():
+    try:
+        data = json.loads(st.read_text(encoding="utf-8"))
+        local_services = sorted(str(s) for s in (data.get("services") or {}) if s)
+    except Exception:
+        pass
+json.dump({
+    "role": role,
+    "names": sorted(set(names)),
+    "services": services,
+    "local_services": local_services,
+}, sys.stdout)
+PY
+}
+
+frpctl_grammar_call() {
+  local action="$1"
+  shift
+  local py extra="{}"
+  py="$(frpctl_grammar_py)" || return 1
+  if [[ $# -gt 0 ]]; then
+    extra="$1"
+  fi
+  python3 - "$(frpctl_grammar_payload)" "$extra" <<'PY' | python3 "$py" "$action"
+import json, sys
+base = json.loads(sys.argv[1])
+extra = json.loads(sys.argv[2])
+base.update(extra)
+json.dump(base, sys.stdout)
+PY
+}
+
 frpctl_usage() {
   cat <<'EOF'
 Usage: frpctl [command] [args]
@@ -206,46 +309,25 @@ this is the only command you need to remember:
     sudo frpctl
 
 With no arguments and a TTY, that starts the persistent management CLI.
-Type 'help' or '?' inside the CLI for role-specific commands. Press Tab
-to complete commands (and, on a server, client names and service IDs).
-Type 'menu' for the guided numbered menu.
+Type 'help' or '?' inside the CLI. Press Tab to complete verbs, resources,
+and names. Type 'menu' for the guided numbered menu.
 
-Direct commands remain available for scripts, automation, and advanced use.
+Canonical grammar:
+  <verb> <resource> [target] [property] [value]
 
-Common commands:
-  (no args)          Persistent interactive CLI (requires a TTY)
-  menu               Open the guided numbered menu
-  status             Show a quick operational summary for this host's role
-  doctor             Run read-only health and consistency checks
-  version            Show installed versions (no network)
-  update             Server: pinned FRP binary. Client: project tools.
-  help               Show this help
+  show status | show version | show clients | show client NAME
+  set client NAME label|note|tag VALUE
+  unset client NAME label|note|tag [KEY]
+  create enrollment | create backup
+  revoke client NAME | release client NAME | release service NAME ID
+  update project [--check] | update frp [--check]
+  doctor | help | menu | history | exit
 
-Client commands:
-  manage             Open client service management (frp-client)
-  services           List configured services
-  info               Show connection information
-
-Server commands:
-  clients            List registered clients
-  client NAME        Show one client's connection information
-  enroll             Create a short-lived Enrollment Code
-  create-client      Same as enroll
-  client-info NAME   Same as client
-  client-set NAME    Set administrator label/description
-  edit-client NAME   Same as client-set
-  revoke NAME        Revoke a client's management identity
-  revoke-client NAME Same as revoke
-  release-service NAME ID
-                     Release one service reservation
-  release-client NAME
-                     Release every reservation for a client
+status and version remain shortcuts. Older flat commands (clients,
+client-set, enroll, ...) still work for scripts. See 'help legacy'.
 
 Official upstream FRP binaries are frps (server) and frpc (client).
-Commands such as frpctl, frp-client, frp-clients, and frp-update belong
-to this frp-auto-deploy operational layer. This project does not fork FRP.
-
-Existing commands remain available for scripts and advanced use.
+This project does not fork FRP.
 EOF
 }
 
@@ -272,26 +354,27 @@ frpctl_print_version() {
 }
 
 frpctl_print_client_menu() {
-  echo "1) Manage services"
-  echo "2) Status"
-  echo "3) Connection information"
-  echo "4) Update FRP Auto Deploy"
-  echo "5) System diagnostics"
-  echo "6) Help"
-  echo "7) Exit"
+  echo "1) Show status"
+  echo "2) Show services"
+  echo "3) Show connection information"
+  echo "4) Manage services"
+  echo "5) Update project"
+  echo "6) Doctor"
+  echo "7) Help"
+  echo "8) Exit"
 }
 
 frpctl_print_server_menu() {
-  echo "1) Status"
+  echo "1) Show status"
   echo "2) Manage clients"
-  echo "3) Create client enrollment"
-  echo "4) Bulk enrollment"
-  echo "5) Pending enrollments"
-  echo "6) Backup / Restore"
-  echo "7) Project update"
-  echo "8) FRP runtime update"
-  echo "9) System diagnostics"
-  echo "10) Audit log"
+  echo "3) Create enrollment"
+  echo "4) Create enrollments"
+  echo "5) Show enrollments"
+  echo "6) Create backup / Restore backup"
+  echo "7) Update project"
+  echo "8) Update FRP"
+  echo "9) Doctor"
+  echo "10) Show audit"
   echo "11) Help"
   echo "12) Exit"
 }
@@ -375,17 +458,18 @@ frpctl_client_menu() {
     fi
     choice="$(frpctl_read "Select: " "")" || return 1
     case "$choice" in
-      1) frpctl_run frp-client ;;
-      2) frpctl_run frp-client status ;;
+      1) frpctl_run frp-client status ;;
+      2) frpctl_run frp-client list ;;
       3) frpctl_run frp-client info ;;
-      4) frpctl_client_update ;;
-      5) frpctl_dispatch doctor || true ;;
-      6) frpctl_usage ;;
-      7)
+      4) frpctl_run frp-client ;;
+      5) frpctl_client_update ;;
+      6) frpctl_dispatch doctor || true ;;
+      7) frpctl_repl_help ;;
+      8)
         echo "Exit."
         return 0
         ;;
-      *) echo "ERROR: select 1-7" >&2 ;;
+      *) echo "ERROR: select 1-8" >&2 ;;
     esac
   done
 }
@@ -421,18 +505,22 @@ frpctl_guided_enroll() {
 frpctl_print_manage_client_actions() {
   echo "Actions"
   echo
-  echo "1. Change label"
-  echo "2. Edit description"
-  echo "3. Show connection information"
-  echo "4. View services"
-  echo "5. Revoke management access"
-  echo "6. Release service"
-  echo "7. Release client"
-  echo "8. Back"
+  echo "1. Show client information"
+  echo "2. Set label"
+  echo "3. Unset label"
+  echo "4. Set description"
+  echo "5. Unset description"
+  echo "6. Set tag"
+  echo "7. Unset tag"
+  echo "8. Show services"
+  echo "9. Revoke management access"
+  echo "10. Release service"
+  echo "11. Release client"
+  echo "12. Back"
 }
 
 frpctl_manage_one_client() {
-  local mid="$1" action sid label note
+  local mid="$1" action sid label note tag
   while true; do
     echo
     echo "FRP Auto Deploy — Client Management"
@@ -445,6 +533,9 @@ frpctl_manage_one_client() {
     action="$(frpctl_read "Select: " "")" || return 1
     case "$action" in
       1)
+        frpctl_run frp-client-info "$mid" || true
+        ;;
+      2)
         label="$(frpctl_read "New label: " "")"
         if [[ -z "$label" ]]; then
           echo "ERROR: label is required" >&2
@@ -452,20 +543,39 @@ frpctl_manage_one_client() {
         fi
         frpctl_run frp-client-set "$mid" --label "$label" || true
         ;;
-      2)
+      3)
+        frpctl_run frp-client-set "$mid" --clear-label || true
+        ;;
+      4)
         note="$(frpctl_read "New description: " "")"
         frpctl_run frp-client-set "$mid" --note "$note" || true
         ;;
-      3)
-        frpctl_run frp-client-info "$mid" || true
-        ;;
-      4)
-        frpctl_run frp-clients || true
-        ;;
       5)
-        frpctl_run frp-revoke-client "$mid" || true
+        frpctl_run frp-client-set "$mid" --clear-note || true
         ;;
       6)
+        tag="$(frpctl_read "Tag KEY=VALUE: " "")"
+        if [[ -z "$tag" ]]; then
+          echo "ERROR: tag is required" >&2
+          continue
+        fi
+        frpctl_run frp-client-set "$mid" --tag "$tag" || true
+        ;;
+      7)
+        tag="$(frpctl_read "Tag key to remove: " "")"
+        if [[ -z "$tag" ]]; then
+          echo "ERROR: tag key is required" >&2
+          continue
+        fi
+        frpctl_run frp-client-set "$mid" --remove-tag "$tag" || true
+        ;;
+      8)
+        frpctl_run frp-client-info "$mid" || true
+        ;;
+      9)
+        frpctl_run frp-revoke-client "$mid" || true
+        ;;
+      10)
         sid="$(frpctl_read "Service ID: " "")"
         if [[ -z "$sid" ]]; then
           echo "ERROR: service ID is required" >&2
@@ -473,15 +583,15 @@ frpctl_manage_one_client() {
         fi
         frpctl_run frp-release-service "$mid" "$sid" || true
         ;;
-      7)
+      11)
         frpctl_run frp-release-client "$mid" || true
         return 0
         ;;
-      8|"")
+      12|"")
         return 0
         ;;
       *)
-        echo "ERROR: select 1-8" >&2
+        echo "ERROR: select 1-12" >&2
         ;;
     esac
   done
@@ -756,58 +866,11 @@ frpctl_help_navigation() {
 Navigation
   menu                  Open guided menu
   help, ?               Show this help
-  Tab                   Complete commands and names
+  help <verb>           Command-specific help
+  Tab                   Complete the next command word
+  history               This session only
   clear                 Clear the screen
   exit, quit            Exit frpctl
-EOF
-}
-
-frpctl_help_client_body() {
-  cat <<'EOF'
-Service management
-  services              List configured services
-  manage                Add/edit/enable/disable services
-  info                  Show connection information
-
-System
-  status                Show client status
-  doctor                Run read-only health and consistency checks
-  update                Update frp-auto-deploy
-  version               Show installed versions
-EOF
-}
-
-frpctl_help_server_body() {
-  cat <<'EOF'
-Clients
-  clients               List registered clients
-  client <name>         Show client information
-  client-set <name>     Set administrator label/description/tags
-  enroll                Create a short-lived Enrollment Code
-  enroll-bulk           Create independent enrollment tickets
-  enrollments           List pending enrollment tickets
-  enrollment-revoke     Revoke an unused or bound ticket
-
-Security
-  revoke <name>         Revoke client management access
-
-Reservations
-  release-service <client> <service-id>
-                        Release one service reservation
-  release-client <client>
-                        Release all reservations for a client
-
-System
-  status                Show server status
-  doctor                Run read-only health and consistency checks
-  backup                Back up server control state (contains secrets)
-  restore <file>        Restore a validated backup archive
-  project-update        Update frp-auto-deploy server management software
-  frp-update            Update the tested/pinned FRP binary
-  update                Alias for frp-update on a server-only host
-  upstream              Show pinned vs latest upstream FRP (no install)
-  audit                 Show recent audit events
-  version               Show installed versions
 EOF
 }
 
@@ -816,6 +879,11 @@ frpctl_repl_help() {
   frpctl_is_client && client=1
   frpctl_is_server && server=1
   echo
+  if [[ $# -gt 0 ]]; then
+    frpctl_grammar_call help "$(python3 -c 'import json,sys; print(json.dumps({"tokens":sys.argv[1:]}))' "$@")"
+    echo
+    return 0
+  fi
   if [[ "$client" == "1" && "$server" == "1" ]]; then
     echo "FRP Auto Deploy — Commands"
     echo "=========================="
@@ -824,53 +892,25 @@ frpctl_repl_help() {
     echo
     echo "Client commands"
     echo "---------------"
-    echo "  services              List configured services"
-    echo "  manage                Add/edit/enable/disable services"
-    echo "  info                  Show connection information"
-    echo
     echo "Server commands"
     echo "---------------"
-    echo "  clients               List registered clients"
-    echo "  client <name>         Show client information"
-    echo "  client-set <name>     Set administrator label/description"
-    echo "  enroll                Create a short-lived Enrollment Code"
-    echo "  revoke <name>         Revoke client management access"
-    echo "  release-service <client> <service-id>"
-    echo "                        Release one service reservation"
-    echo "  release-client <client>"
-    echo "                        Release all reservations for a client"
-    echo
     echo "Common commands"
     echo "---------------"
-    echo "  status                Show client and server status"
-    echo "  doctor                Run read-only health and consistency checks"
-    echo "  client-status         Show client status only"
-    echo "  server-status         Show server status only"
-    echo "  update                Update client tools, then the tested FRP server binary"
-    echo "  client-update         Update client management tools"
-    echo "  server-update         Update the tested FRP binary on this server"
-    echo "  version               Show installed versions"
     echo
-    echo "Press Tab to complete commands, client names, and service IDs."
-    echo
-    frpctl_help_navigation
   elif [[ "$client" == "1" ]]; then
     echo "FRP Auto Deploy — Client Commands"
     echo "================================="
     echo
-    frpctl_help_client_body
-    echo
-    frpctl_help_navigation
   elif [[ "$server" == "1" ]]; then
     echo "FRP Auto Deploy — Server Commands"
     echo "================================="
     echo
-    frpctl_help_server_body
-    echo
-    frpctl_help_navigation
-  else
-    frpctl_usage
   fi
+  frpctl_grammar_call help '{"tokens":[]}'
+  echo
+  echo "Press Tab to complete commands, client names, and service IDs."
+  echo
+  frpctl_help_navigation
   echo
 }
 
@@ -902,28 +942,22 @@ frpctl_known_commands() {
   local client=0 server=0
   frpctl_is_client && client=1
   frpctl_is_server && server=1
-  printf '%s\n' help menu status doctor version update clear exit quit q
+  printf '%s\n' help menu status doctor version update clear exit quit q history show
   if [[ "$client" == "1" ]]; then
-    printf '%s\n' services manage info client-status client-update
+    printf '%s\n' services manage info client-status client-update \
+      add enable disable apply discard set
   fi
   if [[ "$server" == "1" ]]; then
     printf '%s\n' clients client client-info client-set edit-client enroll create-client \
       enroll-bulk enrollments enrollment-revoke \
       revoke revoke-client release-service release-client \
       backup restore project-update frp-update upstream audit \
-      server-status server-update
+      server-status server-update set unset create release
   fi
 }
 
 frpctl_completable_commands() {
-  local cmd
-  while IFS= read -r cmd; do
-    [[ -n "$cmd" ]] || continue
-    case "$cmd" in
-      q|'?') continue ;;
-    esac
-    printf '%s\n' "$cmd"
-  done < <(frpctl_known_commands)
+  frpctl_completion_candidates ""
 }
 
 # Read-only hostname list from the local registry. Never prints secret fields.
@@ -1026,139 +1060,11 @@ for sid in sorted(services):
 PY
 }
 
-frpctl_complete_arg_stage() {
-  local cmd="$1" argn="$2"
-  case "$cmd" in
-    doctor)
-      if [[ "$argn" == "1" ]]; then
-        printf '%s' "doctor-flag"
-      else
-        printf '%s' "none"
-      fi
-      ;;
-    enroll|create-client)
-      printf '%s' "create-client-flag"
-      ;;
-    client|client-info|revoke|revoke-client|release-client)
-      if [[ "$argn" == "1" ]]; then
-        printf '%s' "client"
-      else
-        printf '%s' "none"
-      fi
-      ;;
-    client-set|edit-client)
-      if [[ "$argn" == "1" ]]; then
-        printf '%s' "client"
-      else
-        printf '%s' "client-set-flag"
-      fi
-      ;;
-    release-service)
-      if [[ "$argn" == "1" ]]; then
-        printf '%s' "client"
-      elif [[ "$argn" == "2" ]]; then
-        printf '%s' "service"
-      else
-        printf '%s' "none"
-      fi
-      ;;
-    *)
-      printf '%s' "none"
-      ;;
-  esac
-}
-
-frpctl_complete_context() {
-  local line="$1"
-  local trailing=0 lastc
-  local -a words=()
-  _FRP_CTL_COMP_CMD=""
-  _FRP_CTL_COMP_PREFIX=""
-  _FRP_CTL_COMP_STAGE="command"
-  _FRP_CTL_COMP_CLIENT=""
-  if [[ -n "$line" ]]; then
-    lastc="${line: -1}"
-    if [[ "$lastc" == " " || "$lastc" == $'\t' ]]; then
-      trailing=1
-    fi
-  fi
-  if [[ -n "${line//[[:space:]]/}" ]]; then
-    IFS=$' \t' read -r -a words <<< "$line" || true
-  fi
-  if [[ ${#words[@]} -eq 0 ]]; then
-    return 0
-  fi
-  case "${words[0]}" in
-    '!'*|shell|exec|bash|sh|system)
-      _FRP_CTL_COMP_STAGE="none"
-      _FRP_CTL_COMP_PREFIX="${words[0]}"
-      return 0
-      ;;
-  esac
-  if [[ ${#words[@]} -eq 1 && "$trailing" == "0" ]]; then
-    _FRP_CTL_COMP_PREFIX="${words[0]}"
-    return 0
-  fi
-  _FRP_CTL_COMP_CMD="${words[0]}"
-  if [[ "$trailing" == "1" ]]; then
-    _FRP_CTL_COMP_PREFIX=""
-    _FRP_CTL_COMP_STAGE="$(frpctl_complete_arg_stage "${_FRP_CTL_COMP_CMD}" "${#words[@]}")"
-    if [[ ${#words[@]} -ge 2 ]]; then
-      _FRP_CTL_COMP_CLIENT="${words[1]}"
-    fi
-    return 0
-  fi
-  _FRP_CTL_COMP_PREFIX="${words[$((${#words[@]} - 1))]}"
-  _FRP_CTL_COMP_STAGE="$(frpctl_complete_arg_stage "${_FRP_CTL_COMP_CMD}" "$((${#words[@]} - 1))")"
-  if [[ ${#words[@]} -ge 3 ]]; then
-    _FRP_CTL_COMP_CLIENT="${words[1]}"
-  fi
-}
-
-frpctl_filter_prefix() {
-  local prefix="$1" item
-  while IFS= read -r item; do
-    [[ -n "$item" ]] || continue
-    if [[ "$item" == "$prefix"* ]]; then
-      printf '%s\n' "$item"
-    fi
-  done
-}
-
 # Print matching completion candidates, one per line, sorted uniquely.
 frpctl_completion_candidates() {
-  local line="$1"
-  frpctl_complete_context "$line"
-  case "${_FRP_CTL_COMP_STAGE}" in
-    command)
-      frpctl_completable_commands | sort -u | frpctl_filter_prefix "${_FRP_CTL_COMP_PREFIX}"
-      ;;
-    doctor-flag)
-      printf '%s\n' --json --verbose --quiet | frpctl_filter_prefix "${_FRP_CTL_COMP_PREFIX}"
-      ;;
-    create-client-flag)
-      printf '%s\n' --one-line --ssh --ssh-user --ssh-port --ttl --note --client-name --label --services-file \
-        | frpctl_filter_prefix "${_FRP_CTL_COMP_PREFIX}"
-      ;;
-    client-set-flag)
-      printf '%s\n' --label --note | frpctl_filter_prefix "${_FRP_CTL_COMP_PREFIX}"
-      ;;
-    client)
-      if ! frpctl_is_server; then
-        return 0
-      fi
-      frpctl_registry_client_names | sort -u | frpctl_filter_prefix "${_FRP_CTL_COMP_PREFIX}"
-      ;;
-    service)
-      if ! frpctl_is_server; then
-        return 0
-      fi
-      frpctl_registry_service_ids "${_FRP_CTL_COMP_CLIENT}" | sort -u | frpctl_filter_prefix "${_FRP_CTL_COMP_PREFIX}"
-      ;;
-    *)
-      return 0
-      ;;
-  esac
+  local line="$1" extra
+  extra="$(python3 -c 'import json,sys; print(json.dumps({"line":sys.argv[1]}))' "$line")"
+  frpctl_grammar_call complete "$extra" | sort -u
 }
 
 frpctl_common_prefix() {
@@ -1212,25 +1118,9 @@ frpctl_line_with_token() {
 
 # Apply unique/common-prefix completion. Prints the resulting line.
 frpctl_complete_line() {
-  local line="$1"
-  local -a cands=()
-  local shared
-  mapfile -t cands < <(frpctl_completion_candidates "$line")
-  if [[ ${#cands[@]} -eq 0 ]]; then
-    printf '%s' "$line"
-    return 0
-  fi
-  if [[ ${#cands[@]} -eq 1 ]]; then
-    frpctl_line_with_token "$line" "${cands[0]}" 1
-    return 0
-  fi
-  shared="$(frpctl_common_prefix "${cands[0]}" "${cands[@]}")"
-  frpctl_complete_context "$line"
-  if [[ -n "$shared" && "$shared" != "${_FRP_CTL_COMP_PREFIX}" ]]; then
-    frpctl_line_with_token "$line" "$shared" 0
-    return 0
-  fi
-  printf '%s' "$line"
+  local line="$1" extra
+  extra="$(python3 -c 'import json,sys; print(json.dumps({"line":sys.argv[1]}))' "$line")"
+  frpctl_grammar_call complete-line "$extra"
 }
 
 frpctl_readline_complete() {
@@ -1265,8 +1155,8 @@ frpctl_readline_complete() {
 }
 
 frpctl_repl_enable_completion() {
-  set +o history 2>/dev/null || true
   unset HISTFILE
+  set -o history 2>/dev/null || true
   _FRP_CTL_BOUND_TAB=""
   # Custom Tab only. If bind -x is unavailable, keep using read without -e so
   # Bash filename completion cannot become the fallback.
@@ -1368,8 +1258,183 @@ frpctl_reject_shell() {
   return 2
 }
 
+frpctl_print_grammar_help() {
+  local msg="$1"
+  printf '%s\n' "$msg"
+}
+
+frpctl_dispatch_canonical() {
+  local extra result status action extra_args=""
+  _FRP_CTL_RC=0
+  extra="$(python3 -c 'import json,sys; print(json.dumps({"tokens":sys.argv[1:]}))' "$@")"
+  result="$(frpctl_grammar_call match "$extra")" || return 1
+  status="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("status",""))' "$result")"
+  case "$status" in
+    empty|legacy|unknown)
+      return 1
+      ;;
+    shell)
+      frpctl_reject_shell
+      _FRP_CTL_RC=$?
+      return 0
+      ;;
+    role)
+      echo "ERROR: that command is not available on this host role." >&2
+      _FRP_CTL_RC=1
+      return 0
+      ;;
+    incomplete)
+      frpctl_print_grammar_help "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("message",""))' "$result")"
+      return 0
+      ;;
+    error)
+      echo "ERROR: $(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("message",""))' "$result")" >&2
+      _FRP_CTL_RC=1
+      return 0
+      ;;
+    ok)
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  action="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("action",""))' "$result")"
+  _FRP_CTL_CANON="$result"
+  set +e
+  case "$action" in
+    show_status) frpctl_status $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
+    show_version) echo; frpctl_print_version; echo ;;
+    show_clients) frpctl_require_server || return 1; frpctl_invoke frp-clients $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
+    show_client) frpctl_require_server || return 1; frpctl_invoke frp-client-info "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("client",""))' "$result")" ;;
+    show_enrollments) frpctl_require_server || return 1; frpctl_invoke frp-enrollments ;;
+    show_audit) frpctl_require_server || return 1; frpctl_audit_tail ;;
+    show_upstream) frpctl_require_server || return 1; frpctl_run frp-upstream $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
+    show_services) frpctl_require_client || return 1; frpctl_invoke frp-client list ;;
+    show_info) frpctl_require_client || return 1; frpctl_invoke frp-client info ;;
+    set_client)
+      frpctl_require_server || return 1
+      frpctl_set_client_from_canon "$result"
+      ;;
+    unset_client)
+      frpctl_require_server || return 1
+      frpctl_unset_client_from_canon "$result"
+      ;;
+    set_installer_url)
+      frpctl_require_server || return 1
+      frpctl_invoke frp-set-client-installer-url "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("value",""))' "$result")"
+      ;;
+    set_service)
+      frpctl_require_client || return 1
+      frpctl_invoke frp-client set-service \
+        "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d.get("service",""))' "$result")" \
+        "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d.get("property",""))' "$result")" \
+        "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d.get("value",""))' "$result")"
+      ;;
+    add_service)
+      frpctl_require_client || return 1
+      frpctl_invoke frp-client add-service $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result")
+      ;;
+    enable_service)
+      frpctl_require_client || return 1
+      frpctl_invoke frp-client enable-service "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("service",""))' "$result")"
+      ;;
+    disable_service)
+      frpctl_require_client || return 1
+      frpctl_invoke frp-client disable-service "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("service",""))' "$result")"
+      ;;
+    apply) frpctl_require_client || return 1; frpctl_invoke frp-client apply-pending ;;
+    discard) frpctl_require_client || return 1; frpctl_invoke frp-client discard-pending ;;
+    create_enrollment) frpctl_require_server || return 1; frpctl_invoke frp-create-client $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
+    create_enrollments) frpctl_require_server || return 1; frpctl_invoke frp-enroll-bulk $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
+    create_backup) frpctl_require_server || return 1; frpctl_run frp-backup $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
+    revoke_client) frpctl_require_server || return 1; frpctl_invoke frp-revoke-client "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("client",""))' "$result")" $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
+    revoke_enrollment) frpctl_require_server || return 1; frpctl_invoke frp-enrollment-revoke "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("id",""))' "$result")" ;;
+    release_client) frpctl_require_server || return 1; frpctl_invoke frp-release-client "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("client",""))' "$result")" $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
+    release_service) frpctl_require_server || return 1; frpctl_invoke frp-release-service "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("client",""))' "$result")" "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("service",""))' "$result")" $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
+    update_default) frpctl_update ;;
+    update_project)
+      extra_args="$(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result")"
+      if frpctl_is_client; then
+        # shellcheck disable=SC2086
+        frpctl_client_update $extra_args
+      fi
+      if frpctl_is_server; then
+        # shellcheck disable=SC2086
+        frpctl_run frp-project-update $extra_args
+      fi
+      if ! frpctl_is_client && ! frpctl_is_server; then
+        return 1
+      fi
+      ;;
+    update_frp) frpctl_require_server || return 1; frpctl_run frp-update $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
+    restore_backup) frpctl_require_server || return 1; frpctl_run frp-restore "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("path",""))' "$result")" ;;
+    doctor)
+      if ! type frp_doctor_main >/dev/null 2>&1; then
+        echo "ERROR: doctor diagnostics are not installed on this host." >&2
+        return 2
+      fi
+      frp_doctor_main $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result")
+      ;;
+    help)
+      extra_args="$(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result")"
+      if [[ "${FRP_CTL_REPL:-}" == "1" || -n "$extra_args" ]]; then
+        # shellcheck disable=SC2086
+        frpctl_repl_help $extra_args
+      else
+        frpctl_usage
+      fi
+      ;;
+    menu) frpctl_interactive ;;
+    history) frpctl_print_history ;;
+    clear) frpctl_clear_screen ;;
+    exit)
+      if [[ "${FRP_CTL_REPL:-}" == "1" ]]; then
+        _FRP_CTL_SHOULD_EXIT=1
+      fi
+      return 0
+      ;;
+    *)
+      set -e
+      return 1
+      ;;
+  esac
+  _FRP_CTL_RC=$?
+  set -e
+  return 0
+}
+
+frpctl_set_client_from_canon() {
+  local spec="$1" client prop value
+  client="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("client",""))' "$spec")"
+  prop="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("property",""))' "$spec")"
+  value="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("value",""))' "$spec")"
+  case "$prop" in
+    label) frpctl_invoke frp-client-set "$client" --label "$value" ;;
+    note) frpctl_invoke frp-client-set "$client" --note "$value" ;;
+    tag) frpctl_invoke frp-client-set "$client" --tag "$value" ;;
+    *) echo "ERROR: unknown client setting" >&2; return 1 ;;
+  esac
+}
+
+frpctl_unset_client_from_canon() {
+  local spec="$1" client prop value
+  client="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("client",""))' "$spec")"
+  prop="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("property",""))' "$spec")"
+  value="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("value",""))' "$spec")"
+  case "$prop" in
+    label) frpctl_invoke frp-client-set "$client" --clear-label ;;
+    note) frpctl_invoke frp-client-set "$client" --clear-note ;;
+    tag) frpctl_invoke frp-client-set "$client" --remove-tag "$value" ;;
+    *) echo "ERROR: unknown client setting" >&2; return 1 ;;
+  esac
+}
+
 frpctl_dispatch() {
   local cmd="${1:-}"
+  _FRP_CTL_RC=0
+  if [[ -n "$cmd" ]] && frpctl_dispatch_canonical "$@"; then
+    return "${_FRP_CTL_RC:-0}"
+  fi
   shift || true
   case "$cmd" in
     -h|--help)
@@ -1377,9 +1442,13 @@ frpctl_dispatch() {
       ;;
     help|'?')
       if [[ "${FRP_CTL_REPL:-}" == "1" ]]; then
-        frpctl_repl_help
+        frpctl_repl_help "$@"
       else
-        frpctl_usage
+        if [[ $# -gt 0 ]]; then
+          frpctl_repl_help "$@"
+        else
+          frpctl_usage
+        fi
       fi
       ;;
     menu)
@@ -1568,13 +1637,36 @@ frpctl_dispatch() {
 }
 
 frpctl_tokenize() {
-  local line="$1"
+  local line="$1" py json
   _FRP_CTL_TOKENS=()
   line="${line#"${line%%[![:space:]]*}"}"
   line="${line%"${line##*[![:space:]]}"}"
   [[ -n "$line" ]] || return 0
-  # Whitespace-delimited tokens only. Do not eval, glob, or expand.
-  IFS=$' \t' read -r -a _FRP_CTL_TOKENS <<< "$line" || true
+  py="$(frpctl_grammar_py)" || return 1
+  json="$(python3 "$py" tokenize "$line")" || return 2
+  mapfile -t _FRP_CTL_TOKENS < <(python3 -c 'import json,sys; [print(t) for t in json.loads(sys.argv[1])]' "$json")
+}
+
+frpctl_history_maybe_record() {
+  local line="$1"
+  [[ -n "$line" ]] || return 0
+  if python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import frp_ctl_grammar as g; raise SystemExit(0 if g.looks_secret(sys.argv[2]) else 1)' \
+    "$(dirname "$(frpctl_grammar_py)")" "$line"; then
+    return 0
+  fi
+  _FRP_CTL_SESSION_HIST+=("$line")
+  history -s "$line" 2>/dev/null || true
+}
+
+frpctl_print_history() {
+  local i
+  if [[ ${#_FRP_CTL_SESSION_HIST[@]} -eq 0 ]]; then
+    echo "(no session history)"
+    return 0
+  fi
+  for i in "${!_FRP_CTL_SESSION_HIST[@]}"; do
+    printf '%5s  %s\n' "$((i + 1))" "${_FRP_CTL_SESSION_HIST[$i]}"
+  done
 }
 
 frpctl_repl_sigint() {
@@ -1643,9 +1735,11 @@ frpctl_repl() {
     return 1
   fi
 
-  # In-memory interaction only. Do not persist command history.
+  # Session history for ↑/↓ only. Never write a history file.
   unset HISTFILE
-  set +o history 2>/dev/null || true
+  set -o history 2>/dev/null || true
+  set +o histexpand 2>/dev/null || true
+  _FRP_CTL_SESSION_HIST=()
   FRP_CTL_REPL=1
   _FRP_CTL_SHOULD_EXIT=0
   _FRP_CTL_SIGINT=0
@@ -1673,10 +1767,14 @@ frpctl_repl() {
       echo
       continue
     fi
-    frpctl_tokenize "$_FRP_CTL_LINE"
+    if ! frpctl_tokenize "$_FRP_CTL_LINE"; then
+      echo "ERROR: could not parse command line." >&2
+      continue
+    fi
     if [[ ${#_FRP_CTL_TOKENS[@]} -eq 0 ]]; then
       continue
     fi
+    frpctl_history_maybe_record "$_FRP_CTL_LINE"
     case "${_FRP_CTL_TOKENS[0]}" in
       '!'*|shell|exec|bash|sh|system)
         frpctl_reject_shell || true

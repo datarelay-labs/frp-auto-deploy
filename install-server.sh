@@ -26,6 +26,7 @@ for f in \
   "$BASE_DIR/lib/server-project-files.manifest" \
   "$BASE_DIR/lib/frp-doctor-common.sh" \
   "$BASE_DIR/lib/frp_doctor.py" \
+  "$BASE_DIR/lib/frp_ctl_grammar.py" \
   "$BASE_DIR/release-manifest.json" \
   "$BASE_DIR/tools/frp-create-client" \
   "$BASE_DIR/tools/frp-enrollments" \

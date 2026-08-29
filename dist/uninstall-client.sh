@@ -124,6 +124,7 @@ fi
 
 frp_u_rm_file "$(frp_u_path /etc/frp-auto-deploy/allocator-ca.crt)"
 frp_u_rm_file "$(frp_u_path /var/lib/frp-auto-deploy/update-pending.json)"
+frp_u_rm_file "$(frp_u_path /var/lib/frp-auto-deploy/client-draft.json)"
 frp_u_safe_rm_rf "$(frp_u_path /var/lib/frp-auto-deploy/client-upgrades)"
 
 # Dual-role guard: if [[ ! -f /etc/frp-auto-deploy/config.json ]]

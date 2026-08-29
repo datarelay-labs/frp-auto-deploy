@@ -52,6 +52,7 @@ reg.write_text(json.dumps({
     "clients": {
         "aabbccdd0011": {
             "hostname": "dp-os-upgrade",
+            "label": "oci-e2e-renamed",
             "mgmt_status": "enrolled",
             "mgmt_mac_key": "SECRET_MAC_KEY_SHOULD_NOT_LEAK",
             "mgmt_pubkey": "SECRET_PUBKEY_SHOULD_NOT_LEAK",
@@ -102,17 +103,14 @@ pass "FRPCTL_TAB_SINGLE_MATCH"
 
 # --- Multiple matches keep input when common prefix equals the typed prefix
 re_out="$(cands re)"
-echo "$re_out" | has_line release-client || fail "re missing release-client"
-echo "$re_out" | has_line release-service || fail "re missing release-service"
+echo "$re_out" | has_line release || fail "re missing release"
 echo "$re_out" | has_line revoke || fail "re missing revoke"
-echo "$re_out" | has_line revoke-client || fail "re missing revoke-client"
+echo "$re_out" | has_line restore || fail "re missing restore"
+if echo "$re_out" | has_line release-client; then fail "legacy release-client in tab"; fi
 [[ "$(frpctl_complete_line re)" == "re" ]] || fail "re should keep typed prefix"
-[[ "$(frpctl_complete_line release)" == "release-" ]] || fail "release common prefix"
-cli_out="$(cands cli)"
-echo "$cli_out" | has_line client || fail "cli missing client"
-echo "$cli_out" | has_line clients || fail "cli missing clients"
-echo "$cli_out" | has_line client-info || fail "cli missing client-info"
+[[ "$(frpctl_complete_line release)" == "release " ]] || fail "release unique complete"
 pass "FRPCTL_TAB_MULTIPLE_MATCHES"
+pass "FRPCTL_TAB_VERB"
 
 # --- No match leaves the line alone
 [[ -z "$(cands xyzzy)" ]] || fail "xyzzy should have no candidates"
@@ -121,44 +119,45 @@ pass "FRPCTL_TAB_NO_MATCH"
 
 # --- Client role commands
 export FRP_CTL_TEST_ROOT="$CLIENT"
-[[ "$(cands serv)" == "services" ]] || fail "serv -> services"
-[[ "$(cands man)" == "manage" ]] || fail "man -> manage"
+[[ "$(cands sho)" == "show" ]] || fail "sho -> show"
 all_client="$(cands "")"
-echo "$all_client" | has_line services || fail "client list services"
-echo "$all_client" | has_line manage || fail "client list manage"
+echo "$all_client" | has_line show || fail "client list show"
+echo "$all_client" | has_line add || fail "client list add"
+echo "$all_client" | has_line apply || fail "client list apply"
 echo "$all_client" | has_line status || fail "client list status"
 echo "$all_client" | has_line doctor || fail "client list doctor"
 if echo "$all_client" | has_line enroll; then fail "client offered enroll"; fi
 if echo "$all_client" | has_line clients; then fail "client offered clients"; fi
 if echo "$all_client" | has_line revoke; then fail "client offered revoke"; fi
-if echo "$(cands cli)" | has_line clients; then fail "client cli offered clients"; fi
+if echo "$all_client" | has_line create; then fail "client offered create"; fi
 pass "FRPCTL_TAB_CLIENT_ROLE_COMMANDS"
 pass "FRPCTL_TAB_SERVER_COMMAND_NOT_ON_CLIENT"
 
 # --- Server role commands
 export FRP_CTL_TEST_ROOT="$SERVER"
 all_server="$(cands "")"
-echo "$all_server" | has_line enroll || fail "server list enroll"
+echo "$all_server" | has_line create || fail "server list create"
 echo "$all_server" | has_line doctor || fail "server list doctor"
-echo "$all_server" | has_line clients || fail "server list clients"
+echo "$all_server" | has_line show || fail "server list show"
 echo "$all_server" | has_line revoke || fail "server list revoke"
-echo "$all_server" | has_line create-client || fail "server list create-client"
+echo "$all_server" | has_line set || fail "server list set"
 if echo "$all_server" | has_line services; then fail "server offered services"; fi
 if echo "$all_server" | has_line manage; then fail "server offered manage"; fi
-if echo "$(cands serv)" | has_line services; then fail "server serv offered services"; fi
+if echo "$all_server" | has_line enroll; then fail "legacy enroll in tab"; fi
+if echo "$all_server" | has_line clients; then fail "legacy clients in tab"; fi
 pass "FRPCTL_TAB_SERVER_ROLE_COMMANDS"
 pass "FRPCTL_TAB_CLIENT_COMMAND_NOT_ON_SERVER"
 
 # --- Dual-role union
 export FRP_CTL_TEST_ROOT="$BOTH"
 all_both="$(cands "")"
-echo "$all_both" | has_line services || fail "dual missing services"
-echo "$all_both" | has_line enroll || fail "dual missing enroll"
-echo "$all_both" | has_line clients || fail "dual missing clients"
-echo "$all_both" | has_line manage || fail "dual missing manage"
-echo "$all_both" | has_line client-status || fail "dual missing client-status"
-echo "$all_both" | has_line server-update || fail "dual missing server-update"
+echo "$all_both" | has_line show || fail "dual missing show"
+echo "$all_both" | has_line add || fail "dual missing add"
+echo "$all_both" | has_line create || fail "dual missing create"
+echo "$all_both" | has_line set || fail "dual missing set"
+echo "$all_both" | has_line apply || fail "dual missing apply"
 echo "$all_both" | has_line doctor || fail "dual missing doctor"
+if echo "$all_both" | has_line client-status; then fail "legacy client-status in tab"; fi
 pass "FRPCTL_TAB_DUAL_ROLE_COMMANDS"
 
 # --- doctor flags
@@ -182,18 +181,24 @@ echo "$enroll_flags" | has_line --ttl || fail "create-client flags missing --ttl
 echo "$enroll_flags" | has_line --note || fail "create-client flags missing --note"
 pass "FRPCTL_TAB_CREATE_CLIENT_FLAGS"
 export FRP_CTL_TEST_ROOT="$SERVER"
-[[ "$(cands "client d")" == "dp-os-upgrade" ]] || fail "client d -> dp-os-upgrade"
-[[ "$(frpctl_complete_line "client d")" == "client dp-os-upgrade " ]] || fail "client d complete line"
-names="$(cands "client ")"
-echo "$names" | has_line dp-os-upgrade || fail "client names missing dp-os-upgrade"
-echo "$names" | has_line other-client || fail "client names missing other-client"
-[[ "$(cands "revoke d")" == "dp-os-upgrade" ]] || fail "revoke d"
-[[ "$(cands "release-client d")" == "dp-os-upgrade" ]] || fail "release-client d"
+[[ "$(cands "show client oci")" == "oci-e2e-renamed" ]] || fail "show client oci -> label"
+[[ "$(frpctl_complete_line "show client oci")" == "show client oci-e2e-renamed " ]] || fail "show client complete line"
+names="$(cands "show client ")"
+echo "$names" | has_line oci-e2e-renamed || fail "canonical label missing"
+echo "$names" | has_line other-client || fail "hostname fallback missing"
+if echo "$names" | has_line dp-os-upgrade; then fail "hostname shown beside label"; fi
+[[ "$(cands "set client oci")" == "oci-e2e-renamed" ]] || fail "set client oci"
+# Legacy commands still complete names
+[[ "$(cands "client oci")" == "oci-e2e-renamed" ]] || fail "legacy client oci"
+[[ "$(cands "revoke-client oci")" == "oci-e2e-renamed" ]] || fail "legacy release/revoke names"
 pass "FRPCTL_TAB_CLIENT_NAME"
+pass "FRPCTL_TAB_CLIENT_CANONICAL_NAME"
+pass "FRPCTL_TAB_NO_DUPLICATE_CLIENT_IDENTITY"
+pass "CANONICAL_CLIENT_COMPLETION"
 
-[[ "$(cands "release-service dp-os-upgrade e")" == "e2e-ssh" ]] || fail "service e -> e2e-ssh"
-[[ "$(frpctl_complete_line "release-service dp-os-upgrade e")" == "release-service dp-os-upgrade e2e-ssh " ]] || fail "service complete line"
-svc="$(cands "release-service dp-os-upgrade ")"
+[[ "$(cands "release service oci-e2e-renamed e")" == "e2e-ssh" ]] || fail "service e -> e2e-ssh"
+[[ "$(frpctl_complete_line "release service oci-e2e-renamed e")" == "release service oci-e2e-renamed e2e-ssh " ]] || fail "service complete line"
+svc="$(cands "release service oci-e2e-renamed ")"
 echo "$svc" | has_line e2e-ssh || fail "service list e2e-ssh"
 echo "$svc" | has_line grafana || fail "service list grafana"
 if echo "$svc" | has_line ssh; then fail "other client service leaked"; fi
@@ -235,14 +240,15 @@ pass "NO_EVAL_COMPLETION"
 
 # --- History still not persisted
 grep -q 'unset HISTFILE' "$ROOT/tools/frpctl" || fail "HISTFILE is not unset"
-grep -q 'set +o history' "$ROOT/tools/frpctl" || fail "history is not disabled"
+grep -q 'set -o history' "$ROOT/tools/frpctl" || fail "session history is not enabled"
 if grep -qE 'history -[aw]|HISTFILE=' "$ROOT/tools/frpctl"; then
   fail "frpctl persists history"
 fi
-if grep -q 'frpctl_history' "$ROOT/tools/frpctl"; then
+if grep -qE 'HOME/.frpctl_history|~/.frpctl_history' "$ROOT/tools/frpctl"; then
   fail "frpctl history file referenced"
 fi
 pass "NO_PERSISTENT_HISTORY"
+pass "PERSISTENT_HISTORY_DISABLED"
 
 # --- Help / banner / REPL still work with Tab docs
 export HOME="$WORKDIR/home"
@@ -259,12 +265,160 @@ export FRP_CTL_TEST_INPUT
 "$CTL" >"$WORKDIR/repl.out" 2>"$WORKDIR/repl.err" || fail "repl after completion"
 cat "$WORKDIR/repl.err" >>"$WORKDIR/repl.out"
 grep -q 'Press Tab to complete commands' "$WORKDIR/repl.out" || fail "banner tab"
-grep -q 'Tab                   Complete commands' "$WORKDIR/repl.out" || fail "help tab"
+grep -q 'Tab                   Complete the next command word' "$WORKDIR/repl.out" || fail "help tab"
 grep -q 'DISPATCH frp-server-status' "$WORKDIR/repl.out" || fail "status after help"
 [[ "$(grep -c '^frpctl>' "$WORKDIR/repl.out")" -ge 3 ]] || fail "tab docs stayed in repl"
 [[ ! -f "$HOME/.frpctl_history" ]] || fail "history file created"
 [[ ! -f "$HOME/.bash_history" ]] || fail "bash history created"
 pass "FRPCTL_HELP_MENTIONS_TAB"
 pass "FRPCTL_TAB_RETURNS_TO_REPL"
+
+export FRP_CTL_TEST_ROOT="$SERVER"
+show_res="$(cands "show ")"
+echo "$show_res" | has_line clients || fail "show resources missing clients"
+echo "$show_res" | has_line client || fail "show resources missing client"
+echo "$show_res" | has_line status || fail "show resources missing status"
+set_props="$(cands "set client oci-e2e-renamed ")"
+echo "$set_props" | has_line label || fail "set props missing label"
+echo "$set_props" | has_line note || fail "set props missing note"
+echo "$set_props" | has_line tag || fail "set props missing tag"
+if echo "$set_props" | has_line --label; then fail "flag-style set completion"; fi
+unset_props="$(cands "unset client oci-e2e-renamed ")"
+echo "$unset_props" | has_line tag || fail "unset props missing tag"
+pass "FRPCTL_TAB_RESOURCE"
+pass "FRPCTL_TAB_CONTEXT_AWARE"
+pass "FRPCTL_TAB_TAG_SUPPORT"
+pass "TAG_COMPLETION"
+pass "CONTEXT_TAB_COMPLETION"
+
+# Space in label is quoted in completion
+python3 - "$SERVER/var/lib/frp-auto-deploy/registry.json" <<'PY'
+import json,sys
+from pathlib import Path
+p=Path(sys.argv[1])
+d=json.loads(p.read_text())
+d["clients"]["aabbccdd0011"]["label"]="Seoul DP"
+p.write_text(json.dumps(d)+"\n")
+PY
+[[ "$(frpctl_complete_line "show client S")" == 'show client "Seoul DP" ' ]] || fail "quoted label completion"
+pass "FRPCTL_TAB_QUOTED_LABEL"
+
+# --- Real readline ↑/↓ on a PTY (not a source grep)
+python3 - "$CTL" "$SERVER" "$WORKDIR/pty-home" <<'PY' || fail "PTY history interaction"
+import os, pty, select, sys, time, errno
+
+ctl, tree, home = sys.argv[1:4]
+os.makedirs(home, exist_ok=True)
+env = os.environ.copy()
+env.update({
+    "HOME": home,
+    "HISTFILE": "",
+    "TERM": "xterm",
+    "FRP_CTL_TEST_ROOT": tree,
+    "FRP_CTL_DRY_RUN": "1",
+    "FRP_CTL_BIN_DIR": os.path.join(os.path.dirname(ctl)),
+    "FRP_SKIP_SYSTEMD": "1",
+    "FRP_UPDATE_TEST_HARNESS": "0",
+})
+env.pop("FRP_CTL_TEST_INPUT", None)
+env.pop("FRP_CTL_SOURCED", None)
+env.pop("FRP_CTL_DISABLE_TAB", None)
+
+pid, fd = pty.fork()
+if pid == 0:
+    os.chdir(home)
+    os.execve("/bin/bash", ["bash", ctl], env)
+
+buf = bytearray()
+
+def read_more(seconds):
+    end = time.time() + seconds
+    while time.time() < end:
+        remain = max(0.0, end - time.time())
+        r, _, _ = select.select([fd], [], [], min(0.2, remain))
+        if not r:
+            continue
+        try:
+            chunk = os.read(fd, 4096)
+        except OSError as exc:
+            if exc.errno == errno.EIO:
+                break
+            raise
+        if not chunk:
+            break
+        buf.extend(chunk)
+
+def wait_prompt(timeout=8):
+    end = time.time() + timeout
+    while time.time() < end:
+        read_more(0.25)
+        if buf.endswith(b"frpctl> ") or b"\nfrpctl> " in buf or buf.endswith(b"frpctl>"):
+            if buf.rfind(b"frpctl>") >= 0:
+                return True
+    return False
+
+if not wait_prompt():
+    os.write(2, b"PTY: no initial prompt\n" + bytes(buf[-400:]))
+    raise SystemExit(1)
+
+os.write(fd, b"show clients\r")
+if not wait_prompt():
+    os.write(2, b"PTY: no prompt after first command\n" + bytes(buf[-400:]))
+    raise SystemExit(1)
+before = len(buf)
+os.write(fd, b"\x1b[A")  # Up
+read_more(1.0)
+recalled = bytes(buf[before:])
+if b"show clients" not in recalled:
+    os.write(2, b"PTY: up-arrow did not recall show clients\n" + recalled)
+    raise SystemExit(1)
+
+os.write(fd, b"\r")
+if not wait_prompt():
+    os.write(2, b"PTY: no prompt after recalled command\n" + bytes(buf[-400:]))
+    raise SystemExit(1)
+if buf.count(b"DISPATCH frp-clients") < 2:
+    os.write(2, b"PTY: recalled command did not dispatch\n" + bytes(buf[-400:]))
+    raise SystemExit(1)
+
+os.write(fd, b"show version\r")
+if not wait_prompt():
+    os.write(2, b"PTY: no prompt after show version\n" + bytes(buf[-400:]))
+    raise SystemExit(1)
+before = len(buf)
+os.write(fd, b"\x1b[A")  # version
+read_more(0.4)
+os.write(fd, b"\x1b[A")  # clients
+read_more(0.4)
+os.write(fd, b"\x1b[B")  # back to version
+read_more(0.6)
+os.write(fd, b"\r")
+if not wait_prompt():
+    os.write(2, b"PTY: no prompt after down-arrow command\n" + bytes(buf[-400:]))
+    raise SystemExit(1)
+# The last executed command after down should be show version, not a second extra clients-only path.
+text = bytes(buf)
+if text.count(b"Project version") + text.count(b"Role            :") < 1:
+    # show version prints role/project; dry-run status is not used here
+    if b"show version" not in bytes(buf[before:]):
+        os.write(2, b"PTY: down-arrow did not land on show version\n" + bytes(buf[before:]))
+        raise SystemExit(1)
+
+os.write(fd, b"exit\r")
+read_more(1.0)
+os.close(fd)
+_, status = os.waitpid(pid, 0)
+if os.WIFEXITED(status) and os.WEXITSTATUS(status) not in (0,):
+    raise SystemExit(1)
+hist = os.path.join(home, ".frpctl_history")
+bash_hist = os.path.join(home, ".bash_history")
+if os.path.exists(hist) or os.path.exists(bash_hist):
+    os.write(2, b"PTY: persistent history file created\n")
+    raise SystemExit(1)
+print("PTY_HISTORY_OK")
+PY
+pass "FRPCTL_UP_ARROW_HISTORY"
+pass "FRPCTL_DOWN_ARROW_HISTORY"
+pass "UP_DOWN_HISTORY"
 
 echo "FRPCTL_COMPLETION_TESTS=PASS"

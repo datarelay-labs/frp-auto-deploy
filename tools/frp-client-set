@@ -102,19 +102,44 @@ parser.add_argument(
     metavar='KEY',
     help='remove a server-owned tag (repeatable)',
 )
+parser.add_argument(
+    '--clear-label',
+    action='store_true',
+    help='remove the stored administrator label',
+)
+parser.add_argument(
+    '--clear-note',
+    action='store_true',
+    help='remove the stored administrator description',
+)
 args = parser.parse_args()
 
-if args.label is None and args.note is None and not args.tag and not args.remove_tag:
-    fail('pass --label, --note, --tag, and/or --remove-tag')
+if args.clear_label and args.label is not None:
+    fail('pass either --label or --clear-label')
+if args.clear_note and args.note is not None:
+    fail('pass either --note or --clear-note')
+if (
+    args.label is None
+    and args.note is None
+    and not args.tag
+    and not args.remove_tag
+    and not args.clear_label
+    and not args.clear_note
+):
+    fail('pass --label, --note, --tag, --remove-tag, --clear-label, and/or --clear-note')
 
 label = None
 note = None
 tag_updates = {}
 tag_removals = []
 try:
-    if args.label is not None:
+    if args.clear_label:
+        label = ''
+    elif args.label is not None:
         label = CREG.validate_label(args.label, required=True)
-    if args.note is not None:
+    if args.clear_note:
+        note = ''
+    elif args.note is not None:
         note = CREG.validate_note(args.note)
     for assignment in args.tag:
         key, value = CREG.parse_tag_assignment(assignment)
@@ -145,9 +170,15 @@ try:
         client.get('mgmt_fingerprint'),
     )
     if label is not None:
-        client['label'] = label
+        if label:
+            client['label'] = label
+        else:
+            client.pop('label', None)
     if note is not None:
-        client['note'] = note
+        if note:
+            client['note'] = note
+        else:
+            client.pop('note', None)
     tags = client.get('tags') or {}
     if not isinstance(tags, dict):
         fail('stored client tags must be an object')
@@ -187,9 +218,13 @@ print('Updated %s (%s)' % (
     CREG.sanitize_display(CREG.display_name(client, mid), 64),
     CREG.sanitize_display(CREG.short_machine_id(mid), 16),
 ))
-if label is not None:
+if args.clear_label:
+    print('Label : (cleared)')
+elif label is not None:
     print('Label : %s' % CREG.sanitize_display(label, 64))
-if note is not None:
+if args.clear_note:
+    print('Note  : (cleared)')
+elif note is not None:
     print('Note  : %s' % CREG.sanitize_display(note, 1024))
 for key in tag_removals:
     print('Removed tag: %s' % CREG.sanitize_display(key, 32))

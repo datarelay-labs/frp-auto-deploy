@@ -2,6 +2,12 @@
 
 ## Unreleased (2.1.0 / main)
 
+- `frpctl` uses a verb/resource grammar (`show`, `set`, `unset`, `create`,
+  `revoke`, `release`, `update`, …). Older flat commands remain as hidden
+  compatibility aliases. See [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md).
+- Interactive `frpctl` keeps session `↑`/`↓` history in memory only, parses
+  quoted arguments without shell expansion, and completes the command tree
+  (including tags and canonical client labels).
 - Client bundles now embed `release-manifest.json` so candidate channel and
   source-ref can be validated before a live update.
 - Same-version client updates compare verified bundle SHA256, not only

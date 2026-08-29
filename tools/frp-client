@@ -900,6 +900,168 @@ PY
   done
 }
 
+frp_client_draft_path() {
+  printf '%s' "$(frp_client_path /var/lib/frp-auto-deploy/client-draft.json)"
+}
+
+frp_client_ensure_pending() {
+  local pending current
+  pending="$(frp_client_draft_path)"
+  current="$(frp_client_state_path)"
+  mkdir -p "$(dirname "$pending")"
+  if [[ ! -f "$pending" ]]; then
+    frp_copy_state "$current" "$pending"
+  fi
+  CANDIDATE_FILE="$pending"
+}
+
+frp_client_local_service_ids() {
+  python3 - "$(frp_client_state_path)" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+if not path.is_file():
+    raise SystemExit(0)
+state = json.loads(path.read_text(encoding='utf-8'))
+for sid in sorted((state.get('services') or {})):
+    print(sid)
+PY
+}
+
+frp_client_set_service_field() {
+  local sid="$1" prop="$2" value="$3"
+  frp_client_ensure_pending
+  python3 - "$CANDIDATE_FILE" "$sid" "$prop" "$value" <<'PY'
+import json, re, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+sid, prop, value = sys.argv[2:5]
+state = json.loads(path.read_text(encoding='utf-8'))
+item = (state.get('services') or {}).get(sid)
+if not isinstance(item, dict):
+    raise SystemExit('ERROR: unknown service: %s' % sid)
+if prop == 'name':
+    if len(value) > 64 or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in value):
+        raise SystemExit('ERROR: invalid service display name')
+    item['name'] = value.strip() or sid
+elif prop == 'target-host':
+    if (not value or len(value) > 253
+            or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in value)
+            or any(c in value for c in ' /\\;|&$`\'"<>')):
+        raise SystemExit('ERROR: invalid target host')
+    item['local_ip'] = value
+elif prop == 'target-port':
+    try:
+        port = int(value)
+    except Exception:
+        raise SystemExit('ERROR: invalid local_port; must be an integer 1-65535')
+    if port < 1 or port > 65535:
+        raise SystemExit('ERROR: invalid local_port; must be an integer 1-65535')
+    item['local_port'] = port
+elif prop == 'ssh-user':
+    if item.get('preset') != 'ssh':
+        raise SystemExit('ERROR: ssh-user is only valid for ssh services')
+    if not re.fullmatch(r'[A-Za-z0-9._@-]{1,32}', value or ''):
+        raise SystemExit('ERROR: invalid ssh_user')
+    item['ssh_user'] = value
+else:
+    raise SystemExit('ERROR: unknown service property')
+path.write_text(json.dumps(state, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+print('Pending service %s %s updated. Run apply to make it live.' % (sid, prop))
+PY
+}
+
+frp_client_set_service_enabled() {
+  local sid="$1" enable="$2"
+  frp_client_ensure_pending
+  python3 - "$CANDIDATE_FILE" "$sid" "$enable" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+sid, enable = sys.argv[2], sys.argv[3] == '1'
+state = json.loads(path.read_text(encoding='utf-8'))
+item = (state.get('services') or {}).get(sid)
+if not isinstance(item, dict):
+    raise SystemExit('ERROR: unknown service: %s' % sid)
+currently = item.get('enabled', True) is not False
+if enable:
+    item['enabled'] = True
+    print('Service %s will be enabled. Run apply to make it live.' % sid)
+elif currently:
+    enabled_count = sum(1 for rec in state['services'].values() if rec.get('enabled', True) is not False)
+    if enabled_count <= 1:
+        raise SystemExit('ERROR: at least one enabled service is required.')
+    item['enabled'] = False
+    print('Service %s will be disabled. The public reservation remains until release service.' % sid)
+else:
+    print('Service %s is already disabled in the pending state.' % sid)
+path.write_text(json.dumps(state, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+PY
+}
+
+frp_client_add_service_cli() {
+  local preset="custom" sid="" name="" host="127.0.0.1" port="" user=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --preset) preset="$2"; shift 2 ;;
+      --id) sid="$2"; shift 2 ;;
+      --name) name="$2"; shift 2 ;;
+      --target-host) host="$2"; shift 2 ;;
+      --target-port) port="$2"; shift 2 ;;
+      --ssh-user) user="$2"; shift 2 ;;
+      *)
+        echo "ERROR: unknown add service option: $1" >&2
+        return 2
+        ;;
+    esac
+  done
+  case "$preset" in
+    ssh) sid="${sid:-ssh}"; name="${name:-SSH}"; port="${port:-22}"; [[ -n "$user" ]] || {
+      echo "ERROR: --ssh-user is required for ssh services" >&2; return 2; } ;;
+    http) sid="${sid:-http}"; name="${name:-HTTP}"; port="${port:-80}" ;;
+    https) sid="${sid:-https}"; name="${name:-HTTPS}"; port="${port:-443}" ;;
+    custom)
+      [[ -n "$sid" ]] || { echo "ERROR: --id is required for custom services" >&2; return 2; }
+      name="${name:-$sid}"
+      [[ -n "$port" ]] || { echo "ERROR: --target-port is required" >&2; return 2; }
+      ;;
+    *) echo "ERROR: preset must be ssh, http, https, or custom" >&2; return 2 ;;
+  esac
+  frp_client_ensure_pending
+  local payload
+  payload="$(python3 -c 'import json,sys; print(json.dumps({
+    "id": sys.argv[1], "name": sys.argv[2], "preset": sys.argv[3],
+    "protocol": "tcp", "local_ip": sys.argv[4], "local_port": int(sys.argv[5]),
+    "ssh_user": sys.argv[6],
+  }))' "$sid" "$name" "$preset" "$host" "$port" "$user")"
+  frp_state_add_payload "$payload"
+  echo "Pending service ${sid} added. Run apply to make it live."
+}
+
+frp_client_apply_pending() {
+  local pending
+  pending="$(frp_client_draft_path)"
+  if [[ ! -f "$pending" ]]; then
+    echo "No pending service changes."
+    return 0
+  fi
+  CANDIDATE_FILE="$pending"
+  export FRP_CLIENT_CANDIDATE="$pending"
+  current="$(frp_client_state_path)"
+  frp_load_client_state "$current"
+  frp_acquire_client_lock || return 1
+  trap 'unset FRP_ENROLLMENT_CODE FRP_CLIENT_OPERATION_ID; frp_release_client_lock' EXIT
+  frp_apply_candidate
+  rm -f "$pending"
+}
+
+frp_client_discard_pending() {
+  local pending
+  pending="$(frp_client_draft_path)"
+  rm -f "$pending"
+  echo "Pending service changes discarded."
+}
+
 frp_client_cmd_main() {
   local cmd="${1:-}"
   case "$cmd" in
@@ -937,6 +1099,41 @@ frp_client_cmd_main() {
       frp_require_root
       shift
       frp_client_update_cmd "$@"
+      ;;
+    add-service)
+      frp_require_root
+      shift
+      frp_load_client_state "$(frp_client_state_path)"
+      frp_client_add_service_cli "$@"
+      ;;
+    set-service)
+      frp_require_root
+      shift
+      [[ $# -ge 3 ]] || { echo "ERROR: usage: frp-client set-service <id> <property> <value>" >&2; exit 2; }
+      frp_load_client_state "$(frp_client_state_path)"
+      frp_client_set_service_field "$1" "$2" "$3"
+      ;;
+    enable-service)
+      frp_require_root
+      shift
+      [[ $# -ge 1 ]] || { echo "ERROR: usage: frp-client enable-service <id>" >&2; exit 2; }
+      frp_load_client_state "$(frp_client_state_path)"
+      frp_client_set_service_enabled "$1" 1
+      ;;
+    disable-service)
+      frp_require_root
+      shift
+      [[ $# -ge 1 ]] || { echo "ERROR: usage: frp-client disable-service <id>" >&2; exit 2; }
+      frp_load_client_state "$(frp_client_state_path)"
+      frp_client_set_service_enabled "$1" 0
+      ;;
+    apply-pending)
+      frp_require_root
+      frp_client_apply_pending
+      ;;
+    discard-pending)
+      frp_require_root
+      frp_client_discard_pending
       ;;
     -h|--help|help)
       cat <<'EOF'

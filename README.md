@@ -303,8 +303,8 @@ Required beforehand:
 After the client connects:
 
 ```bash
-sudo frpctl clients
-sudo frpctl client customer-01
+sudo frpctl show clients
+sudo frpctl show client customer-01
 ```
 
 Connect with the **public** host and **public** service port:
@@ -387,19 +387,26 @@ sudo frpctl
 ```
 
 That starts the persistent CLI. Type `help` or `?`. Press Tab to complete
-commands (and, on a server, client names and service IDs). `menu` opens the
-guided numbered menu.
+verbs, resources, and names. Incomplete commands show the next word. `↑` / `↓`
+walk this session only (nothing is saved to disk). `menu` opens the guided
+numbered menu.
+
+Grammar: `<verb> <resource> [target] [property] [value]`. Full tree:
+[docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md).
 
 ```bash
-sudo frpctl status
+sudo frpctl show status
+sudo frpctl show version
 sudo frpctl doctor
 sudo frpctl doctor --json
-sudo frpctl update
+sudo frpctl update project --check
 sudo frpctl help
+sudo frpctl help set client
 ```
 
-`status` is a fast snapshot. `doctor` is deeper and read-only. Mutation stays on
-explicit commands (`manage`, `update`, `enroll`, `revoke`, `release-*`).
+`show status` (`status`) is a fast snapshot. `doctor` is deeper and read-only.
+Configuration uses `set` / `unset`. Lifecycle uses `create`, `revoke`,
+`release`, `update`, and `restore`. Those verbs are not interchangeable.
 
 Official upstream binaries are `frps` and `frpc`. `frpctl` and the other `frp-*`
 commands belong to this project.
@@ -407,13 +414,16 @@ commands belong to this project.
 | Task | Command |
 | --- | --- |
 | Interactive CLI | `sudo frpctl` |
-| Client services | `sudo frpctl manage` / `sudo frp-client` |
-| List clients | `sudo frpctl clients` / `sudo frp-clients` |
-| Connection info | `sudo frpctl client NAME` / `sudo frp-client-info NAME` |
-| Enroll / zero-touch | `sudo frpctl enroll` / `sudo frp-create-client` |
-| Revoke identity | `sudo frpctl revoke NAME` / `sudo frp-revoke-client` |
-| Release one service | `sudo frpctl release-service NAME ID` |
-| Release client | `sudo frpctl release-client NAME` |
+| List clients | `sudo frpctl show clients` |
+| Client details | `sudo frpctl show client NAME` |
+| Set label / note / tag | `sudo frpctl set client NAME label VALUE` |
+| Unset metadata | `sudo frpctl unset client NAME label` |
+| Enroll / zero-touch | `sudo frpctl create enrollment --ssh --ssh-user USER --label NAME` |
+| Revoke identity | `sudo frpctl revoke client NAME` |
+| Release one service | `sudo frpctl release service NAME ID` |
+| Release client | `sudo frpctl release client NAME` |
+| Update project | `sudo frpctl update project` |
+| Client services | `sudo frpctl show services` / `sudo frpctl add service` |
 
 ---
 
