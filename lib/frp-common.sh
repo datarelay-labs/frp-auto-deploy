@@ -92,6 +92,30 @@ frp_default_client_update_url() {
   frp_github_raw_url dist/bootstrap-client.sh
 }
 
+frp_default_server_project_update_url() {
+  frp_github_raw_url dist/bootstrap-server.sh
+}
+
+frp_default_release_sha256sums_url() {
+  frp_github_raw_url SHA256SUMS
+}
+
+frp_sha256sum_entry() {
+  local sums_file="$1" artifact="$2"
+  [[ -f "$sums_file" ]] || return 1
+  awk -v name="$artifact" '
+    $2 == name && length($1) == 64 && $1 !~ /[^0-9a-fA-F]/ {
+      if (found) exit 2
+      digest=tolower($1)
+      found=1
+    }
+    END {
+      if (found == 1) print digest
+      else exit 1
+    }
+  ' "$sums_file"
+}
+
 frp_is_official_main_installer_url() {
   local url="${1:-}"
   [[ "$url" == "https://${FRP_GITHUB_RAW_HOST}/${FRP_GITHUB_OWNER}/${FRP_GITHUB_REPO}/main/dist/bootstrap-client.sh" ]]
