@@ -92,6 +92,43 @@ frp_default_client_update_url() {
   frp_github_raw_url dist/bootstrap-client.sh
 }
 
+frp_default_client_update_metadata_url() {
+  frp_github_raw_url SHA256SUMS
+}
+
+frp_validate_https_url() {
+  local url="${1:-}"
+  python3 - "$url" <<'PY'
+import sys
+from urllib.parse import urlsplit
+
+try:
+    parsed = urlsplit(sys.argv[1])
+    port = parsed.port
+except (TypeError, ValueError):
+    raise SystemExit(1)
+if (
+    parsed.scheme != "https"
+    or not parsed.hostname
+    or parsed.username is not None
+    or parsed.password is not None
+    or port is not None and not (1 <= port <= 65535)
+):
+    raise SystemExit(1)
+PY
+}
+
+frp_url_has_source_ref() {
+  local url="${1:-}" ref="${2:-}"
+  python3 - "$url" "$ref" <<'PY'
+import sys
+from urllib.parse import unquote, urlsplit
+
+parts = [unquote(part) for part in urlsplit(sys.argv[1]).path.split("/") if part]
+raise SystemExit(0 if sys.argv[2] in parts else 1)
+PY
+}
+
 frp_is_official_main_installer_url() {
   local url="${1:-}"
   [[ "$url" == "https://${FRP_GITHUB_RAW_HOST}/${FRP_GITHUB_OWNER}/${FRP_GITHUB_REPO}/main/dist/bootstrap-client.sh" ]]

@@ -31,6 +31,9 @@ fi
 if [[ -z "${FRP_CLIENT_UPDATE_URL:-}" ]]; then
   FRP_CLIENT_UPDATE_URL="$(frp_default_client_update_url)"
 fi
+if [[ -z "${FRP_CLIENT_UPDATE_METADATA_URL:-}" ]]; then
+  FRP_CLIENT_UPDATE_METADATA_URL="$(frp_default_client_update_metadata_url)"
+fi
 
 frp_client_path() {
   local p="$1"
@@ -3161,6 +3164,10 @@ PY
 frp_client_upgrade_restore_tools() {
   local backup="$1" live rel mode src base
   [[ -d "$backup" ]] || return 1
+  if [[ "${FRP_CLIENT_UPGRADE_HOOK_ROLLBACK_FAIL:-}" == "1" ]]; then
+    echo "ERROR: simulated update rollback failure" >&2
+    return 1
+  fi
   while IFS=: read -r rel mode src; do
     [[ -n "$rel" ]] || continue
     live="$(frp_client_path "/${rel}")"
@@ -3179,6 +3186,58 @@ frp_client_upgrade_restore_tools() {
     rm -f "$live"
   fi
   return 0
+}
+
+frp_client_upgrade_verify_restored() {
+  local backup="$1" live rel mode src base state
+  [[ -f "${backup}/manifest" ]] || return 1
+  while IFS=: read -r rel mode src; do
+    [[ -n "$rel" ]] || continue
+    live="$(frp_client_path "/${rel}")"
+    base="$(basename "$rel")"
+    state="$(awk -v b="$base" '$2==b {print $1; exit}' "${backup}/manifest")"
+    case "$state" in
+      present)
+        [[ -f "$live" && "$(frp_client_digest "$live")" == "$(frp_client_digest "${backup}/${base}")" ]] \
+          || return 1
+        ;;
+      absent)
+        [[ ! -e "$live" ]] || return 1
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  done < <(frp_client_upgrade_destinations)
+  live="$(frp_client_version_file)"
+  state="$(awk '$2=="version" {print $1; exit}' "${backup}/manifest")"
+  case "$state" in
+    present)
+      [[ -f "$live" && "$(frp_client_digest "$live")" == "$(frp_client_digest "${backup}/version")" ]] \
+        || return 1
+      ;;
+    absent)
+      [[ ! -e "$live" ]] || return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+frp_client_upgrade_rollback() {
+  local backup="$1" failure_class="${2:-FILE_COMMIT_FAILED}"
+  if frp_client_upgrade_restore_tools "$backup" \
+    && frp_client_upgrade_verify_restored "$backup"; then
+    echo "UPGRADE_ROLLBACK=PASS"
+    frp_emit_failure_class "$failure_class"
+    frp_txn_clear
+    return 0
+  fi
+  echo "UPGRADE_ROLLBACK=FAIL"
+  frp_emit_failure_class UPDATE_ROLLBACK_FAILED
+  echo "RECOVERY_REQUIRED" >&2
+  return 1
 }
 
 frp_client_upgrade_stage() {
@@ -3243,6 +3302,7 @@ frp_client_apply_upgrade() {
   local source="${1:-}"
   local check_only="${2:-0}"
   local previous target staged backup ident_before ident_after
+  local installed_bundle target_bundle update_needed=1
   local state_before toml_before access_before key_before pub_before mac_before
   local frp_before frp_after
 
@@ -3286,12 +3346,20 @@ PY
   fi
   frp_client_upgrade_source_version "$source"
   previous="$(frp_client_installed_project_version)"
+  installed_bundle="$(frp_client_installed_bundle_sha256)"
+  target_bundle="${FRP_BUNDLE_SHA256:-}"
   target="${PROJECT_VERSION}"
   frp_before="$(frp_client_installed_frp_version)"
   ident_before="$(frp_identity_status)"
 
   echo "Installed project version : ${previous}"
   echo "Target project version    : ${target}"
+  if [[ "$installed_bundle" != "unknown" ]]; then
+    echo "Installed bundle SHA256   : ${installed_bundle}"
+  fi
+  if [[ -n "$target_bundle" ]]; then
+    echo "Target bundle SHA256      : ${target_bundle}"
+  fi
   echo "FRP version               : ${FRP_VERSION}"
   echo
 
@@ -3306,8 +3374,14 @@ PY
     fi
   fi
 
+  if [[ -n "$target_bundle" && "$installed_bundle" == "$target_bundle" ]]; then
+    update_needed=0
+  elif [[ -z "$target_bundle" && "$previous" == "$target" ]]; then
+    update_needed=0
+  fi
+
   if [[ "$check_only" == "1" ]]; then
-    if [[ "$previous" == "$target" ]]; then
+    if [[ "$update_needed" == "0" ]]; then
       echo "Update                    : not needed"
     else
       echo "Update                    : available"
@@ -3315,6 +3389,11 @@ PY
     echo
     echo "A software update does not require an Enrollment Code."
     echo "Client state, public ports, and management identity are preserved."
+    return 0
+  fi
+
+  if [[ "$update_needed" == "0" && -n "$target_bundle" ]]; then
+    echo "Update                    : not needed"
     return 0
   fi
 
@@ -3337,7 +3416,7 @@ PY
   echo "Validating staged files..."
   if ! frp_client_upgrade_validate_staged "$staged"; then
     echo "ERROR: staged update failed validation; existing installation was not changed." >&2
-    echo "UPGRADE_ROLLBACK=PASS"
+    echo "UPGRADE_ROLLBACK=NOT_REQUIRED"
     return 1
   fi
 
@@ -3348,76 +3427,57 @@ PY
   echo "Installing management files..."
   if ! frp_client_upgrade_install_staged "$staged"; then
     echo "ERROR: tool install failed; restoring previous management files." >&2
-    frp_client_upgrade_restore_tools "$backup" || true
-    echo "UPGRADE_ROLLBACK=PASS"
-    frp_emit_failure_class FILE_COMMIT_FAILED
-    frp_txn_clear
+    frp_client_upgrade_rollback "$backup" FILE_COMMIT_FAILED || true
     return 1
   fi
 
   echo "Verifying upgrade..."
   if ! frp_client_upgrade_verify "$ident_before"; then
     echo "ERROR: post-upgrade verification failed; restoring previous management files." >&2
-    if frp_client_upgrade_restore_tools "$backup"; then
-      echo "UPGRADE_ROLLBACK=PASS"
-      frp_emit_failure_class HEALTH_CHECK_FAILED
-      frp_txn_clear
-    else
-      echo "UPGRADE_ROLLBACK=FAIL"
-      frp_emit_failure_class UPDATE_ROLLBACK_FAILED
-      echo "RECOVERY_REQUIRED" >&2
-    fi
+    frp_client_upgrade_rollback "$backup" HEALTH_CHECK_FAILED || true
     return 1
   fi
 
   echo "Writing project version..."
+  if [[ "${FRP_CLIENT_UPGRADE_HOOK_FAIL:-}" == "version" ]]; then
+    echo "ERROR: simulated version/build-info write failure" >&2
+    frp_client_upgrade_rollback "$backup" BUILD_INFO_WRITE_FAILED || true
+    return 1
+  fi
   if ! frp_client_write_version_file; then
     echo "ERROR: failed to write version file; restoring previous management files." >&2
-    if frp_client_upgrade_restore_tools "$backup"; then
-      echo "UPGRADE_ROLLBACK=PASS"
-      frp_txn_clear
-    else
-      echo "UPGRADE_ROLLBACK=FAIL"
-      frp_emit_failure_class UPDATE_ROLLBACK_FAILED
-      echo "RECOVERY_REQUIRED" >&2
-    fi
+    frp_client_upgrade_rollback "$backup" BUILD_INFO_WRITE_FAILED || true
     return 1
   fi
 
   if [[ "$(frp_client_digest "$(frp_client_state_path)")" != "$state_before" ]]; then
     echo "ERROR: client-state.json changed during software upgrade; restoring tools." >&2
-    frp_client_upgrade_restore_tools "$backup" || true
-    echo "UPGRADE_ROLLBACK=PASS"
+    frp_client_upgrade_rollback "$backup" STATE_PRESERVATION_FAILED || true
     return 1
   fi
   if [[ -n "$toml_before" && "$(frp_client_digest "$(frp_client_toml_path)")" != "$toml_before" ]]; then
     echo "ERROR: frpc.toml changed during software upgrade; restoring tools." >&2
-    frp_client_upgrade_restore_tools "$backup" || true
-    echo "UPGRADE_ROLLBACK=PASS"
+    frp_client_upgrade_rollback "$backup" STATE_PRESERVATION_FAILED || true
     return 1
   fi
   if [[ -n "$access_before" && "$(frp_client_digest "$(frp_client_access_path)")" != "$access_before" ]]; then
     echo "ERROR: access-info.txt changed during software upgrade; restoring tools." >&2
-    frp_client_upgrade_restore_tools "$backup" || true
-    echo "UPGRADE_ROLLBACK=PASS"
+    frp_client_upgrade_rollback "$backup" STATE_PRESERVATION_FAILED || true
     return 1
   fi
   if [[ -n "$key_before" && "$(frp_client_digest "$(frp_client_identity_key_path)")" != "$key_before" ]]; then
     echo "ERROR: management identity changed during software upgrade; restoring tools." >&2
-    frp_client_upgrade_restore_tools "$backup" || true
-    echo "UPGRADE_ROLLBACK=PASS"
+    frp_client_upgrade_rollback "$backup" STATE_PRESERVATION_FAILED || true
     return 1
   fi
   if [[ -n "$pub_before" && "$(frp_client_digest "$(frp_client_identity_pub_path)")" != "$pub_before" ]]; then
     echo "ERROR: management public identity changed during software upgrade; restoring tools." >&2
-    frp_client_upgrade_restore_tools "$backup" || true
-    echo "UPGRADE_ROLLBACK=PASS"
+    frp_client_upgrade_rollback "$backup" STATE_PRESERVATION_FAILED || true
     return 1
   fi
   if [[ -n "$mac_before" && "$(frp_client_digest "$(frp_client_identity_mac_path)")" != "$mac_before" ]]; then
     echo "ERROR: management identity MAC changed during software upgrade; restoring tools." >&2
-    frp_client_upgrade_restore_tools "$backup" || true
-    echo "UPGRADE_ROLLBACK=PASS"
+    frp_client_upgrade_rollback "$backup" STATE_PRESERVATION_FAILED || true
     return 1
   fi
 
@@ -3444,41 +3504,39 @@ PY
 
 frp_verify_client_update_artifact() {
   local archive="$1"
-  local expected="" sums_file=""
+  local sums_file="${2:-}"
+  local expected=""
   expected="${FRP_CLIENT_UPDATE_SHA256:-}"
-  if [[ -z "$expected" ]]; then
-    expected="$(frp_release_artifact_sha256 bootstrap-client.sh 2>/dev/null || true)"
+  if [[ -z "$expected" && -n "${FRP_RELEASE_SHA256SUMS_FILE:-}" ]]; then
+    sums_file="${FRP_RELEASE_SHA256SUMS_FILE}"
+  fi
+  if [[ -z "$expected" && -n "$sums_file" && -f "$sums_file" ]]; then
+    expected="$(awk '$2=="dist/bootstrap-client.sh" {print $1; exit}' "$sums_file")"
   fi
   if [[ -z "$expected" ]]; then
-    sums_file="${FRP_RELEASE_SHA256SUMS_FILE:-}"
-    if [[ -z "$sums_file" ]]; then
-      if [[ -f "${_FRP_CLIENT_COMMON_DIR}/../SHA256SUMS" ]]; then
-        sums_file="${_FRP_CLIENT_COMMON_DIR}/../SHA256SUMS"
-      elif [[ -f /usr/local/lib/frp-auto-deploy/SHA256SUMS ]]; then
-        sums_file=/usr/local/lib/frp-auto-deploy/SHA256SUMS
-      fi
-    fi
-    if [[ -n "$sums_file" && -f "$sums_file" ]]; then
-      expected="$(awk '$2=="dist/bootstrap-client.sh" {print $1; exit}' "$sums_file")"
-    fi
-  fi
-  if [[ -z "$expected" && "$(frp_release_channel)" == "stable" && -z "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
-    echo "ERROR: stable client update requires an expected SHA256 for the release artifact" >&2
+    echo "ERROR: update integrity metadata does not contain dist/bootstrap-client.sh" >&2
+    frp_emit_failure_class INTEGRITY_FAILED
     return 1
   fi
-  if [[ -n "$expected" ]]; then
-    frp_verify_sha256 "$expected" "$archive" >/dev/null || {
-      echo "ERROR: downloaded client update failed SHA256 verification" >&2
-      return 1
-    }
+  expected="$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')"
+  if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "ERROR: malformed SHA256 in client update integrity metadata" >&2
+    frp_emit_failure_class INTEGRITY_FAILED
+    return 1
   fi
+  if ! frp_verify_sha256 "$expected" "$archive" >/dev/null; then
+    echo "ERROR: downloaded client update failed SHA256 verification" >&2
+    frp_emit_failure_class INTEGRITY_FAILED
+    return 1
+  fi
+  FRP_VERIFIED_CLIENT_UPDATE_SHA256="$expected"
   return 0
 }
 
 frp_client_fetch_and_upgrade() {
   local source="${1:-}"
   local check_only="${2:-0}"
-  local tmp archive
+  local tmp archive metadata channel source_ref
   if [[ -n "$source" ]]; then
     frp_client_apply_upgrade "$source" "$check_only"
     return $?
@@ -3493,28 +3551,47 @@ frp_client_fetch_and_upgrade() {
   fi
   tmp="$(mktemp -d)"
   archive="${tmp}/bootstrap-client.sh"
+  metadata="${tmp}/SHA256SUMS"
   trap 'rm -rf "'"$tmp"'"' RETURN
   echo "Downloading frp-auto-deploy client update bundle..."
-  case "$FRP_CLIENT_UPDATE_URL" in
-    https://?*) ;;
-    *)
-      echo "ERROR: client update URL must be HTTPS" >&2
-      return 1
-      ;;
-  esac
-  curl -fL --retry 3 --connect-timeout 10 --max-time 120 -o "$archive" "$FRP_CLIENT_UPDATE_URL" || {
-    echo "ERROR: failed to download the client update bundle" >&2
+  channel="$(frp_release_channel)"
+  source_ref="$(frp_release_git_ref)"
+  if ! frp_validate_https_url "$FRP_CLIENT_UPDATE_URL"; then
+    echo "ERROR: client update URL must be a valid HTTPS URL" >&2
+    return 1
+  fi
+  if ! frp_validate_https_url "$FRP_CLIENT_UPDATE_METADATA_URL"; then
+    echo "ERROR: client update metadata URL must be a valid HTTPS URL" >&2
+    return 1
+  fi
+  if ! frp_url_has_source_ref "$FRP_CLIENT_UPDATE_URL" "$source_ref" \
+    || ! frp_url_has_source_ref "$FRP_CLIENT_UPDATE_METADATA_URL" "$source_ref"; then
+    echo "ERROR: client update artifact and metadata URLs must use source ref ${source_ref}" >&2
+    return 1
+  fi
+  curl -fL --retry 3 --connect-timeout 10 --max-time 120 -o "$metadata" "$FRP_CLIENT_UPDATE_METADATA_URL" || {
+    echo "ERROR: failed to download client update integrity metadata" >&2
+    frp_emit_failure_class INTEGRITY_FAILED
     return 1
   }
-  if ! frp_verify_client_update_artifact "$archive"; then
+  curl -fL --retry 3 --connect-timeout 10 --max-time 120 -o "$archive" "$FRP_CLIENT_UPDATE_URL" || {
+    echo "ERROR: failed to download the client update bundle" >&2
+    frp_emit_failure_class DOWNLOAD_FAILED
+    return 1
+  }
+  if ! frp_verify_client_update_artifact "$archive" "$metadata"; then
     return 1
   fi
   chmod 0755 "$archive"
   echo "Applying update from downloaded bundle..."
   # The bundle extracts a source tree and runs install-client.sh --upgrade.
   if [[ "$check_only" == "1" ]]; then
-    bash "$archive" --upgrade --check
+    FRP_BUNDLE_SHA256="$FRP_VERIFIED_CLIENT_UPDATE_SHA256" \
+      FRP_BUNDLE_FILE="$archive" FRP_RELEASE_CHANNEL="$channel" \
+      bash "$archive" --upgrade --check
   else
-    bash "$archive" --upgrade
+    FRP_BUNDLE_SHA256="$FRP_VERIFIED_CLIENT_UPDATE_SHA256" \
+      FRP_BUNDLE_FILE="$archive" FRP_RELEASE_CHANNEL="$channel" \
+      bash "$archive" --upgrade
   fi
 }

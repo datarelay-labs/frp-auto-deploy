@@ -388,7 +388,7 @@ fi
 unset FRP_CLIENT_UPGRADE_HOOK_FAIL
 assert_runtime_preserved "$ROLL" "$WORKDIR/roll.before" || fail "validate-fail mutated runtime"
 [[ "$(file_sha "$ROLL/usr/local/bin/frp-client")" == "$OLD_TOOL_SHA" ]] || fail "validate-fail replaced tools"
-grep -q 'UPGRADE_ROLLBACK=PASS' "$WORKDIR/roll-validate.out" "$WORKDIR/roll-validate.err" || fail "validate rollback marker"
+grep -q 'UPGRADE_ROLLBACK=NOT_REQUIRED' "$WORKDIR/roll-validate.out" "$WORKDIR/roll-validate.err" || fail "validate pre-mutation marker"
 [[ ! -x "$ROLL/usr/local/bin/frpctl" ]] || fail "validate-fail installed frpctl"
 
 export FRP_CLIENT_UPGRADE_HOOK_FAIL=install
@@ -412,9 +412,36 @@ unset FRP_CLIENT_UPGRADE_HOOK_FAIL
 assert_runtime_preserved "$ROLL" "$WORKDIR/roll.before" || fail "verify-fail mutated runtime"
 [[ "$(file_sha "$ROLL/usr/local/bin/frp-client")" == "$OLD_TOOL_SHA" ]] || fail "verify-fail did not restore tools"
 grep -q 'UPGRADE_ROLLBACK=PASS' "$WORKDIR/roll-verify.out" "$WORKDIR/roll-verify.err" || fail "verify rollback marker"
+
+export FRP_CLIENT_UPGRADE_HOOK_FAIL=version
+if "$ROOT/tools/frp-client" update --source "$ROOT" >"$WORKDIR/roll-version.out" 2>"$WORKDIR/roll-version.err"; then
+  fail "version write failure should fail upgrade"
+fi
+unset FRP_CLIENT_UPGRADE_HOOK_FAIL
+assert_runtime_preserved "$ROLL" "$WORKDIR/roll.before" || fail "version-fail mutated runtime"
+[[ "$(file_sha "$ROLL/usr/local/bin/frp-client")" == "$OLD_TOOL_SHA" ]] || fail "version-fail did not restore tools"
+grep -q 'UPGRADE_ROLLBACK=PASS' "$WORKDIR/roll-version.out" "$WORKDIR/roll-version.err" || fail "version rollback marker"
+grep -q 'BUILD_INFO_WRITE_FAILED' "$WORKDIR/roll-version.out" "$WORKDIR/roll-version.err" || fail "version failure class"
+
+ROLL_FAIL="$WORKDIR/rollback-failure"
+write_client_fixture "$ROLL_FAIL" 1 1
+export FRP_CLIENT_TEST_ROOT="$ROLL_FAIL"
+export FRP_CLIENT_UPGRADE_HOOK_FAIL=verify
+export FRP_CLIENT_UPGRADE_HOOK_ROLLBACK_FAIL=1
+if "$ROOT/tools/frp-client" update --source "$ROOT" >"$WORKDIR/rollback-failure.out" 2>"$WORKDIR/rollback-failure.err"; then
+  fail "rollback failure should fail upgrade"
+fi
+unset FRP_CLIENT_UPGRADE_HOOK_FAIL FRP_CLIENT_UPGRADE_HOOK_ROLLBACK_FAIL
+grep -q 'UPDATE_ROLLBACK_FAILED' "$WORKDIR/rollback-failure.out" "$WORKDIR/rollback-failure.err" || fail "rollback failure class"
+grep -q 'RECOVERY_REQUIRED' "$WORKDIR/rollback-failure.out" "$WORKDIR/rollback-failure.err" || fail "rollback recovery marker"
 pass "UPGRADE_ROLLBACK"
 pass "NO_PARTIAL_TOOL_INSTALL"
 pass "CLIENT_STATE_UNCHANGED_ON_FAILURE"
 pass "IDENTITY_UNCHANGED_ON_FAILURE"
+pass "STAGING_FAILURE_SAFE"
+pass "PARTIAL_INSTALL_ROLLBACK"
+pass "POST_VERIFY_ROLLBACK"
+pass "BUILD_INFO_WRITE_ROLLBACK"
+pass "ROLLBACK_FAILURE_CLASS"
 
 echo "CLIENT_UPGRADE_TESTS=PASS"

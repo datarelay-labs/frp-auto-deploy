@@ -58,6 +58,15 @@ fi
 grep -qi 'HTTPS' /tmp/frp-release-channel-http.err || fail "HTTPS requirement message missing"
 pass "UPDATE_HTTPS_REQUIRED"
 
+# A stable client also rejects mutable refs even when transport is HTTPS.
+export FRP_CLIENT_UPDATE_URL="https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh"
+export FRP_CLIENT_UPDATE_METADATA_URL="https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/SHA256SUMS"
+if frp_client_fetch_and_upgrade >/tmp/frp-release-channel-main.out 2>/tmp/frp-release-channel-main.err; then
+  fail "stable update should reject mutable main"
+fi
+grep -q "source ref v${PROJECT_VERSION}" /tmp/frp-release-channel-main.err || fail "stable ref rejection message missing"
+pass "STABLE_MUTABLE_REF_REJECTED"
+
 # Artifact SHA verification rejects a tampered payload when expected hash is set.
 GOOD="$FRP_CLIENT_TEST_ROOT/good.sh"
 echo '#!/bin/sh' >"$GOOD"
