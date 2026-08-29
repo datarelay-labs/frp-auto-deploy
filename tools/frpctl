@@ -283,15 +283,15 @@ frpctl_print_client_menu() {
 
 frpctl_print_server_menu() {
   echo "1) Status"
-  echo "2) List clients"
-  echo "3) Manage clients"
-  echo "4) Create enrollment"
-  echo "5) Client information"
-  echo "6) Revoke management access"
-  echo "7) Release service"
-  echo "8) Release client"
-  echo "9) Update"
-  echo "10) System diagnostics"
+  echo "2) Manage clients"
+  echo "3) Create client enrollment"
+  echo "4) Bulk enrollment"
+  echo "5) Pending enrollments"
+  echo "6) Backup / Restore"
+  echo "7) Project update"
+  echo "8) FRP runtime update"
+  echo "9) System diagnostics"
+  echo "10) Audit log"
   echo "11) Help"
   echo "12) Exit"
 }
@@ -597,44 +597,31 @@ frpctl_server_menu() {
     choice="$(frpctl_read "Select: " "")" || return 1
     case "$choice" in
       1) frpctl_run frp-server-status ;;
-      2) frpctl_run frp-clients ;;
-      3) frpctl_manage_clients ;;
-      4) frpctl_guided_enroll ;;
-      5)
-        client="$(frpctl_read "Client name: " "")"
-        if [[ -z "$client" ]]; then
-          echo "ERROR: client name is required" >&2
-          continue
-        fi
-        frpctl_run frp-client-info "$client"
-        ;;
+      2) frpctl_manage_clients ;;
+      3) frpctl_guided_enroll ;;
+      4) frpctl_run frp-enroll-bulk ;;
+      5) frpctl_run frp-enrollments ;;
       6)
-        client="$(frpctl_read "Client name: " "")"
-        if [[ -z "$client" ]]; then
-          echo "ERROR: client name is required" >&2
-          continue
-        fi
-        frpctl_run frp-revoke-client "$client"
+        echo "1) Backup"
+        echo "2) Restore"
+        sub="$(frpctl_read "Select: " "")"
+        case "$sub" in
+          1) frpctl_run frp-backup ;;
+          2)
+            path="$(frpctl_read "Backup path: " "")"
+            if [[ -z "$path" ]]; then
+              echo "ERROR: backup path is required" >&2
+              continue
+            fi
+            frpctl_run frp-restore "$path"
+            ;;
+          *) echo "ERROR: select 1-2" >&2 ;;
+        esac
         ;;
-      7)
-        client="$(frpctl_read "Client name: " "")"
-        sid="$(frpctl_read "Service ID: " "")"
-        if [[ -z "$client" || -z "$sid" ]]; then
-          echo "ERROR: client name and service ID are required" >&2
-          continue
-        fi
-        frpctl_run frp-release-service "$client" "$sid"
-        ;;
-      8)
-        client="$(frpctl_read "Client name: " "")"
-        if [[ -z "$client" ]]; then
-          echo "ERROR: client name is required" >&2
-          continue
-        fi
-        frpctl_run frp-release-client "$client"
-        ;;
-      9) frpctl_run frp-update ;;
-      10) frpctl_dispatch doctor || true ;;
+      7) frpctl_run frp-project-update ;;
+      8) frpctl_run frp-update ;;
+      9) frpctl_dispatch doctor || true ;;
+      10) frpctl_audit_tail ;;
       11) frpctl_usage ;;
       12)
         echo "Exit."
@@ -795,8 +782,11 @@ frpctl_help_server_body() {
 Clients
   clients               List registered clients
   client <name>         Show client information
-  client-set <name>     Set administrator label/description
+  client-set <name>     Set administrator label/description/tags
   enroll                Create a short-lived Enrollment Code
+  enroll-bulk           Create independent enrollment tickets
+  enrollments           List pending enrollment tickets
+  enrollment-revoke     Revoke an unused or bound ticket
 
 Security
   revoke <name>         Revoke client management access
@@ -810,7 +800,13 @@ Reservations
 System
   status                Show server status
   doctor                Run read-only health and consistency checks
-  update                Update the tested FRP binary on this server
+  backup                Back up server control state (contains secrets)
+  restore <file>        Restore a validated backup archive
+  project-update        Update frp-auto-deploy server management software
+  frp-update            Update the tested/pinned FRP binary
+  update                Alias for frp-update on a server-only host
+  upstream              Show pinned vs latest upstream FRP (no install)
+  audit                 Show recent audit events
   version               Show installed versions
 EOF
 }
@@ -886,6 +882,22 @@ frpctl_clear_screen() {
   fi
 }
 
+frpctl_audit_tail() {
+  python3 - "${FRP_DEPLOY_TEST_ROOT:-${FRP_CTL_TEST_ROOT:-}}" <<'PY'
+import os, sys
+from pathlib import Path
+root = sys.argv[1]
+path = Path("/var/log/frp-auto-deploy/audit.jsonl")
+if root:
+    path = Path(root + "/var/log/frp-auto-deploy/audit.jsonl")
+if not path.is_file():
+    print("(no audit log)")
+    raise SystemExit(0)
+lines = path.read_text(encoding="utf-8").splitlines()[-50:]
+print("\n".join(lines) if lines else "(no audit log)")
+PY
+}
+
 frpctl_known_commands() {
   local client=0 server=0
   frpctl_is_client && client=1
@@ -896,7 +908,9 @@ frpctl_known_commands() {
   fi
   if [[ "$server" == "1" ]]; then
     printf '%s\n' clients client client-info client-set edit-client enroll create-client \
+      enroll-bulk enrollments enrollment-revoke \
       revoke revoke-client release-service release-client \
+      backup restore project-update frp-update upstream audit \
       server-status server-update
   fi
 }
@@ -1401,9 +1415,49 @@ frpctl_dispatch() {
       frpctl_require_client || return 1
       frpctl_client_update "$@"
       ;;
-    server-update)
+    server-update|frp-update)
       frpctl_require_server || return 1
       frpctl_run frp-update "$@"
+      ;;
+    project-update)
+      frpctl_require_server || return 1
+      frpctl_run frp-project-update "$@"
+      ;;
+    backup)
+      frpctl_require_server || return 1
+      frpctl_run frp-backup "$@"
+      ;;
+    restore)
+      frpctl_require_server || return 1
+      if [[ $# -lt 1 ]]; then
+        frpctl_usage_error "restore <backup>"
+        return $?
+      fi
+      frpctl_run frp-restore "$@"
+      ;;
+    enroll-bulk)
+      frpctl_require_server || return 1
+      frpctl_invoke frp-enroll-bulk "$@"
+      ;;
+    enrollments)
+      frpctl_require_server || return 1
+      frpctl_invoke frp-enrollments "$@"
+      ;;
+    enrollment-revoke)
+      frpctl_require_server || return 1
+      if [[ $# -lt 1 ]]; then
+        frpctl_usage_error "enrollment-revoke <id>"
+        return $?
+      fi
+      frpctl_invoke frp-enrollment-revoke "$@"
+      ;;
+    upstream)
+      frpctl_require_server || return 1
+      frpctl_run frp-upstream "$@"
+      ;;
+    audit)
+      frpctl_require_server || return 1
+      frpctl_audit_tail
       ;;
     clear)
       frpctl_clear_screen

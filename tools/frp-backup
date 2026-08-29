@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -186,6 +187,16 @@ def main() -> int:
     create_backup(root, output)
     print("WARNING: this backup contains private keys, authentication tokens, and enrollment secrets.")
     print(f"Backup created: {output}")
+    try:
+        here = Path(__file__).resolve()
+        audit_path = here.parent.parent / "lib" / "frp_audit.py"
+        if audit_path.is_file():
+            spec = importlib.util.spec_from_file_location("frp_audit", str(audit_path))
+            audit = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(audit)
+            audit.emit("backup.created", details={"path": str(output.name)})
+    except Exception:
+        pass
     return 0
 
 

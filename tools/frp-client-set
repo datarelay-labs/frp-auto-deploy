@@ -192,4 +192,24 @@ for key in tag_removals:
     print('Removed tag: %s' % key)
 for key, value in sorted(tag_updates.items()):
     print('Tag   : %s=%s' % (key, value))
+try:
+    here = Path(__file__).resolve()
+    audit_path = here.parent.parent / 'lib' / 'frp_audit.py'
+    if audit_path.is_file():
+        spec = importlib.util.spec_from_file_location('frp_audit', str(audit_path))
+        audit = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(audit)
+        event = 'client.metadata_changed'
+        if tag_updates and not tag_removals and label is None and note is None:
+            event = 'client.tag_added'
+        elif tag_removals and not tag_updates and label is None and note is None:
+            event = 'client.tag_removed'
+        audit.emit(
+            event,
+            client_id=mid,
+            label=after.get('label'),
+            details={'tags_added': sorted(tag_updates), 'tags_removed': tag_removals},
+        )
+except Exception:
+    pass
 print('Hostname, machine ID, public ports, and management identity were not changed.')

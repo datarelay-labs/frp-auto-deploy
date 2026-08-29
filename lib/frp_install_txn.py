@@ -44,6 +44,7 @@ SNAPSHOT_RELS = (
     'usr/local/lib/frp-auto-deploy/frp_install_txn.py',
     'usr/local/lib/frp-auto-deploy/frp-server-upgrade.sh',
     'usr/local/lib/frp-auto-deploy/frp_client_registry.py',
+    'usr/local/lib/frp-auto-deploy/frp_audit.py',
     'usr/local/lib/frp-auto-deploy/release-manifest.json',
     'usr/local/lib/frp-auto-deploy/SHA256SUMS',
     'usr/local/sbin/frp-create-client',
@@ -59,7 +60,10 @@ SNAPSHOT_RELS = (
     'usr/local/sbin/frp-set-client-installer-url',
     'usr/local/sbin/frp-server-status',
     'usr/local/sbin/frp-project-update',
+    'usr/local/sbin/frp-backup',
+    'usr/local/sbin/frp-restore',
     'usr/local/sbin/frp-update',
+    'usr/local/sbin/frp-upstream',
     'usr/local/sbin/frpctl',
     'etc/frp-auto-deploy/version',
 )
