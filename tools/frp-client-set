@@ -183,15 +183,21 @@ try:
 finally:
     unlock_registry(lock_fd)
 
-print('Updated %s (%s)' % (CREG.display_name(client, mid), CREG.short_machine_id(mid)))
+print('Updated %s (%s)' % (
+    CREG.sanitize_display(CREG.display_name(client, mid), 64),
+    CREG.sanitize_display(CREG.short_machine_id(mid), 16),
+))
 if label is not None:
-    print('Label : %s' % label)
+    print('Label : %s' % CREG.sanitize_display(label, 64))
 if note is not None:
-    print('Note  : %s' % note)
+    print('Note  : %s' % CREG.sanitize_display(note, 1024))
 for key in tag_removals:
-    print('Removed tag: %s' % key)
+    print('Removed tag: %s' % CREG.sanitize_display(key, 32))
 for key, value in sorted(tag_updates.items()):
-    print('Tag   : %s=%s' % (key, value))
+    print('Tag   : %s=%s' % (
+        CREG.sanitize_display(key, 32),
+        CREG.sanitize_display(value, 64),
+    ))
 try:
     here = Path(__file__).resolve()
     audit_path = here.parent.parent / 'lib' / 'frp_audit.py'

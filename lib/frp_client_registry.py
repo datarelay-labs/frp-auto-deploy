@@ -193,7 +193,7 @@ def validate_label(value, required=False):
         if required:
             raise ValueError('client name/label is required')
         return ''
-    if any(ord(c) < 32 for c in text):
+    if any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in text):
         raise ValueError('client name/label must not contain control characters')
     if len(text) > LABEL_MAX_LEN:
         raise ValueError('client name/label must be at most %s characters' % LABEL_MAX_LEN)
@@ -213,8 +213,8 @@ def validate_tag_key(value):
     text = '' if value is None else str(value).strip()
     if not text:
         raise ValueError('tag key is required')
-    if any(ch in text for ch in ('\x00', '\x1b', '\r', '\n')):
-        raise ValueError('tag key must not contain ESC, NUL, CR, or LF')
+    if any(ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in text):
+        raise ValueError('tag key must not contain control characters')
     if len(text) > TAG_KEY_MAX_LEN:
         raise ValueError('tag key must be at most %s characters' % TAG_KEY_MAX_LEN)
     if not TAG_KEY_RE.fullmatch(text):
@@ -229,8 +229,8 @@ def validate_tag_value(value):
     text = '' if value is None else str(value).strip()
     if not text:
         raise ValueError('tag value is required')
-    if any(ch in text for ch in ('\x00', '\x1b', '\r', '\n')):
-        raise ValueError('tag value must not contain ESC, NUL, CR, or LF')
+    if any(ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in text):
+        raise ValueError('tag value must not contain control characters')
     if len(text) > TAG_VALUE_MAX_LEN:
         raise ValueError('tag value must be at most %s characters' % TAG_VALUE_MAX_LEN)
     if not TAG_VALUE_RE.fullmatch(text):

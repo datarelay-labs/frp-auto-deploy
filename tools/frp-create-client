@@ -108,7 +108,7 @@ def reject_control_chars(label, value):
     if value is None:
         return
     text = str(value)
-    if any(ord(c) < 32 for c in text):
+    if any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in text):
         fail('%s must not contain control characters or newlines' % label)
 
 
@@ -309,7 +309,7 @@ def validate_prompt_ssh_user(raw):
     user = normalize_ssh_user(raw)
     if not user:
         return '', 'SSH username cannot be blank.'
-    if any(ord(c) < 32 for c in user):
+    if any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in user):
         return '', 'SSH username must not contain control characters or newlines'
     if not SSH_USER_RE.fullmatch(user):
         return '', 'invalid ssh_user'
@@ -320,7 +320,7 @@ def validate_prompt_label(raw):
     text = '' if raw is None else str(raw).strip()
     if not text:
         return '', 'Client name cannot be blank.'
-    if any(ord(c) < 32 for c in text):
+    if any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in text):
         return '', 'Client name must not contain control characters or newlines'
     if len(text) > 64:
         return '', 'Client name must be at most 64 characters'
@@ -350,7 +350,7 @@ def prompt_client_identification(existing_name, existing_note):
     if not str(existing_note or '').strip():
         entered = read_prompt('Description [optional]: ')
         note = '' if entered is None else str(entered).strip()
-        if any(ord(c) < 32 for c in note):
+        if any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in note):
             fail('Description must not contain control characters or newlines')
         if len(note) > 1024:
             fail('Description must be at most 1024 characters')

@@ -96,13 +96,6 @@ args = parser.parse_args()
 
 
 def ensure_releasable(services, force=False):
-    for _sid, service in services.items():
-        if not isinstance(service, dict):
-            continue
-        if str(service.get('preset') or '').lower() == 'ssh' and not service.get('ssh_user'):
-            raise SystemExit(
-                'Refusing to release a legacy SSH reservation without ssh_user metadata.'
-            )
     snapshot = CREG.passive_listening_ports()
     states = [
         CREG.passive_port_state(service.get('remote_port'), snapshot)
@@ -143,7 +136,7 @@ if ports:
     print('Services:')
     for sid, port, enabled in ports:
         suffix = '' if enabled else ' (reserved)'
-        print(f'  {sid}: {port}{suffix}')
+        print(f'  {CREG.sanitize_display(sid, 32)}: {port}{suffix}')
 else:
     print('Services: (none)')
 answer = input('Type RELEASE to continue: ')

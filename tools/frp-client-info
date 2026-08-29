@@ -80,8 +80,8 @@ print('=' * max(8, len(label) + 8))
 print()
 print(f'Label          : {label}')
 print(f'Hostname       : {hostname}')
-print(f'Machine ID     : {mid}')
-print(f'Client ID      : {CREG.short_machine_id(mid)}')
+print(f'Machine ID     : {CREG.sanitize_display(mid, 128)}')
+print(f'Client ID      : {CREG.sanitize_display(CREG.short_machine_id(mid), 16)}')
 print(f'Management     : {CREG.mgmt_status(client)}')
 fp = str(client.get('mgmt_fingerprint') or '')
 if fp:
@@ -104,6 +104,7 @@ for sid, svc in enabled:
     local_port = svc.get('local_port')
     remote_port = svc.get('remote_port')
     preset = svc.get('preset') or 'custom'
+    sid = CREG.sanitize_display(sid, 32)
     name = CREG.sanitize_display(svc.get('name') or sid)
     print()
     print(name if name != sid else sid)

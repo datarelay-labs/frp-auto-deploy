@@ -1489,10 +1489,12 @@ preset = str(raw.get('preset', 'custom') or 'custom').strip().lower()
 if preset not in ('ssh', 'http', 'https', 'custom'):
     raise SystemExit('ERROR: invalid service preset')
 name = str(raw.get('name', '') or sid).strip() or sid
-if len(name) > 64 or '\n' in name or '\r' in name:
+if len(name) > 64 or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in name):
     raise SystemExit('ERROR: invalid service display name')
 local_ip = str(raw.get('local_ip', '')).strip()
-if not local_ip or any(c in local_ip for c in ' \t\r\n/\\;|&$`\'"<>'):
+if (not local_ip or len(local_ip) > 253
+        or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in local_ip)
+        or any(c in local_ip for c in ' /\\;|&$`\'"<>')):
     raise SystemExit('ERROR: invalid target host')
 try:
     local_port = int(str(raw.get('local_port', '')).strip())
@@ -1545,10 +1547,12 @@ def add(path, raw):
     if preset not in ('ssh', 'http', 'https', 'custom'):
         raise SystemExit('ERROR: invalid service preset')
     name = str(raw.get('name', '') or sid).strip() or sid
-    if len(name) > 64 or '\n' in name or '\r' in name:
+    if len(name) > 64 or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in name):
         raise SystemExit('ERROR: invalid service display name')
     local_ip = str(raw.get('local_ip', '')).strip()
-    if not local_ip or any(c in local_ip for c in ' \t\r\n/\\;|&$`\'"<>'):
+    if (not local_ip or len(local_ip) > 253
+            or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in local_ip)
+            or any(c in local_ip for c in ' /\\;|&$`\'"<>')):
         raise SystemExit('ERROR: invalid target host')
     try:
         local_port = int(str(raw.get('local_port', '')).strip())
@@ -1750,20 +1754,24 @@ if isinstance(raw, dict) and 'services' in raw:
 else:
     services = raw
 lines = [f'FRP Server: {server}', '', 'Services:', '']
+def clean(value, limit=253):
+    text = str(value or '')
+    return ''.join(' ' if ord(c) < 32 or 127 <= ord(c) <= 159 else c for c in text)[:limit].strip()
+server = clean(server)
 for item in services:
     if item.get('enabled', True) is False:
         continue
-    sid = item['id']
-    name = item.get('name') or sid
+    sid = clean(item['id'], 32)
+    name = clean(item.get('name') or sid, 64)
     preset = item.get('preset') or 'custom'
-    local_ip = item.get('local_ip')
+    local_ip = clean(item.get('local_ip'))
     local_port = item.get('local_port')
     remote_port = item.get('remote_port')
     lines.append(sid if name == sid else f'{sid} ({name})')
     lines.append(f'  Target : {local_ip}:{local_port}')
     lines.append(f'  Public : {server}:{remote_port}')
     if preset == 'ssh':
-        user = item.get('ssh_user')
+        user = clean(item.get('ssh_user'), 32)
         if user:
             lines.append('  Connect:')
             lines.append(f'    ssh -p {remote_port} {user}@{server}')

@@ -133,7 +133,9 @@ services = client.get('services') or {}
 if not isinstance(services, dict):
     services = {}
 
-print(f'Revoking management identity for {CREG.display_name(client, mid)} ({mid})')
+print(f'Revoking management identity for '
+      f'{CREG.sanitize_display(CREG.display_name(client, mid), 64)} '
+      f'({CREG.sanitize_display(mid, 128)})')
 print(f'Management identity : {status}')
 print(f'Fingerprint         : {short_fp}')
 print('Service reservations will be kept:')
@@ -143,7 +145,7 @@ if services:
             continue
         port = svc.get('remote_port') or '-'
         suffix = '' if svc.get('enabled', True) else ' (reserved)'
-        print(f'  {sid}: {port}{suffix}')
+        print(f'  {CREG.sanitize_display(sid, 32)}: {port}{suffix}')
 else:
     print('  (none)')
 print()

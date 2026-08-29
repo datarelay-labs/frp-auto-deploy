@@ -50,10 +50,12 @@ preset = str(raw.get('preset', 'custom') or 'custom').strip().lower()
 if preset not in ('ssh', 'http', 'https', 'custom'):
     raise SystemExit('ERROR: invalid service preset')
 name = str(raw.get('name', '') or sid).strip() or sid
-if len(name) > 64 or '\n' in name or '\r' in name:
+if len(name) > 64 or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in name):
     raise SystemExit('ERROR: invalid service display name')
 local_ip = str(raw.get('local_ip', '')).strip()
-if not local_ip or any(c in local_ip for c in ' \t\r\n/\\;|&$`\'"<>'):
+if (not local_ip or len(local_ip) > 253
+        or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in local_ip)
+        or any(c in local_ip for c in ' /\\;|&$`\'"<>')):
     raise SystemExit('ERROR: invalid target host')
 try:
     local_port = int(str(raw.get('local_port', '')).strip())
@@ -73,7 +75,9 @@ item = {
     'enabled': True,
 }
 if preset == 'ssh':
-    ssh_user = str(raw.get('ssh_user', '') or 'root').strip() or 'root'
+    ssh_user = str(raw.get('ssh_user', '') or '').strip()
+    if not ssh_user:
+        raise SystemExit('ERROR: ssh_user is required for ssh services')
     if not re.fullmatch(r'[A-Za-z0-9._@-]{1,32}', ssh_user):
         raise SystemExit('ERROR: invalid ssh_user')
     item['ssh_user'] = ssh_user
@@ -232,7 +236,10 @@ frp_client_info() {
 import json, sys
 from pathlib import Path
 data = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
-server = data.get('frp_server', '')
+def clean(value, limit=253):
+    text = str(value or '')
+    return ''.join(' ' if ord(c) < 32 or 127 <= ord(c) <= 159 else c for c in text)[:limit].strip()
+server = clean(data.get('frp_server', ''))
 print(f'FRP Server: {server}')
 print()
 print('Services:')
@@ -240,15 +247,20 @@ print()
 for sid, item in (data.get('services') or {}).items():
     if item.get('enabled', True) is False:
         continue
-    name = item.get('name') or sid
+    sid = clean(sid, 32)
+    name = clean(item.get('name') or sid, 64)
     remote = item.get('remote_port')
     print(sid if name == sid else f'{sid} ({name})')
-    print(f"  Target : {item.get('local_ip')}:{item.get('local_port')}")
+    print(f"  Target : {clean(item.get('local_ip'))}:{item.get('local_port')}")
     print(f"  Public : {server}:{remote}")
     preset = item.get('preset') or 'custom'
     if preset == 'ssh':
-        print('  Connect:')
-        print(f"    ssh -p {remote} {item.get('ssh_user') or 'root'}@{server}")
+        user = clean(item.get('ssh_user'), 32)
+        if user:
+            print('  Connect:')
+            print(f"    ssh -p {remote} {user}@{server}")
+        else:
+            print('  SSH user: legacy / unspecified')
     elif preset == 'http':
         print('  URL:')
         print(f'    http://{server}:{remote}')
@@ -318,7 +330,7 @@ item=json.loads(Path(sys.argv[1]).read_text())['services'][sys.argv[2]]
 print(item.get('name',''))
 print(item.get('local_ip',''))
 print(item.get('local_port',''))
-print(item.get('ssh_user','root'))
+print(item.get('ssh_user',''))
 print(item.get('preset','custom'))
 PY
 )"
@@ -337,8 +349,7 @@ PY
   port="$(read_tty "Target port [${old_port}]: " "$old_port")"
   user="$old_user"
   if [[ "$preset" == ssh ]]; then
-    frp_ux_ssh_user_help
-    user="$(read_tty "SSH user [${old_user}]: " "$old_user")"
+    frp_prompt_ssh_user user "$old_user"
   fi
   maybe_warn_connectivity "$host" "$port" "TCP"
   if ! python3 - "$CANDIDATE_FILE" "$sid" "$name" "$host" "$port" "$user" <<'PY'
@@ -348,9 +359,11 @@ path = Path(sys.argv[1])
 sid, name, host, port, user = sys.argv[2:7]
 state = json.loads(path.read_text(encoding='utf-8'))
 item = state['services'][sid]
-if len(name) > 64 or '\n' in name or '\r' in name:
+if len(name) > 64 or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in name):
     raise SystemExit('ERROR: invalid service display name')
-if not host or any(c in host for c in ' \t\r\n/\\;|&$`\'"<>'):
+if (not host or len(host) > 253
+        or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in host)
+        or any(c in host for c in ' /\\;|&$`\'"<>')):
     raise SystemExit('ERROR: invalid target host')
 try:
     local_port = int(port)
@@ -362,6 +375,8 @@ item['name'] = name.strip() or sid
 item['local_ip'] = host
 item['local_port'] = local_port
 if item.get('preset') == 'ssh':
+    if not str(user or '').strip():
+        raise SystemExit('ERROR: ssh_user is required for ssh services')
     if not re.fullmatch(r'[A-Za-z0-9._@-]{1,32}', user):
         raise SystemExit('ERROR: invalid ssh_user')
     item['ssh_user'] = user

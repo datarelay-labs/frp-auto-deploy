@@ -194,8 +194,83 @@ state['clients']['aabbccdd']={
     'api':{'name':'API','protocol':'tcp','local_ip':'127.0.0.1','local_port':8080,'remote_port':6004,'preset':'custom','enabled':False},
   },
 }
+state['clients']['legacy00aa']={
+  'hostname':'legacy-ssh',
+  'services':{
+    'ssh':{'name':'SSH','protocol':'tcp','local_ip':'127.0.0.1','local_port':22,'remote_port':6010,'preset':'ssh','enabled':True},
+  },
+}
 p.write_text(json.dumps(state, indent=2, sort_keys=True)+'\n')
 PY
+
+python3 "$ROOT/tools/frp-clients" >"$WORKDIR/legacy-clients.out"
+grep -q 'legacy / unspecified' "$WORKDIR/legacy-clients.out" || fail "legacy SSH user display"
+python3 "$ROOT/tools/frp-client-info" legacy-ssh >"$WORKDIR/legacy-info.out"
+grep -q 'legacy / unspecified' "$WORKDIR/legacy-info.out" || fail "legacy SSH info display"
+python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY' || fail "list mutated legacy record"
+import json,sys
+from pathlib import Path
+state=json.loads(Path(sys.argv[1]).read_text())
+assert 'legacy00aa' in state['clients']
+assert 'aabbccdd' in state['clients']
+assert state['clients']['aabbccdd']['services']['ssh']['remote_port']==6002
+assert state['clients']['legacy00aa']['services']['ssh']['remote_port']==6010
+assert 'ssh_user' not in state['clients']['legacy00aa']['services']['ssh']
+PY
+cp "$TREE/var/lib/frp-auto-deploy/registry.json" "$WORKDIR/legacy.before"
+printf 'nope\n' | python3 "$ROOT/tools/frp-release-client" legacy-ssh \
+  >"$WORKDIR/legacy-cancel.out" 2>"$WORKDIR/legacy-cancel.err" && fail "legacy cancel should fail"
+cmp -s "$TREE/var/lib/frp-auto-deploy/registry.json" "$WORKDIR/legacy.before" ||
+  fail "cancelled legacy release mutated registry"
+pass "legacy SSH readable without auto-release"
+
+printf 'RELEASE\n' | python3 "$ROOT/tools/frp-release-service" legacy-ssh ssh \
+  >"$WORKDIR/legacy-svc-release.out"
+python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY' || fail "explicit legacy service release"
+import json,sys
+from pathlib import Path
+state=json.loads(Path(sys.argv[1]).read_text())
+assert 'legacy00aa' not in state['clients']
+assert state['clients']['aabbccdd']['services']['ssh']['remote_port']==6002
+assert all(
+    svc.get('remote_port') != 6010
+    for client in state['clients'].values()
+    for svc in (client.get('services') or {}).values()
+    if isinstance(svc, dict)
+)
+PY
+pass "legacy explicit service release reclaims port"
+
+python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY'
+import json,sys
+from pathlib import Path
+p=Path(sys.argv[1])
+state=json.loads(p.read_text())
+state['clients']['legacy00aa']={
+  'hostname':'legacy-ssh',
+  'services':{
+    'ssh':{'name':'SSH','protocol':'tcp','local_ip':'127.0.0.1','local_port':22,'remote_port':6010,'preset':'ssh','enabled':True},
+  },
+}
+p.write_text(json.dumps(state, indent=2, sort_keys=True)+'\n')
+PY
+printf 'RELEASE\n' | python3 "$ROOT/tools/frp-release-client" legacy-ssh --force \
+  >"$WORKDIR/legacy-force-release.out"
+python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY' || fail "forced legacy client release"
+import json,sys
+from pathlib import Path
+state=json.loads(Path(sys.argv[1]).read_text())
+assert 'legacy00aa' not in state['clients']
+assert 'aabbccdd' in state['clients']
+assert state['clients']['aabbccdd']['services']['ssh']['remote_port']==6002
+assert all(
+    svc.get('remote_port') != 6010
+    for client in state['clients'].values()
+    for svc in (client.get('services') or {}).values()
+    if isinstance(svc, dict)
+)
+PY
+pass "legacy force release reclaims port"
 
 # shellcheck source=../lib/frp-common.sh
 . "$ROOT/lib/frp-common.sh"
