@@ -10,7 +10,7 @@ fail() { echo "FAIL $1" >&2; exit 1; }
 
 # shellcheck disable=SC1091
 . "$ROOT/VERSION"
-[[ "$PROJECT_VERSION" == "2.1.0" ]] || fail "VERSION project is $PROJECT_VERSION"
+[[ "$PROJECT_VERSION" == "2.1.1" ]] || fail "VERSION project is $PROJECT_VERSION"
 [[ "$FRP_VERSION" == "0.70.1" ]] || fail "VERSION FRP is $FRP_VERSION"
 pass "VERSION_FILE"
 
@@ -114,16 +114,17 @@ pass "NO_TLS_VERIFY_DISABLE"
 pass "NO_CURL_K_PRODUCTION_FLOW"
 
 if grep -nE 'release candidate' README.md CHANGELOG.md docs/SECURITY.md docs/DEPLOYMENT_MODES.md; then
-  fail "docs still describe 2.1.0 as a release candidate"
+  fail "docs still describe the current release as a release candidate"
 fi
-if grep -nE 'v2\.1\.0 is not tagged|not a tagged stable release until|not created until real-environment' README.md CHANGELOG.md docs/*.md; then
-  fail "docs still say v2.1.0 is untagged"
+if grep -nE 'v2\.1\.1 is not tagged|not a tagged stable release until|not created until real-environment' README.md CHANGELOG.md docs/*.md; then
+  fail "docs still say v2.1.1 is untagged"
 fi
 grep -qF 'current stable release' README.md || fail "README missing stable wording"
-grep -qE '^## 2\.1\.0 — ' CHANGELOG.md || fail "CHANGELOG missing 2.1.0 heading"
+grep -qE '^## 2\.1\.1 — ' CHANGELOG.md || fail "CHANGELOG missing 2.1.1 heading"
+grep -qE '^## 2\.1\.0 — ' CHANGELOG.md || fail "CHANGELOG missing historical 2.1.0 heading"
 pass "VERSION_STABLE_WORDING"
 
-grep -qF 'v2.1.0/dist/bootstrap-server.sh' README.md || fail "README missing immutable server bootstrap URL"
+grep -qF "v${PROJECT_VERSION}/dist/bootstrap-server.sh" README.md || fail "README missing immutable server bootstrap URL"
 if grep -nE 'raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-(server|client)\.sh' \
   README.md docs/SCHEMA_V2_DEPLOYMENT.md docs/DEPLOYMENT_MODES.md GITHUB_SETUP.md; then
   fail "stable docs still point bootstrap installs at mutable main"
@@ -146,15 +147,15 @@ pass "REAL_ACCEPTANCE_RECORDED"
 
 chmod +x "$ROOT/scripts/validate-release-tag.sh"
 TMPERR="$(mktemp)"
-if "$ROOT/scripts/validate-release-tag.sh" v2.1.1 >/dev/null 2>"$TMPERR"; then
+if "$ROOT/scripts/validate-release-tag.sh" v2.1.2 >/dev/null 2>"$TMPERR"; then
   rm -f "$TMPERR"
-  fail "v2.1.1 must not validate against PROJECT_VERSION=2.1.0"
+  fail "v2.1.2 must not validate against PROJECT_VERSION=2.1.1"
 fi
-grep -q 'PROJECT_VERSION=2.1.0' "$TMPERR" || fail "tag mismatch diagnostic"
+grep -q 'PROJECT_VERSION=2.1.1' "$TMPERR" || fail "tag mismatch diagnostic"
 rm -f "$TMPERR"
 "$ROOT/scripts/validate-release-tag.sh" "v${PROJECT_VERSION}" >/dev/null || fail "current VERSION tag should validate"
-grep -q 'Do \*\*not\*\* tag the current `PROJECT_VERSION=2.1.0`' docs/RELEASE_CHECKLIST.md ||
-  fail "checklist missing 2.1.1 procedure"
+grep -q 'Do \*\*not\*\* tag a tree whose `PROJECT_VERSION` does not match' docs/RELEASE_CHECKLIST.md ||
+  fail "checklist missing release version gate procedure"
 pass "P1_RELEASE_VERSION_GATE"
 
 echo "RELEASE_DOCS_TEST=PASS"

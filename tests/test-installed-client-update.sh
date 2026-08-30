@@ -155,6 +155,17 @@ BUILD_SRC="$WORKDIR/build-src"
 mkdir -p "$BUILD_SRC"
 cp -a "$ROOT/." "$BUILD_SRC/"
 rm -rf "$BUILD_SRC/.git" "$BUILD_SRC/dist"
+# This harness exercises the explicit-dev remote update path; rewrite candidate
+# metadata to channel=dev / main even when the repository tree is a stable RC.
+python3 - "$BUILD_SRC/release-manifest.json" <<'PY'
+import json, sys
+from pathlib import Path
+p = Path(sys.argv[1])
+d = json.loads(p.read_text())
+d["channel"] = "dev"
+d["git_ref"] = "main"
+p.write_text(json.dumps(d, indent=2) + "\n")
+PY
 python3 "$BUILD_SRC/scripts/build-bundles.py" >/dev/null
 BUNDLE_A="$WORKDIR/bootstrap-client-a.sh"
 cp "$BUILD_SRC/dist/bootstrap-client.sh" "$BUNDLE_A"
@@ -278,13 +289,16 @@ pass "NO_UNNECESSARY_RESTART"
 pass "BUILD_INFO_PERSISTENCE"
 
 # A stable installed client resolves both artifact and metadata at vPROJECT_VERSION.
+# shellcheck source=../VERSION
+. "$ROOT/VERSION"
 cp "$CLIENT/etc/frp-auto-deploy/version" "$WORKDIR/dev-version"
-python3 - "$CLIENT/etc/frp-auto-deploy/version" <<'PY'
+python3 - "$CLIENT/etc/frp-auto-deploy/version" "$PROJECT_VERSION" <<'PY'
 import sys
 from pathlib import Path
 p = Path(sys.argv[1])
+ver = sys.argv[2]
 text = p.read_text().replace("RELEASE_CHANNEL=dev", "RELEASE_CHANNEL=stable")
-text = text.replace("SOURCE_REF=main", "SOURCE_REF=v2.1.0")
+text = text.replace("SOURCE_REF=main", "SOURCE_REF=v%s" % ver)
 p.write_text(text)
 PY
 unset FRP_CLIENT_UPDATE_URL FRP_CLIENT_UPDATE_METADATA_URL
@@ -293,14 +307,14 @@ stable_urls="$(
   FRP_CLIENT_LIB="$CLIENT/usr/local/lib/frp-auto-deploy/frp-client-common.sh" \
     bash -c '. "$FRP_CLIENT_LIB"; printf "%s\n%s\n" "$FRP_CLIENT_UPDATE_URL" "$FRP_CLIENT_UPDATE_METADATA_URL"'
 )"
-grep -q '/v2.1.0/dist/bootstrap-client.sh' <<<"$stable_urls" || fail "stable artifact URL mutable"
-grep -q '/v2.1.0/SHA256SUMS' <<<"$stable_urls" || fail "stable metadata URL mutable"
+grep -q "/v${PROJECT_VERSION}/dist/bootstrap-client.sh" <<<"$stable_urls" || fail "stable artifact URL mutable"
+grep -q "/v${PROJECT_VERSION}/SHA256SUMS" <<<"$stable_urls" || fail "stable metadata URL mutable"
 : >"$MOCK_CURL_LOG"
 if "$CLIENT/usr/local/bin/frpctl" update --check >"$WORKDIR/stable-check.out" 2>"$WORKDIR/stable-check.err"; then
   fail "stable expected channel must not accept a dev candidate"
 fi
-grep -q '/v2.1.0/SHA256SUMS' "$MOCK_CURL_LOG" || fail "stable metadata was not fetched from tag"
-grep -q '/v2.1.0/dist/bootstrap-client.sh' "$MOCK_CURL_LOG" || fail "stable artifact was not fetched from tag"
+grep -q "/v${PROJECT_VERSION}/SHA256SUMS" "$MOCK_CURL_LOG" || fail "stable metadata was not fetched from tag"
+grep -q "/v${PROJECT_VERSION}/dist/bootstrap-client.sh" "$MOCK_CURL_LOG" || fail "stable artifact was not fetched from tag"
 grep -Eqi 'channel mismatch|source ref mismatch|WRONG_METADATA' \
   "$WORKDIR/stable-check.out" "$WORKDIR/stable-check.err" ||
   fail "stable/dev candidate mismatch not reported"

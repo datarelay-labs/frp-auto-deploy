@@ -79,18 +79,25 @@ if frp_verify_client_update_artifact "$GOOD"; then
 fi
 pass "UPDATE_SHA256_VERIFIED"
 
-# Working-tree manifest must not claim the frozen stable tag identity.
-python3 - "$ROOT/release-manifest.json" <<'PY' || fail "manifest channel/ref"
+# Working-tree manifest must match VERSION / channel / git_ref agreement.
+python3 - "$ROOT/release-manifest.json" "$ROOT/VERSION" <<'PY' || fail "manifest channel/ref"
 import json, sys
 from pathlib import Path
 data = json.loads(Path(sys.argv[1]).read_text())
-assert data.get('channel') == 'dev', data.get('channel')
-assert data.get('git_ref') == 'main', data.get('git_ref')
-assert 'bootstrap-server.sh' in (data.get('artifacts') or {})
-server = data['artifacts']['bootstrap-server.sh']
-assert not server.get('sha256'), 'server bundle hash must not live in the embedded manifest'
+values = {}
+for line in Path(sys.argv[2]).read_text().splitlines():
+    if "=" in line:
+        k, v = line.split("=", 1)
+        values[k.strip()] = v.strip()
+project = values["PROJECT_VERSION"]
+assert data.get("project_version") == project, data.get("project_version")
+assert data.get("channel") == "stable", data.get("channel")
+assert data.get("git_ref") == "v%s" % project, data.get("git_ref")
+assert "bootstrap-server.sh" in (data.get("artifacts") or {})
+server = data["artifacts"]["bootstrap-server.sh"]
+assert not server.get("sha256"), "server bundle hash must not live in the embedded manifest"
 PY
-pass "NO_FALSE_STABLE_REPORT"
+pass "STABLE_MANIFEST_IDENTITY"
 
 # Persist channel across installer re-runs and missing env.
 persist="$(mktemp -d)"
