@@ -991,18 +991,17 @@ except Exception:
     raise SystemExit(0)
 if not isinstance(state, dict):
     raise SystemExit(0)
-names = []
-for client in (state.get('clients') or {}).values():
-    if not isinstance(client, dict):
-        continue
-    host = str(client.get('hostname') or '').strip()
-    label = str(client.get('label') or '').strip()
-    if host and '\n' not in host and '\r' not in host:
-        names.append(host)
-    if label and '\n' not in label and '\r' not in label:
-        names.append(label)
-for name in sorted(set(names)):
-    print(name)
+    names = []
+    for client in (state.get('clients') or {}).values():
+        if not isinstance(client, dict):
+            continue
+        host = str(client.get('hostname') or '').strip()
+        label = str(client.get('label') or '').strip()
+        name = label or host
+        if name and '\n' not in name and '\r' not in name:
+            names.append(name)
+    for name in sorted(set(names)):
+        print(name)
 PY
 }
 
@@ -1123,34 +1122,66 @@ frpctl_complete_line() {
   frpctl_grammar_call complete-line "$extra"
 }
 
-frpctl_readline_complete() {
-  local line="${READLINE_LINE-}"
-  local point="${READLINE_POINT-0}"
-  local -a cands=()
-  local new=""
-  if [[ "$point" != "${#line}" ]]; then
-    return 0
-  fi
-  mapfile -t cands < <(frpctl_completion_candidates "$line" || true)
-  if [[ ${#cands[@]} -eq 0 ]]; then
-    return 0
-  fi
-  if [[ ${#cands[@]} -eq 1 ]]; then
-    new="$(frpctl_complete_line "$line")"
-    READLINE_LINE="$new"
-    READLINE_POINT=${#READLINE_LINE}
-    return 0
-  fi
-  new="$(frpctl_complete_line "$line")"
-  READLINE_LINE="$new"
-  READLINE_POINT=${#READLINE_LINE}
+frpctl_tab_reset() {
+  _FRP_CTL_LAST_TAB_LINE=""
+  _FRP_CTL_LAST_TAB_POINT=""
+  _FRP_CTL_LAST_TAB_CANDIDATES=""
+  _FRP_CTL_TAB_REPEAT_COUNT=0
+}
+
+frpctl_tab_print_candidates() {
+  local -a cands=("$@")
+  local c
+  [[ ${#cands[@]} -gt 0 ]] || return 0
   printf '\n' >&2
   printf '%s' "${cands[0]}" >&2
-  local c
   for c in "${cands[@]:1}"; do
     printf '  %s' "$c" >&2
   done
   printf '\n' >&2
+}
+
+# bind -x Tab handler. Completes the current line only.
+# Does not run the command parser/dispatcher (no match/incomplete help).
+frpctl_readline_complete() {
+  local line="${READLINE_LINE-}"
+  local point="${READLINE_POINT-0}"
+  local -a cands=()
+  local new="" joined=""
+  if [[ "$point" != "${#line}" ]]; then
+    frpctl_tab_reset
+    return 0
+  fi
+  mapfile -t cands < <(frpctl_completion_candidates "$line" || true)
+  if [[ ${#cands[@]} -eq 0 ]]; then
+    frpctl_tab_reset
+    return 0
+  fi
+  new="$(frpctl_complete_line "$line")"
+  if [[ "$new" != "$line" ]]; then
+    READLINE_LINE="$new"
+    READLINE_POINT=${#READLINE_LINE}
+    frpctl_tab_reset
+    return 0
+  fi
+  if [[ ${#cands[@]} -eq 1 ]]; then
+    frpctl_tab_reset
+    return 0
+  fi
+  joined="$(printf '%s\n' "${cands[@]}")"
+  if [[ "${_FRP_CTL_LAST_TAB_LINE-}" == "$line" \
+     && "${_FRP_CTL_LAST_TAB_POINT-}" == "$point" \
+     && "${_FRP_CTL_LAST_TAB_CANDIDATES-}" == "$joined" ]]; then
+    _FRP_CTL_TAB_REPEAT_COUNT=$(( ${_FRP_CTL_TAB_REPEAT_COUNT:-0} + 1 ))
+  else
+    _FRP_CTL_LAST_TAB_LINE="$line"
+    _FRP_CTL_LAST_TAB_POINT="$point"
+    _FRP_CTL_LAST_TAB_CANDIDATES="$joined"
+    _FRP_CTL_TAB_REPEAT_COUNT=1
+  fi
+  if [[ "${_FRP_CTL_TAB_REPEAT_COUNT}" -eq 2 ]]; then
+    frpctl_tab_print_candidates "${cands[@]}"
+  fi
   return 0
 }
 
@@ -1744,6 +1775,7 @@ frpctl_repl() {
   _FRP_CTL_SHOULD_EXIT=0
   _FRP_CTL_SIGINT=0
   _FRP_CTL_BOUND_TAB=""
+  frpctl_tab_reset
   trap 'frpctl_repl_sigint' INT
 
   if [[ -z "${FRP_CTL_TEST_INPUT:-}" && -t 0 ]]; then

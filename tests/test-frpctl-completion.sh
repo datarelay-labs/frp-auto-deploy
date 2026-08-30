@@ -224,6 +224,15 @@ if echo "$secret_out" | grep -qiE 'server_token|BEGIN .*PRIVATE KEY'; then
   fail "secret-like material in completion"
 fi
 pass "NO_SECRET_COMPLETION"
+sel_secret="$(cands "show client "; cands "set client "; cands "revoke client "; cands "release client ")"
+if echo "$sel_secret" | grep -qE 'SECRET_MAC_KEY_SHOULD_NOT_LEAK|SECRET_PUBKEY_SHOULD_NOT_LEAK|OTHER_SECRET_MAC'; then
+  fail "selector completion leaked secret"
+fi
+echo "$sel_secret" | has_line oci-e2e-renamed || fail "selector completion missing NAME"
+if echo "$sel_secret" | has_line dp-os-upgrade; then
+  fail "selector completion listed hostname beside NAME"
+fi
+pass "NO_SECRET_SELECTOR_COMPLETION"
 
 # --- No arbitrary shell / eval completion
 [[ -z "$(cands bash)" ]] || fail "bash must not complete"
@@ -420,5 +429,247 @@ PY
 pass "FRPCTL_UP_ARROW_HISTORY"
 pass "FRPCTL_DOWN_ARROW_HISTORY"
 pass "UP_DOWN_HISTORY"
+
+# Restore a plain label so later NAME completion stays simple, then PTY-test Tab UX.
+python3 - "$SERVER/var/lib/frp-auto-deploy/registry.json" <<'PY'
+import json, sys
+from pathlib import Path
+p = Path(sys.argv[1])
+d = json.loads(p.read_text())
+d["clients"]["aabbccdd0011"]["label"] = "oci-e2e-renamed"
+p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
+PY
+
+python3 - "$CTL" "$SERVER" "$WORKDIR/pty-tab-home" <<'PY' || fail "PTY tab interaction"
+import errno
+import os
+import pty
+import re
+import select
+import sys
+import time
+
+ctl, tree, home = sys.argv[1:4]
+os.makedirs(home, exist_ok=True)
+env = os.environ.copy()
+env.update({
+    "HOME": home,
+    "HISTFILE": "",
+    "TERM": "xterm",
+    "FRP_CTL_TEST_ROOT": tree,
+    "FRP_CTL_DRY_RUN": "1",
+    "FRP_CTL_BIN_DIR": os.path.join(os.path.dirname(ctl)),
+    "FRP_SKIP_SYSTEMD": "1",
+    "FRP_UPDATE_TEST_HARNESS": "0",
+})
+env.pop("FRP_CTL_TEST_INPUT", None)
+env.pop("FRP_CTL_SOURCED", None)
+env.pop("FRP_CTL_DISABLE_TAB", None)
+
+ANSI_RE = re.compile(br"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()].")
+LIST_RE = re.compile(
+    rb"(?:^|\n)([A-Za-z0-9_./-]+(?: {2}[A-Za-z0-9_./-]+)+)(?:\n|$)"
+)
+
+
+def strip_ansi(data):
+    return ANSI_RE.sub(b"", data)
+
+
+def visible(data):
+    return strip_ansi(data).replace(b"\r", b"").replace(b"\x00", b"")
+
+
+def list_blocks(data):
+    return LIST_RE.findall(visible(data))
+
+
+pid, fd = pty.fork()
+if pid == 0:
+    os.chdir(home)
+    os.execve("/bin/bash", ["bash", ctl], env)
+
+buf = bytearray()
+
+
+def read_more(seconds):
+    end = time.time() + seconds
+    while time.time() < end:
+        remain = max(0.0, end - time.time())
+        r, _, _ = select.select([fd], [], [], min(0.2, remain))
+        if not r:
+            continue
+        try:
+            chunk = os.read(fd, 4096)
+        except OSError as exc:
+            if exc.errno == errno.EIO:
+                break
+            raise
+        if not chunk:
+            break
+        buf.extend(chunk)
+
+
+def wait_prompt(timeout=8):
+    end = time.time() + timeout
+    while time.time() < end:
+        read_more(0.25)
+        stripped = strip_ansi(bytes(buf)).replace(b"\r", b"").rstrip(b"\x00")
+        if stripped.endswith(b"frpctl> ") or stripped.endswith(b"frpctl>"):
+            return True
+    return False
+
+
+def fail_pty(msg, extra=b""):
+    os.write(2, msg.encode() + b"\n" + extra[-800:])
+    raise SystemExit(1)
+
+
+if not wait_prompt():
+    fail_pty("PTY: no initial prompt", bytes(buf))
+
+# Unique match: statu<Tab> completes inline, no candidate list / extra prompt.
+before = len(buf)
+os.write(fd, b"statu")
+read_more(0.4)
+os.write(fd, b"\t")
+read_more(0.8)
+unique_chunk = bytes(buf[before:])
+if list_blocks(unique_chunk):
+    fail_pty("PTY: unique tab printed a candidate list", unique_chunk)
+if b"Missing resource" in unique_chunk or b"Unknown command" in unique_chunk:
+    fail_pty("PTY: unique tab dispatched a command", unique_chunk)
+os.write(fd, b"\r")
+if not wait_prompt():
+    fail_pty("PTY: no prompt after unique completion", bytes(buf[before:]))
+after_unique = bytes(buf[before:])
+if b"DISPATCH frp-server-status" not in after_unique:
+    fail_pty("PTY: unique tab did not complete status", after_unique)
+print("TAB_UNIQUE_INLINE_NO_NEWLINE")
+
+# Common prefix: show c<Tab> -> show client, no list.
+before = len(buf)
+os.write(fd, b"show c")
+read_more(0.4)
+os.write(fd, b"\t")
+read_more(0.8)
+prefix_chunk = bytes(buf[before:])
+if list_blocks(prefix_chunk):
+    fail_pty("PTY: common-prefix tab printed a candidate list", prefix_chunk)
+if b"Missing client" in prefix_chunk or b"Unknown show resource" in prefix_chunk:
+    fail_pty("PTY: common-prefix tab dispatched", prefix_chunk)
+os.write(fd, b"\r")
+if not wait_prompt():
+    fail_pty("PTY: no prompt after common-prefix completion", bytes(buf[before:]))
+after_prefix = bytes(buf[before:])
+if b"Missing client" not in after_prefix:
+    fail_pty("PTY: common-prefix tab did not extend to show client", after_prefix)
+if b"Unknown show resource" in after_prefix:
+    fail_pty("PTY: show c was submitted without extension", after_prefix)
+print("TAB_COMMON_PREFIX_INLINE_NO_LIST")
+
+# Ambiguous: set <Tab> silent, second Tab lists once, third does not repeat.
+before = len(buf)
+os.write(fd, b"set ")
+read_more(0.4)
+os.write(fd, b"\t")
+read_more(0.8)
+first = bytes(buf[before:])
+if list_blocks(first):
+    fail_pty("PTY: first ambiguous tab printed candidates", first)
+if b"Missing resource" in first:
+    fail_pty("PTY: first ambiguous tab ran incomplete dispatch", first)
+print("TAB_AMBIGUOUS_FIRST_NO_OUTPUT")
+print("TAB_DOES_NOT_RUN_INCOMPLETE_DISPATCH")
+
+mid = len(buf)
+os.write(fd, b"\t")
+read_more(0.8)
+second = bytes(buf[mid:])
+blocks = list_blocks(second)
+if not blocks:
+    fail_pty("PTY: second ambiguous tab did not list candidates", second)
+joined = b" ".join(blocks)
+if b"client" not in joined or b"installer-url" not in joined:
+    fail_pty("PTY: second tab list missing expected resources", second)
+if b"Missing resource" in second:
+    fail_pty("PTY: second tab ran incomplete dispatch", second)
+print("TAB_AMBIGUOUS_SECOND_SHOWS_ONCE")
+
+listed = visible(second).count(b"installer-url")
+third_at = len(buf)
+os.write(fd, b"\t")
+read_more(0.8)
+third = bytes(buf[third_at:])
+if visible(third).count(b"installer-url") > 0 and list_blocks(third):
+    fail_pty("PTY: third tab reprinted the candidate list", third)
+if visible(bytes(buf[mid:])).count(b"installer-url") != listed:
+    fail_pty("PTY: candidate list repeated after third tab", bytes(buf[mid:]))
+print("TAB_AMBIGUOUS_THIRD_NO_DUPLICATE_LIST")
+
+# Line change resets double-Tab state: edit token, first Tab silent, second lists.
+os.write(fd, b"\x15")  # Ctrl-U clear line
+read_more(0.3)
+before = len(buf)
+os.write(fd, b"show ")
+read_more(0.3)
+os.write(fd, b"\t")
+read_more(0.8)
+reset_first = bytes(buf[before:])
+if list_blocks(reset_first):
+    fail_pty("PTY: first tab after line change printed a list", reset_first)
+mid = len(buf)
+os.write(fd, b"\t")
+read_more(0.8)
+reset_second = bytes(buf[mid:])
+reset_blocks = list_blocks(reset_second)
+if not reset_blocks:
+    fail_pty("PTY: second tab after line change did not list", reset_second)
+print("TAB_LINE_CHANGE_RESETS_REPEAT")
+os.write(fd, b"\x15")
+read_more(0.2)
+os.write(fd, b"\r")
+if not wait_prompt():
+    fail_pty("PTY: no prompt after clearing show ", bytes(buf[before:]))
+
+# History recall then Tab completion.
+os.write(fd, b"show version\r")
+if not wait_prompt():
+    fail_pty("PTY: no prompt after show version", bytes(buf[-400:]))
+os.write(fd, b"\x1b[A")
+read_more(0.5)
+os.write(fd, b"\x15")
+read_more(0.3)
+before = len(buf)
+os.write(fd, b"statu")
+read_more(0.3)
+os.write(fd, b"\t")
+read_more(0.8)
+hist_tab = bytes(buf[before:])
+if list_blocks(hist_tab):
+    fail_pty("PTY: tab after history printed a list", hist_tab)
+os.write(fd, b"\r")
+if not wait_prompt():
+    fail_pty("PTY: no prompt after history+tab", bytes(buf[before:]))
+if b"DISPATCH frp-server-status" not in bytes(buf[before:]):
+    fail_pty("PTY: tab after history did not complete status", bytes(buf[before:]))
+print("TAB_HISTORY_RECALL_COMPATIBLE")
+
+os.write(fd, b"exit\r")
+read_more(1.0)
+os.close(fd)
+_, status = os.waitpid(pid, 0)
+if os.WIFEXITED(status) and os.WEXITSTATUS(status) not in (0,):
+    raise SystemExit(1)
+print("PTY_TAB_OK")
+PY
+pass "TAB_UNIQUE_INLINE_NO_NEWLINE"
+pass "TAB_COMMON_PREFIX_INLINE_NO_LIST"
+pass "TAB_AMBIGUOUS_FIRST_NO_OUTPUT"
+pass "TAB_AMBIGUOUS_SECOND_SHOWS_ONCE"
+pass "TAB_AMBIGUOUS_THIRD_NO_DUPLICATE_LIST"
+pass "TAB_LINE_CHANGE_RESETS_REPEAT"
+pass "TAB_HISTORY_RECALL_COMPATIBLE"
+pass "TAB_DOES_NOT_RUN_INCOMPLETE_DISPATCH"
 
 echo "FRPCTL_COMPLETION_TESTS=PASS"

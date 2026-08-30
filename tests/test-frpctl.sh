@@ -501,7 +501,7 @@ pass "FRPCTL_UPDATE_COMMANDS"
 
 run_repl "$SERVER" "$WORKDIR/incomplete.out" "set client oci-e2e-renamed" exit || fail "incomplete set"
 grep -q 'Missing client setting' "$WORKDIR/incomplete.out" || fail "incomplete message"
-grep -q 'set client <client> label <value>' "$WORKDIR/incomplete.out" || fail "incomplete usage"
+grep -q 'set client <NAME> label <value>' "$WORKDIR/incomplete.out" || fail "incomplete usage"
 pass "FRPCTL_INCOMPLETE_SET"
 
 export FRP_CTL_DRY_RUN=1
@@ -538,7 +538,7 @@ pass "DIRECT_SCRIPT_COMPATIBILITY"
 export FRP_CTL_TEST_ROOT="$SERVER"
 run_repl "$SERVER" "$WORKDIR/help-set.out" "help set client" exit || fail "help set client"
 grep -q 'Set client configuration' "$WORKDIR/help-set.out" || fail "help set heading"
-grep -q 'set client <client> tag' "$WORKDIR/help-set.out" || fail "help set tag"
+grep -q 'set client <NAME> tag' "$WORKDIR/help-set.out" || fail "help set tag"
 pass "CONTEXT_HELP"
 
 run_repl "$SERVER" "$WORKDIR/help-legacy.out" "help legacy" exit || fail "help legacy"
@@ -583,5 +583,108 @@ unset FRP_CTL_DRY_RUN
 pass "GUIDED_MENU_METADATA"
 pass "GUIDED_MENU_TAGS"
 pass "GUIDED_MENU_UPDATED"
+
+# --- Canonical client NAME selector (real tools, not dry-run)
+python3 - "$SERVER/var/lib/frp-auto-deploy/registry.json" <<'PY'
+import json, sys
+from pathlib import Path
+p = Path(sys.argv[1])
+data = json.loads(p.read_text())
+data["clients"]["24cd7856aabbccdd0011223344556677"] = {
+    "hostname": "aaa-host",
+    "label": "aaa",
+    "mgmt_status": "enrolled",
+    "mgmt_mac_key": "SECRET_MAC_SELECTOR_AAA",
+    "services": {
+        "ssh": {
+            "id": "ssh", "remote_port": 6001, "enabled": True,
+            "preset": "ssh", "ssh_user": "aella",
+        }
+    },
+}
+data["clients"]["0303cedf99999999aabbccdd00112233"] = {
+    "hostname": "aella",
+    "mgmt_status": "enrolled",
+    "mgmt_mac_key": "SECRET_MAC_SELECTOR_AELLA",
+    "services": {
+        "ssh": {
+            "id": "ssh", "remote_port": 6005, "enabled": True,
+            "preset": "ssh", "ssh_user": "aella",
+        }
+    },
+}
+p.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+PY
+unset FRP_CTL_DRY_RUN
+export FRP_CTL_TEST_ROOT="$SERVER"
+export FRP_DEPLOY_TEST_ROOT="$SERVER"
+python3 "$ROOT/tools/frp-clients" >"$WORKDIR/sel-list.out"
+grep -qE '^#[[:space:]]+NAME[[:space:]]+HOSTNAME' "$WORKDIR/sel-list.out" || fail "NAME column"
+grep -qE '^[[:space:]]*[0-9]+[[:space:]]+aaa[[:space:]]+' "$WORKDIR/sel-list.out" || fail "NAME aaa"
+grep -qE '^[[:space:]]*[0-9]+[[:space:]]+aella[[:space:]]+' "$WORKDIR/sel-list.out" || fail "NAME aella"
+grep -qE '^[[:space:]]*[0-9]+[[:space:]]+oci-e2e-renamed[[:space:]]+' "$WORKDIR/sel-list.out" \
+  || fail "NAME from label"
+grep -q 'dp-os-upgrade' "$WORKDIR/sel-list.out" || fail "hostname column kept"
+grep -q 'Use NAME in client commands.' "$WORKDIR/sel-list.out" || fail "NAME footer"
+if grep -q 'SECRET_MAC_SELECTOR' "$WORKDIR/sel-list.out"; then
+  fail "selector list leaked secret"
+fi
+pass "CLIENT_SELECTOR_CANONICAL_NAME"
+
+FRP_CTL_REPL=1 "$CTL" show client aaa >"$WORKDIR/sel-label.out"
+grep -qi 'aaa' "$WORKDIR/sel-label.out" || fail "show client label NAME"
+pass "CLIENT_SELECTOR_LABEL"
+
+FRP_CTL_REPL=1 "$CTL" show client dp-os-upgrade >"$WORKDIR/sel-host.out"
+grep -q 'dp-os-upgrade' "$WORKDIR/sel-host.out" || fail "hostname lookup"
+pass "CLIENT_SELECTOR_HOSTNAME"
+
+FRP_CTL_REPL=1 "$CTL" show client 0303cedf >"$WORKDIR/sel-prefix.out"
+grep -q 'aella' "$WORKDIR/sel-prefix.out" || fail "id prefix lookup"
+pass "CLIENT_SELECTOR_ID_PREFIX"
+
+set +e
+FRP_CTL_REPL=1 "$CTL" show client 'aella@129.225.184.60:6000' >"$WORKDIR/sel-ssh.out" 2>"$WORKDIR/sel-ssh.err"
+ssh_rc=$?
+set -e
+[[ "$ssh_rc" -ne 0 ]] || fail "ssh endpoint should not resolve"
+cat "$WORKDIR/sel-ssh.err" >>"$WORKDIR/sel-ssh.out"
+grep -q 'ERROR: client not found: aella@129.225.184.60:6000' "$WORKDIR/sel-ssh.out" \
+  || fail "ssh endpoint not-found quote"
+grep -q 'Use a client NAME, unique hostname, or Client ID prefix.' "$WORKDIR/sel-ssh.out" \
+  || fail "ssh endpoint guidance"
+grep -q 'show clients' "$WORKDIR/sel-ssh.out" || fail "ssh endpoint show clients hint"
+if grep -q 'SECRET_MAC_SELECTOR' "$WORKDIR/sel-ssh.out"; then
+  fail "not-found leaked secret"
+fi
+pass "CLIENT_SELECTOR_SSH_ENDPOINT_REJECTED_HELPFULLY"
+
+run_repl "$SERVER" "$WORKDIR/miss-show.out" "show client" exit || fail "show client missing"
+grep -q 'Missing client.' "$WORKDIR/miss-show.out" || fail "show missing title"
+grep -q 'Available clients:' "$WORKDIR/miss-show.out" || fail "show missing available"
+grep -qE '^[[:space:]]+aaa$' "$WORKDIR/miss-show.out" || fail "show missing lists aaa"
+grep -qE '^[[:space:]]+aella$' "$WORKDIR/miss-show.out" || fail "show missing lists aella"
+grep -q 'show client <NAME>' "$WORKDIR/miss-show.out" || fail "show missing usage NAME"
+grep -q 'unique hostname' "$WORKDIR/miss-show.out" || fail "show missing hostname hint"
+grep -q 'Press Tab after "show client "' "$WORKDIR/miss-show.out" || fail "show missing tab tip"
+if grep -q 'SECRET_MAC_SELECTOR' "$WORKDIR/miss-show.out"; then
+  fail "missing-client help leaked secret"
+fi
+pass "SHOW_CLIENT_MISSING_TARGET_HELP"
+
+run_repl "$SERVER" "$WORKDIR/miss-set.out" "set client" exit || fail "set client missing"
+grep -q 'Missing client.' "$WORKDIR/miss-set.out" || fail "set missing title"
+grep -q 'Available clients:' "$WORKDIR/miss-set.out" || fail "set missing available"
+grep -qE '^[[:space:]]+aaa$' "$WORKDIR/miss-set.out" || fail "set missing lists aaa"
+grep -q 'set client <NAME> label <value>' "$WORKDIR/miss-set.out" || fail "set missing usage"
+grep -q 'Press Tab after "set client "' "$WORKDIR/miss-set.out" || fail "set missing tab tip"
+run_repl "$SERVER" "$WORKDIR/miss-unset.out" "unset client" exit || fail "unset client missing"
+grep -q 'Missing client.' "$WORKDIR/miss-unset.out" || fail "unset missing title"
+grep -q 'unset client <NAME> label' "$WORKDIR/miss-unset.out" || fail "unset missing usage"
+run_repl "$SERVER" "$WORKDIR/miss-revoke.out" "revoke client" exit || fail "revoke client missing"
+grep -q 'revoke client <NAME>' "$WORKDIR/miss-revoke.out" || fail "revoke missing usage"
+run_repl "$SERVER" "$WORKDIR/miss-release.out" "release client" exit || fail "release client missing"
+grep -q 'release client <NAME>' "$WORKDIR/miss-release.out" || fail "release missing usage"
+pass "SET_CLIENT_MISSING_TARGET_HELP"
 
 echo "FRPCTL_TESTS=PASS"

@@ -201,6 +201,46 @@ def incomplete(title, usage_lines, available=None, examples=None):
     return {"status": "incomplete", "message": "\n".join(parts)}
 
 
+def _safe_names(names):
+    out = []
+    seen = set()
+    for item in names or []:
+        text = str(item or "").strip()
+        if not text or "\n" in text or "\r" in text:
+            continue
+        if text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return sorted(out, key=str.lower)
+
+
+def missing_client_help(usage_lines, names=None, tip_after="show client "):
+    """Enter-submitted incomplete client target. Tab must not call this."""
+    parts = ["Missing client.", ""]
+    available = _safe_names(names)
+    if available:
+        parts.append("Available clients:")
+        for name in available:
+            parts.append("  %s" % name)
+        parts.append("")
+    parts.append("Usage:")
+    for line in usage_lines:
+        parts.append("  %s" % line)
+    parts.extend(
+        [
+            "",
+            "Also accepted:",
+            "  unique hostname",
+            "  unique Client ID / machine-ID prefix",
+            "",
+            "Tip:",
+            '  Press Tab after "%s"' % tip_after,
+        ]
+    )
+    return {"status": "incomplete", "message": "\n".join(parts)}
+
+
 def help_text(tokens, role):
     tokens = [t for t in tokens if t and t != "help"]
     client, server = _role_parts(role)
@@ -253,9 +293,9 @@ def _root_help(role):
         lines.extend(
             [
                 "  show clients",
-                "  show client <client>",
-                "  show client <client> services",
-                "  show client <client> tags",
+                "  show client <NAME>",
+                "  show client <NAME> services",
+                "  show client <NAME> tags",
                 "  show enrollments",
                 "  show audit",
                 "  show upstream",
@@ -267,12 +307,12 @@ def _root_help(role):
     if server:
         lines.extend(
             [
-                "  set client <client> label <value>",
-                "  set client <client> note <value>",
-                "  set client <client> tag <key>=<value>",
-                "  unset client <client> label",
-                "  unset client <client> note",
-                "  unset client <client> tag <key>",
+                "  set client <NAME> label <value>",
+                "  set client <NAME> note <value>",
+                "  set client <NAME> tag <key>=<value>",
+                "  unset client <NAME> label",
+                "  unset client <NAME> note",
+                "  unset client <NAME> tag <key>",
             ]
         )
     if client:
@@ -297,9 +337,9 @@ def _root_help(role):
                 "  create enrollments --count N",
                 "  create backup",
                 "  revoke enrollment <id>",
-                "  revoke client <client>",
-                "  release service <client> <service-id>",
-                "  release client <client>",
+                "  revoke client <NAME>",
+                "  release service <NAME> <service-id>",
+                "  release client <NAME>",
                 "  restore backup <path>",
             ]
         )
@@ -343,9 +383,11 @@ def _show_help(rest, role):
             "Show client information\n"
             "=======================\n\n"
             "Usage:\n"
-            "  show client <client>\n"
-            "  show client <client> services\n"
-            "  show client <client> tags\n\n"
+            "  show client <NAME>\n"
+            "  show client <NAME> services\n"
+            "  show client <NAME> tags\n\n"
+            "NAME is the administrator label, or the hostname if no label is set.\n"
+            "A unique hostname or Client ID prefix is also accepted.\n\n"
             "Examples:\n"
             "  show client aella\n"
             "  show client aella services\n"
@@ -359,15 +401,15 @@ def _set_help(rest, role):
             "Set client configuration\n"
             "========================\n\n"
             "Usage:\n"
-            "  set client <client> label <value>\n"
-            "  set client <client> note <value>\n"
-            "  set client <client> tag <key>=<value>\n\n"
+            "  set client <NAME> label <value>\n"
+            "  set client <NAME> note <value>\n"
+            "  set client <NAME> tag <key>=<value>\n\n"
             "Examples:\n"
             "  set client aella label production\n"
             "  set client aella note \"Seoul production gateway\"\n"
             "  set client aella tag env=prod\n\n"
             "To remove a setting:\n"
-            "  unset client <client> ...\n"
+            "  unset client <NAME> ...\n"
         )
     if rest and rest[0] == "service":
         return (
@@ -394,9 +436,9 @@ def _unset_help(role):
         "Unset client configuration\n"
         "==========================\n\n"
         "Usage:\n"
-        "  unset client <client> label\n"
-        "  unset client <client> note\n"
-        "  unset client <client> tag <key>\n\n"
+        "  unset client <NAME> label\n"
+        "  unset client <NAME> note\n"
+        "  unset client <NAME> tag <key>\n\n"
         "unset removes metadata only. It does not release ports or revoke identity.\n"
     )
 
@@ -428,14 +470,14 @@ def _verb_help(verb, role):
     mapping = {
         "revoke": (
             "Revoke\n======\n\nUsage:\n"
-            "  revoke client <client>\n"
+            "  revoke client <NAME>\n"
             "  revoke enrollment <ticket-id>\n\n"
             "revoke client removes management identity and keeps port reservations.\n"
         ),
         "release": (
             "Release\n=======\n\nUsage:\n"
-            "  release service <client> <service-id>\n"
-            "  release client <client>\n\n"
+            "  release service <NAME> <service-id>\n"
+            "  release client <NAME>\n\n"
             "release returns public port reservations. It is not revoke or unset.\n"
         ),
         "restore": "Restore\n=======\n\nUsage:\n  restore backup <path>\n",
@@ -470,7 +512,7 @@ def _legacy_help(role):
     )
 
 
-def match(tokens, role):
+def match(tokens, role, names=None):
     if not tokens:
         return {"status": "empty"}
     verb = tokens[0]
@@ -491,33 +533,33 @@ def match(tokens, role):
         "add": _match_add,
         "enable": _match_enable_disable,
         "disable": _match_enable_disable,
-        "apply": lambda toks, role: {"status": "ok", "action": "apply"},
-        "discard": lambda toks, role: {"status": "ok", "action": "discard"},
-        "doctor": lambda toks, role: {"status": "ok", "action": "doctor", "passthrough": toks[1:]},
-        "help": lambda toks, role: {"status": "ok", "action": "help", "passthrough": toks[1:]},
-        "?": lambda toks, role: {"status": "ok", "action": "help", "passthrough": toks[1:]},
-        "menu": lambda toks, role: {"status": "ok", "action": "menu"},
-        "history": lambda toks, role: {"status": "ok", "action": "history"},
-        "clear": lambda toks, role: {"status": "ok", "action": "clear"},
-        "exit": lambda toks, role: {"status": "ok", "action": "exit"},
-        "quit": lambda toks, role: {"status": "ok", "action": "exit"},
-        "q": lambda toks, role: {"status": "ok", "action": "exit"},
-        "status": lambda toks, role: {"status": "ok", "action": "show_status", "passthrough": toks[1:]},
-        "version": lambda toks, role: {"status": "ok", "action": "show_version"},
+        "apply": lambda toks, role, names=None: {"status": "ok", "action": "apply"},
+        "discard": lambda toks, role, names=None: {"status": "ok", "action": "discard"},
+        "doctor": lambda toks, role, names=None: {"status": "ok", "action": "doctor", "passthrough": toks[1:]},
+        "help": lambda toks, role, names=None: {"status": "ok", "action": "help", "passthrough": toks[1:]},
+        "?": lambda toks, role, names=None: {"status": "ok", "action": "help", "passthrough": toks[1:]},
+        "menu": lambda toks, role, names=None: {"status": "ok", "action": "menu"},
+        "history": lambda toks, role, names=None: {"status": "ok", "action": "history"},
+        "clear": lambda toks, role, names=None: {"status": "ok", "action": "clear"},
+        "exit": lambda toks, role, names=None: {"status": "ok", "action": "exit"},
+        "quit": lambda toks, role, names=None: {"status": "ok", "action": "exit"},
+        "q": lambda toks, role, names=None: {"status": "ok", "action": "exit"},
+        "status": lambda toks, role, names=None: {"status": "ok", "action": "show_status", "passthrough": toks[1:]},
+        "version": lambda toks, role, names=None: {"status": "ok", "action": "show_version"},
     }
     fn = handlers.get(verb)
     if fn is None:
         return {"status": "unknown", "command": verb}
     if verb in ("set", "unset", "create", "revoke", "release", "restore") and not server and verb != "set":
         if verb == "set" and client:
-            return fn(tokens, role)
+            return fn(tokens, role, names)
         return {"status": "role", "need": "server", "command": verb}
     if verb in ("add", "enable", "disable", "apply", "discard") and not client:
         return {"status": "role", "need": "client", "command": verb}
-    return fn(tokens, role)
+    return fn(tokens, role, names)
 
 
-def _match_show(tokens, role):
+def _match_show(tokens, role, names=None):
     avail = _show_resources(role)
     if len(tokens) == 1:
         return incomplete(
@@ -544,22 +586,23 @@ def _match_show(tokens, role):
         return {"status": "ok", "action": "show_info"}
     if resource == "client":
         if len(tokens) < 3:
-            return incomplete(
-                "Missing client.",
+            return missing_client_help(
                 [
-                    "show client <client>",
-                    "show client <client> services",
-                    "show client <client> tags",
+                    "show client <NAME>",
+                    "show client <NAME> services",
+                    "show client <NAME> tags",
                 ],
+                names,
+                tip_after="show client ",
             )
         view = tokens[3] if len(tokens) > 3 else "info"
         if view not in ("info", "services", "tags"):
             return incomplete(
                 "Unknown client view.",
                 [
-                    "show client <client>",
-                    "show client <client> services",
-                    "show client <client> tags",
+                    "show client <NAME>",
+                    "show client <NAME> services",
+                    "show client <NAME> tags",
                 ],
                 ["services", "tags"],
             )
@@ -572,7 +615,7 @@ def _match_show(tokens, role):
     return incomplete("Unknown show resource.", ["show <resource>"], avail)
 
 
-def _match_set(tokens, role):
+def _match_set(tokens, role, names=None):
     client, server = _role_parts(role)
     avail = _set_resources(role)
     if len(tokens) == 1:
@@ -582,21 +625,22 @@ def _match_set(tokens, role):
         if not server:
             return {"status": "role", "need": "server", "command": "set client"}
         if len(tokens) < 3:
-            return incomplete(
-                "Missing client.",
+            return missing_client_help(
                 [
-                    "set client <client> label <value>",
-                    "set client <client> note <value>",
-                    "set client <client> tag <key>=<value>",
+                    "set client <NAME> label <value>",
+                    "set client <NAME> note <value>",
+                    "set client <NAME> tag <key>=<value>",
                 ],
+                names,
+                tip_after="set client ",
             )
         if len(tokens) < 4:
             return incomplete(
                 "Missing client setting.",
                 [
-                    "set client <client> label <value>",
-                    "set client <client> note <value>",
-                    "set client <client> tag <key>=<value>",
+                    "set client <NAME> label <value>",
+                    "set client <NAME> note <value>",
+                    "set client <NAME> tag <key>=<value>",
                 ],
                 ["label", "note", "tag"],
             )
@@ -605,16 +649,16 @@ def _match_set(tokens, role):
             return incomplete(
                 "Unknown client setting.",
                 [
-                    "set client <client> label <value>",
-                    "set client <client> note <value>",
-                    "set client <client> tag <key>=<value>",
+                    "set client <NAME> label <value>",
+                    "set client <NAME> note <value>",
+                    "set client <NAME> tag <key>=<value>",
                 ],
                 ["label", "note", "tag"],
             )
         if len(tokens) < 5:
             return incomplete(
                 "Missing %s value." % prop,
-                ["set client <client> %s <value>" % prop],
+                ["set client <NAME> %s <value>" % prop],
             )
         value = tokens[4]
         if len(tokens) > 5:
@@ -661,38 +705,39 @@ def _match_set(tokens, role):
     return incomplete("Unknown set resource.", ["set <resource> ..."], avail)
 
 
-def _match_unset(tokens, role):
+def _match_unset(tokens, role, names=None):
     _, server = _role_parts(role)
     if not server:
         return {"status": "role", "need": "server", "command": "unset"}
     if len(tokens) < 2:
-        return incomplete("Missing resource.", ["unset client <client> <setting>"], ["client"])
+        return incomplete("Missing resource.", ["unset client <NAME> <setting>"], ["client"])
     if tokens[1] != "client":
-        return incomplete("Unknown unset resource.", ["unset client <client> <setting>"], ["client"])
+        return incomplete("Unknown unset resource.", ["unset client <NAME> <setting>"], ["client"])
     if len(tokens) < 3:
-        return incomplete(
-            "Missing client.",
+        return missing_client_help(
             [
-                "unset client <client> label",
-                "unset client <client> note",
-                "unset client <client> tag <key>",
+                "unset client <NAME> label",
+                "unset client <NAME> note",
+                "unset client <NAME> tag <key>",
             ],
+            names,
+            tip_after="unset client ",
         )
     if len(tokens) < 4:
         return incomplete(
             "Missing client setting.",
             [
-                "unset client <client> label",
-                "unset client <client> note",
-                "unset client <client> tag <key>",
+                "unset client <NAME> label",
+                "unset client <NAME> note",
+                "unset client <NAME> tag <key>",
             ],
             ["label", "note", "tag"],
         )
     prop = tokens[3]
     if prop not in ("label", "note", "tag"):
-        return incomplete("Unknown client setting.", ["unset client <client> label|note|tag"], ["label", "note", "tag"])
+        return incomplete("Unknown client setting.", ["unset client <NAME> label|note|tag"], ["label", "note", "tag"])
     if prop == "tag" and len(tokens) < 5:
-        return incomplete("Missing tag key.", ["unset client <client> tag <key>"])
+        return incomplete("Missing tag key.", ["unset client <NAME> tag <key>"])
     return {
         "status": "ok",
         "action": "unset_client",
@@ -702,7 +747,7 @@ def _match_unset(tokens, role):
     }
 
 
-def _match_create(tokens, role):
+def _match_create(tokens, role, names=None):
     _, server = _role_parts(role)
     if not server:
         return {"status": "role", "need": "server", "command": "create"}
@@ -719,16 +764,20 @@ def _match_create(tokens, role):
     return incomplete("Unknown create resource.", ["create <resource>"], avail)
 
 
-def _match_revoke(tokens, role):
+def _match_revoke(tokens, role, names=None):
     if len(tokens) == 1:
         return incomplete(
             "Missing resource.",
-            ["revoke client <client>", "revoke enrollment <ticket-id>"],
+            ["revoke client <NAME>", "revoke enrollment <ticket-id>"],
             ["client", "enrollment"],
         )
     if tokens[1] == "client":
         if len(tokens) < 3:
-            return incomplete("Missing client.", ["revoke client <client>"])
+            return missing_client_help(
+                ["revoke client <NAME>"],
+                names,
+                tip_after="revoke client ",
+            )
         return {"status": "ok", "action": "revoke_client", "client": tokens[2], "passthrough": tokens[3:]}
     if tokens[1] == "enrollment":
         if len(tokens) < 3:
@@ -743,22 +792,30 @@ def _match_revoke(tokens, role):
     }
 
 
-def _match_release(tokens, role):
+def _match_release(tokens, role, names=None):
     if len(tokens) == 1:
         return incomplete(
             "Missing resource.",
-            ["release service <client> <service-id>", "release client <client>"],
+            ["release service <NAME> <service-id>", "release client <NAME>"],
             ["service", "client"],
         )
     if tokens[1] == "client":
         if len(tokens) < 3:
-            return incomplete("Missing client.", ["release client <client>"])
+            return missing_client_help(
+                ["release client <NAME>"],
+                names,
+                tip_after="release client ",
+            )
         return {"status": "ok", "action": "release_client", "client": tokens[2], "passthrough": tokens[3:]}
     if tokens[1] == "service":
         if len(tokens) < 3:
-            return incomplete("Missing client.", ["release service <client> <service-id>"])
+            return missing_client_help(
+                ["release service <NAME> <service-id>"],
+                names,
+                tip_after="release service ",
+            )
         if len(tokens) < 4:
-            return incomplete("Missing service ID.", ["release service <client> <service-id>"])
+            return incomplete("Missing service ID.", ["release service <NAME> <service-id>"])
         return {
             "status": "ok",
             "action": "release_service",
@@ -769,7 +826,7 @@ def _match_release(tokens, role):
     return incomplete("Unknown release resource.", ["release service|client"], ["service", "client"])
 
 
-def _match_update(tokens, role):
+def _match_update(tokens, role, names=None):
     _, server = _role_parts(role)
     if len(tokens) == 1:
         return {"status": "ok", "action": "update_default"}
@@ -785,7 +842,7 @@ def _match_update(tokens, role):
     return incomplete("Unknown update target.", ["update project [--check]", "update frp [--check]"], avail)
 
 
-def _match_restore(tokens, role):
+def _match_restore(tokens, role, names=None):
     if len(tokens) == 1 or (len(tokens) == 2 and tokens[1] == "backup"):
         if len(tokens) == 1:
             return incomplete("Missing resource.", ["restore backup <path>"], ["backup"])
@@ -795,13 +852,13 @@ def _match_restore(tokens, role):
     return {"status": "ok", "action": "restore_backup", "path": tokens[1], "passthrough": tokens[2:]}
 
 
-def _match_add(tokens, role):
+def _match_add(tokens, role, names=None):
     if len(tokens) == 1 or tokens[1] != "service":
         return incomplete("Missing resource.", ["add service ..."], ["service"])
     return {"status": "ok", "action": "add_service", "passthrough": tokens[2:]}
 
 
-def _match_enable_disable(tokens, role):
+def _match_enable_disable(tokens, role, names=None):
     verb = tokens[0]
     if len(tokens) < 2 or tokens[1] != "service":
         return incomplete("Missing resource.", ["%s service <service-id>" % verb], ["service"])
@@ -1045,7 +1102,7 @@ def main(argv=None):
     local_services = payload.get("local_services") or []
     if cmd == "match":
         tokens = payload.get("tokens") or argv[1:]
-        json.dump(match(tokens, role), sys.stdout)
+        json.dump(match(tokens, role, names=names), sys.stdout)
         sys.stdout.write("\n")
         return 0
     if cmd == "help":

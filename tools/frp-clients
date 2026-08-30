@@ -102,7 +102,7 @@ print('Registered clients')
 print('==================')
 print()
 print(
-    f'{"#":<3} {"LABEL":<18} {"HOSTNAME":<14} {"CLIENT ID":<10} '
+    f'{"#":<3} {"NAME":<18} {"HOSTNAME":<14} {"CLIENT ID":<10} '
     f'{"SERVICES":<8} {"STATE":<8} {"MGMT":<10} SSH'
 )
 print('-' * 104)
@@ -131,6 +131,16 @@ for idx, (mid, client) in enumerate(clients, start=1):
         f'{idx:<3} {label:<18} {hostname:<14} {short_id:<10} '
         f'{str(len(services)):<8} {state_txt:<8} {mgmt:<10} {ssh_txt}'
     )
+
+print()
+print('Use NAME in client commands.')
+print('Hostname or a unique Client ID prefix is also accepted.')
+if clients:
+    example = CREG.sanitize_display(CREG.display_name(clients[0][1], clients[0][0]), 64)
+    if example:
+        print()
+        print('Example:')
+        print('  show client %s' % example)
 
 if clients:
     print()
