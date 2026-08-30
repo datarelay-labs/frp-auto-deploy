@@ -28,6 +28,13 @@ It solves the operational work around FRP:
 | Stable install source | immutable `v2.1.0` tag |
 | `main` branch | development channel; may contain post-v2.1.0 changes |
 
+Current project version: **2.1.0**  
+Current pinned FRP version: **v0.70.1**
+
+v2.1.0 is the **current stable release**. Stable installs use the immutable tag.
+Following mutable `main` is explicit opt-in only, for example
+`FRP_RELEASE_CHANNEL=dev`.
+
 `main` intentionally remains on `PROJECT_VERSION=2.1.0` until the next stable
 tag is cut. On development builds, use release channel, source ref, and verified
 bundle SHA256 to identify the exact build.
@@ -298,8 +305,23 @@ sudo frpctl create enrollment \
   --label branch-a
 ```
 
-The SSH account must already exist on the client. Zero-touch does not create OS
-users, passwords, SSH keys, or `authorized_keys`.
+The SSH account must already exist on the client. There is **no default username**:
+do not assume `ubuntu`, `root`, or any distro-specific account.
+
+Interactive creation may prompt:
+
+```text
+Client SSH user: aella
+SSH port [22]: 22
+```
+
+Zero-touch does **not**:
+
+- create an OS user
+- install or enable an SSH server
+- set a password
+- create or modify SSH keys / `authorized_keys`
+- change `sshd_config`
 
 The server prints a one-time install command containing a short-lived bootstrap
 ticket. Send that command securely to the remote operator and run it once.
@@ -607,6 +629,11 @@ allows a development build to refresh management code without falsely reporting
 
 A normal project update does not re-enroll clients or intentionally rotate the
 CA, FRP token, client identity, or persistent service ports.
+
+Legacy clients that do not have persisted release identity fail closed on remote
+update. Use the **one-time verified bridge** documented in
+[docs/FRP_UPGRADE.md](docs/FRP_UPGRADE.md); do not guess or silently switch a
+legacy install to a release channel.
 
 ## FRP binary update
 
