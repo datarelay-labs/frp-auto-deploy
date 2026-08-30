@@ -472,12 +472,11 @@ else:
 PY
 
   # Migrate Windows installer URL with the same release-line safety rules.
-  local win_current win_next win_canonical
-  if [[ -n "${FRP_WINDOWS_CLIENT_INSTALLER_URL:-}" ]]; then
-    win_next="${FRP_WINDOWS_CLIENT_INSTALLER_URL}"
-  else
-    win_current="$(
-      python3 - "$config" <<'PY'
+  # Do not invent the field during project-update when unset — that would mutate
+  # protected config.json. Fresh install-server writes the default.
+  local win_current win_next
+  win_current="$(
+    python3 - "$config" <<'PY'
 import json, sys
 from pathlib import Path
 try:
@@ -486,20 +485,18 @@ except Exception:
     raise SystemExit(1)
 print(str(data.get("windows_client_installer_url") or "").strip())
 PY
-    )" || return 1
-    win_canonical="$(
-      PROJECT_VERSION="${target_version:-$PROJECT_VERSION}" \
-      FRP_RELEASE_CHANNEL="${target_channel:-$(frp_release_channel)}" \
-      frp_default_windows_client_installer_url
-    )"
+  )" || return 1
+  if [[ -z "$win_current" && -z "${FRP_WINDOWS_CLIENT_INSTALLER_URL:-}" ]]; then
+    return 0
+  fi
+  if [[ -n "${FRP_WINDOWS_CLIENT_INSTALLER_URL:-}" ]]; then
+    win_next="${FRP_WINDOWS_CLIENT_INSTALLER_URL}"
+  else
     win_next="$(
       PROJECT_VERSION="${target_version:-$PROJECT_VERSION}" \
       FRP_RELEASE_CHANNEL="${target_channel:-$(frp_release_channel)}" \
       frp_canonicalize_managed_windows_client_installer_url "$win_current"
     )"
-    if [[ -z "$win_current" ]]; then
-      win_next="$win_canonical"
-    fi
   fi
   python3 - "$config" "$win_next" <<'PY'
 import json
@@ -536,10 +533,7 @@ except Exception:
         pass
     sys.stderr.write("ERROR: failed to migrate windows_client_installer_url\n")
     raise SystemExit(1)
-if old:
-    sys.stdout.write("Windows client installer URL : migrated\n")
-else:
-    sys.stdout.write("Windows client installer URL : set to release default\n")
+sys.stdout.write("Windows client installer URL : migrated\n")
 PY
 }
 
