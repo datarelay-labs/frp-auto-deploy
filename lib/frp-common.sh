@@ -236,9 +236,87 @@ raise SystemExit(0 if sys.argv[2] in parts else 1)
 PY
 }
 
-frp_is_official_main_installer_url() {
+frp_official_managed_client_installer_ref() {
+  # Print the git ref when URL is exactly the project-managed client installer.
+  # Exact shape only:
+  #   https://raw.githubusercontent.com/<owner>/<repo>/<ref>/dist/bootstrap-client.sh
+  # Managed refs: main | vX.Y.Z
+  # Rejects look-alike hosts, wrong owner/repo, extra path segments, userinfo,
+  # non-default ports, query strings, and fragments.
   local url="${1:-}"
-  [[ "$url" == "https://${FRP_GITHUB_RAW_HOST}/${FRP_GITHUB_OWNER}/${FRP_GITHUB_REPO}/main/dist/bootstrap-client.sh" ]]
+  python3 - "$url" "$FRP_GITHUB_RAW_HOST" "$FRP_GITHUB_OWNER" "$FRP_GITHUB_REPO" <<'PY'
+import re
+import sys
+from urllib.parse import unquote, urlsplit
+
+url, expect_host, expect_owner, expect_repo = sys.argv[1:]
+try:
+    parsed = urlsplit(url)
+    port = parsed.port
+except (TypeError, ValueError):
+    raise SystemExit(1)
+if parsed.scheme != "https":
+    raise SystemExit(1)
+if parsed.username is not None or parsed.password is not None:
+    raise SystemExit(1)
+host = (parsed.hostname or "").lower()
+if host != expect_host.lower():
+    raise SystemExit(1)
+if port is not None and port != 443:
+    raise SystemExit(1)
+if parsed.query or parsed.fragment:
+    raise SystemExit(1)
+parts = [unquote(part) for part in parsed.path.split("/") if part]
+if len(parts) != 5:
+    raise SystemExit(1)
+owner, repo, ref, dist, name = parts
+if owner != expect_owner or repo != expect_repo:
+    raise SystemExit(1)
+if dist != "dist" or name != "bootstrap-client.sh":
+    raise SystemExit(1)
+if ref != "main" and not re.fullmatch(r"v\d+\.\d+\.\d+", ref):
+    raise SystemExit(1)
+sys.stdout.write(ref)
+PY
+}
+
+frp_is_official_managed_client_installer_url() {
+  local url="${1:-}"
+  frp_official_managed_client_installer_ref "$url" >/dev/null 2>&1
+}
+
+frp_is_official_main_installer_url() {
+  local url="${1:-}" ref
+  ref="$(frp_official_managed_client_installer_ref "$url" 2>/dev/null)" || return 1
+  [[ "$ref" == "main" ]]
+}
+
+frp_legacy_project_client_installer_url() {
+  # Historical owner/repo URL still recognized for one-time migration.
+  printf 'https://raw.githubusercontent.com/%s/%s/main/dist/bootstrap-client.sh' \
+    'RickLee-kr' 'frp-auto-deploy'
+}
+
+frp_canonicalize_managed_client_installer_url() {
+  # Rewrite project-managed installer URLs to the current channel canonical.
+  # Explicit FRP_CLIENT_INSTALLER_URL in the environment disables rewriting.
+  # Custom / look-alike / third-party URLs are returned unchanged.
+  local url="${1:-}"
+  local canonical
+  if [[ -n "${FRP_CLIENT_INSTALLER_URL:-}" ]]; then
+    printf '%s' "$url"
+    return 0
+  fi
+  canonical="$(frp_default_client_installer_url)"
+  if [[ "$url" == "$(frp_legacy_project_client_installer_url)" ]]; then
+    printf '%s' "$canonical"
+    return 0
+  fi
+  if frp_is_official_managed_client_installer_url "$url"; then
+    printf '%s' "$canonical"
+    return 0
+  fi
+  printf '%s' "$url"
 }
 
 frp_validate_release_source_metadata() {

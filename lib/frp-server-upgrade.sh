@@ -389,6 +389,89 @@ frp_server_upgrade_rollback() {
   return 0
 }
 
+frp_server_migrate_managed_client_installer_url() {
+  # After a successful project-update mutation, rewrite persisted official
+  # managed installer URLs to the candidate release-line canonical default.
+  # Explicit FRP_CLIENT_INSTALLER_URL wins. Custom URLs are never rewritten.
+  # Does not run for --check or "update not needed".
+  local config current canonical next
+  local target_version="${1:-}"
+  local target_channel="${2:-}"
+  config="$(frp_server_fs /etc/frp-auto-deploy/config.json)"
+  [[ -f "$config" ]] || return 1
+
+  if [[ -n "${FRP_CLIENT_INSTALLER_URL:-}" ]]; then
+    next="${FRP_CLIENT_INSTALLER_URL}"
+  else
+    current="$(
+      python3 - "$config" <<'PY'
+import json, sys
+from pathlib import Path
+try:
+    data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(1)
+print(str(data.get("client_installer_url") or "").strip())
+PY
+    )" || return 1
+    canonical="$(
+      PROJECT_VERSION="${target_version:-$PROJECT_VERSION}" \
+      FRP_RELEASE_CHANNEL="${target_channel:-$(frp_release_channel)}" \
+      frp_default_client_installer_url
+    )"
+    next="$(
+      PROJECT_VERSION="${target_version:-$PROJECT_VERSION}" \
+      FRP_RELEASE_CHANNEL="${target_channel:-$(frp_release_channel)}" \
+      frp_canonicalize_managed_client_installer_url "$current"
+    )"
+    # When current was empty, still fill the channel canonical default.
+    if [[ -z "$current" ]]; then
+      next="$canonical"
+    fi
+  fi
+
+  python3 - "$config" "$next" <<'PY'
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+path = Path(sys.argv[1])
+new_url = sys.argv[2]
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    sys.stderr.write("ERROR: cannot read server config for installer URL migration\n")
+    raise SystemExit(1)
+old = str(data.get("client_installer_url") or "").strip()
+if old == new_url:
+    raise SystemExit(0)
+data["client_installer_url"] = new_url
+text = json.dumps(data, indent=2, sort_keys=True) + "\n"
+fd, tmp = tempfile.mkstemp(prefix=".config.", suffix=".tmp", dir=str(path.parent))
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
+    mode = path.stat().st_mode
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+except Exception:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    sys.stderr.write("ERROR: failed to migrate client_installer_url\n")
+    raise SystemExit(1)
+if old:
+    sys.stdout.write("Client installer URL : migrated\n")
+else:
+    sys.stdout.write("Client installer URL : set to release default\n")
+PY
+}
+
 frp_server_apply_project_upgrade() {
   local source="$1" check_only="${2:-0}"
   local version_file previous target staged snapshot backups preserved_before
@@ -582,6 +665,15 @@ frp_server_apply_project_upgrade() {
   fi
   if frp_server_upgrade_is_single443 && [[ "$restart_frontend" != "1" ]]; then
     frp_server_health_frontend || { frp_server_upgrade_rollback "$snapshot"; return 1; }
+  fi
+
+  # Intentional release-line rewrite of official managed installer URLs only.
+  # Runs after preserved-state verification so accidental config mutation during
+  # file install is still rejected; rollback restores the pre-upgrade URL.
+  if ! frp_server_migrate_managed_client_installer_url "$target" "$target_channel"; then
+    frp_server_upgrade_rollback "$snapshot"
+    frp_emit_failure_class FILE_COMMIT_FAILED
+    return 1
   fi
 
   if ! FRP_RELEASE_CHANNEL="$resolved_channel" \

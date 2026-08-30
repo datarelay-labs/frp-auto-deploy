@@ -54,26 +54,17 @@ done
 . "$BASE_DIR/lib/frp-server-upgrade.sh"
 
 DEFAULT_CLIENT_INSTALLER_URL="$(frp_default_client_installer_url)"
-# Historical owner/repo, concatenated only to recognize the obsolete project URL.
-LEGACY_CLIENT_INSTALLER_OWNER='RickLee-kr'
-LEGACY_CLIENT_INSTALLER_REPO='frp-auto-deploy'
 
 frp_legacy_client_installer_url() {
-  printf 'https://raw.githubusercontent.com/%s/%s/main/dist/bootstrap-client.sh' \
-    "$LEGACY_CLIENT_INSTALLER_OWNER" "$LEGACY_CLIENT_INSTALLER_REPO"
+  frp_legacy_project_client_installer_url
 }
 
 frp_migrate_legacy_client_installer_url() {
-  local legacy
-  legacy="$(frp_legacy_client_installer_url)"
-  if [[ "${CLIENT_INSTALLER_URL:-}" == "$legacy" ]]; then
-    CLIENT_INSTALLER_URL="$(frp_default_client_installer_url)"
+  # Prefer explicit env override; never rewrite it during migration.
+  if [[ -n "${FRP_CLIENT_INSTALLER_URL:-}" ]]; then
+    return 0
   fi
-  if [[ -z "${FRP_CLIENT_INSTALLER_URL:-}" ]] && \
-     [[ "$(frp_release_channel)" == "stable" ]] && \
-     frp_is_official_main_installer_url "${CLIENT_INSTALLER_URL:-}"; then
-    CLIENT_INSTALLER_URL="$(frp_default_client_installer_url)"
-  fi
+  CLIENT_INSTALLER_URL="$(frp_canonicalize_managed_client_installer_url "${CLIENT_INSTALLER_URL:-}")"
 }
 
 frp_server_fs() {

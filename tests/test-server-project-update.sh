@@ -656,4 +656,96 @@ fi
 [[ ! -f "$REFRESH/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "second actual left txn marker"
 pass "SERVER_ACTUAL_SAME_BUILD_NO_MUTATION"
 
+installer_url() {
+  python3 - "$1/etc/frp-auto-deploy/config.json" <<'PY'
+import json, sys
+from pathlib import Path
+print(json.loads(Path(sys.argv[1]).read_text())["client_installer_url"])
+PY
+}
+
+# Official managed installer URLs migrate on actual upgrade only.
+MIG="$WORKDIR/installer-migrate"
+setup_tree "$MIG"
+OFFICIAL_V210='https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/bootstrap-client.sh'
+# Candidate metadata in this tree is currently the working-tree channel (dev → main).
+CANONICAL_NOW="$(FRP_RELEASE_CHANNEL=dev frp_default_client_installer_url)"
+python3 - "$MIG/etc/frp-auto-deploy/config.json" "$OFFICIAL_V210" <<'PY'
+import json, sys
+from pathlib import Path
+p = Path(sys.argv[1])
+d = json.loads(p.read_text())
+d["client_installer_url"] = sys.argv[2]
+p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
+PY
+MIG_URL_BEFORE="$(installer_url "$MIG")"
+[[ "$MIG_URL_BEFORE" == "$OFFICIAL_V210" ]] || fail "precondition v2.1.0 URL"
+[[ "$CANONICAL_NOW" != "$OFFICIAL_V210" ]] || fail "precondition canonical differs from v2.1.0"
+run_local "$MIG" --check >"$WORKDIR/mig-check.out"
+[[ "$(installer_url "$MIG")" == "$OFFICIAL_V210" ]] || fail "check-only migrated installer URL"
+grep -q 'State mutation             : NO' "$WORKDIR/mig-check.out" || fail "mig check mutation"
+run_local "$MIG" >"$WORKDIR/mig.out"
+[[ "$(installer_url "$MIG")" == "$CANONICAL_NOW" ]] || fail "upgrade did not migrate installer URL to $CANONICAL_NOW (got $(installer_url "$MIG"))"
+grep -q 'Client installer URL : migrated' "$WORKDIR/mig.out" || fail "migration report missing"
+# Protected non-URL state remains.
+grep -q 'server-token-preserve' "$MIG/etc/frp/server_token" || fail "token lost after migrate"
+grep -q 'ca-preserve' "$MIG/etc/frp-auto-deploy/pki/ca.crt" || fail "CA lost after migrate"
+grep -q 'must survive update' "$MIG/var/lib/frp-auto-deploy/registry.json" || fail "registry lost"
+pass "INSTALLER_URL_MIGRATED_ON_UPGRADE"
+
+# Custom installer URLs stay put across upgrade.
+CUSTOM_MIG="$WORKDIR/installer-custom"
+setup_tree "$CUSTOM_MIG"
+CUSTOM_URL='https://mirror.example.com/frp/bootstrap-client.sh'
+python3 - "$CUSTOM_MIG/etc/frp-auto-deploy/config.json" "$CUSTOM_URL" <<'PY'
+import json, sys
+from pathlib import Path
+p = Path(sys.argv[1])
+d = json.loads(p.read_text())
+d["client_installer_url"] = sys.argv[2]
+p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
+PY
+run_local "$CUSTOM_MIG" >"$WORKDIR/custom-mig.out"
+[[ "$(installer_url "$CUSTOM_MIG")" == "$CUSTOM_URL" ]] || fail "custom installer URL rewritten on upgrade"
+if grep -q 'Client installer URL : migrated' "$WORKDIR/custom-mig.out"; then
+  fail "custom URL reported as migrated"
+fi
+pass "CUSTOM_INSTALLER_URL_PRESERVED_ON_UPGRADE"
+
+# Failed upgrade rolls back the pre-migration installer URL.
+RB_MIG="$WORKDIR/installer-rollback"
+setup_tree "$RB_MIG"
+python3 - "$RB_MIG/etc/frp-auto-deploy/config.json" "$OFFICIAL_V210" <<'PY'
+import json, sys
+from pathlib import Path
+p = Path(sys.argv[1])
+d = json.loads(p.read_text())
+d["client_installer_url"] = sys.argv[2]
+p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
+PY
+if env FRP_SERVER_TEST_ROOT="$RB_MIG" FRP_SERVER_UPGRADE_HOOK_FAIL=verify \
+  "$UPDATE" --source "$ROOT" >"$WORKDIR/rb-mig.out" 2>"$WORKDIR/rb-mig.err"; then
+  fail "verify failure should fail"
+fi
+grep -q 'UPGRADE_ROLLBACK=PASS' "$WORKDIR/rb-mig.out" || fail "rollback marker for installer URL"
+[[ "$(installer_url "$RB_MIG")" == "$OFFICIAL_V210" ]] || fail "rollback lost original installer URL"
+pass "INSTALLER_URL_ROLLBACK_RESTORES_PRIOR"
+
+# Explicit FRP_CLIENT_INSTALLER_URL during upgrade is written, not canonicalized away.
+EXPL="$WORKDIR/installer-explicit"
+setup_tree "$EXPL"
+python3 - "$EXPL/etc/frp-auto-deploy/config.json" "$OFFICIAL_V210" <<'PY'
+import json, sys
+from pathlib import Path
+p = Path(sys.argv[1])
+d = json.loads(p.read_text())
+d["client_installer_url"] = sys.argv[2]
+p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
+PY
+EXPL_URL='https://mirror.example.com/explicit-bootstrap-client.sh'
+env FRP_SERVER_TEST_ROOT="$EXPL" FRP_CLIENT_INSTALLER_URL="$EXPL_URL" \
+  "$UPDATE" --source "$ROOT" >"$WORKDIR/expl.out"
+[[ "$(installer_url "$EXPL")" == "$EXPL_URL" ]] || fail "explicit override not applied on upgrade"
+pass "EXPLICIT_INSTALLER_URL_ON_UPGRADE"
+
 echo "SERVER_PROJECT_UPDATE_TESTS=PASS"
