@@ -79,13 +79,14 @@ export FRP_DEPLOY_TEST_ROOT="$TREE"
 
 python3 "$ROOT/tools/frp-clients" >"$WORKDIR/list.out"
 grep -q 'Registered clients' "$WORKDIR/list.out" || fail "list header"
-grep -qE '^#[[:space:]]+NAME[[:space:]]+HOSTNAME' "$WORKDIR/list.out" || fail "list NAME column"
+grep -qE '^#[[:space:]]+CLIENT ID[[:space:]]+LABEL' "$WORKDIR/list.out" || fail "list CLIENT ID column"
 grep -q 'CLIENT ID' "$WORKDIR/list.out" || fail "list client id column"
 grep -q 'aabbccdd' "$WORKDIR/list.out" || fail "list short id unlabeled"
 grep -q 'busan-backup' "$WORKDIR/list.out" || fail "list labeled client"
 grep -q 'ubuntu' "$WORKDIR/list.out" || fail "list hostname"
-grep -q 'Use NAME in client commands.' "$WORKDIR/list.out" || fail "list NAME help"
-grep -q 'show client busan-backup' "$WORKDIR/list.out" || fail "list NAME example"
+grep -q 'Use CLIENT ID in client commands.' "$WORKDIR/list.out" || fail "list CLIENT ID help"
+grep -q 'show client aabbccdd' "$WORKDIR/list.out" || grep -q 'show client ddeeff00' "$WORKDIR/list.out" \
+  || fail "list CLIENT ID example"
 pass "CLIENT_LIST_UX"
 
 python3 "$ROOT/tools/frp-client-info" busan-backup >"$WORKDIR/by-label.out"
@@ -100,7 +101,7 @@ set -e
 [[ "$rc" -ne 0 ]] || fail "duplicate hostname should fail"
 grep -q 'multiple clients matched' "$WORKDIR/dup.err" || fail "ambiguous error"
 grep -q 'aabbccdd' "$WORKDIR/dup.err" || fail "ambiguous shows short id"
-grep -q 'Use the NAME or a longer Client ID prefix' "$WORKDIR/dup.err" || fail "ambiguous hint"
+grep -q 'Use a longer CLIENT ID prefix' "$WORKDIR/dup.err" || fail "ambiguous hint"
 pass "DUPLICATE_HOSTNAME_SAFE"
 
 python3 "$ROOT/tools/frp-client-set" aabbccdd --label seoul-groupware --note "Seoul office groupware server" \

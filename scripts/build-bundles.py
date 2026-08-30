@@ -24,6 +24,7 @@ files=[
  'lib/frp-doctor-common.sh',
  'lib/frp_doctor.py',
  'lib/frp_ctl_grammar.py',
+ 'lib/frp_ctl_repl.py',
  'server/frp-port-allocator.py',
  'server/migrate_token.py',
  'server/frps.service',
@@ -74,6 +75,7 @@ client_files=[
  'lib/frp-doctor-common.sh',
  'lib/frp_doctor.py',
  'lib/frp_ctl_grammar.py',
+ 'lib/frp_ctl_repl.py',
  'tools/frp-client',
  'tools/frpctl',
 ]

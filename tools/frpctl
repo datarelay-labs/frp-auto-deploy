@@ -217,6 +217,24 @@ frpctl_grammar_py() {
   return 1
 }
 
+frpctl_repl_py() {
+  local here
+  if [[ -n "${_FRPCTL_DIR:-}" && -f "${_FRPCTL_DIR}/../lib/frp_ctl_repl.py" ]]; then
+    printf '%s' "${_FRPCTL_DIR}/../lib/frp_ctl_repl.py"
+    return 0
+  fi
+  if [[ -f /usr/local/lib/frp-auto-deploy/frp_ctl_repl.py ]]; then
+    printf '%s' /usr/local/lib/frp-auto-deploy/frp_ctl_repl.py
+    return 0
+  fi
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  if [[ -f "${here}/../lib/frp_ctl_repl.py" ]]; then
+    printf '%s' "${here}/../lib/frp_ctl_repl.py"
+    return 0
+  fi
+  return 1
+}
+
 frpctl_role_token() {
   local client=0 server=0
   frpctl_is_client && client=1
@@ -238,8 +256,19 @@ frpctl_grammar_payload() {
 import json, sys
 from pathlib import Path
 role, cfg_path, root, state_path = sys.argv[1:5]
-names, services, local_services = [], {}, []
+names, services, local_services, clients_meta = [], {}, [], []
 cfg = Path(cfg_path)
+
+def unique_short(mid, mids, n=8):
+    text = str(mid)
+    length = min(n, len(text)) or 1
+    while length <= len(text):
+        prefix = text[:length]
+        if sum(1 for item in mids if str(item).startswith(prefix)) == 1:
+            return prefix
+        length += 1
+    return text
+
 if cfg.is_file():
     try:
         data = json.loads(cfg.read_text(encoding="utf-8"))
@@ -248,22 +277,32 @@ if cfg.is_file():
             reg = Path(root + str(reg))
         if reg.is_file():
             state = json.loads(reg.read_text(encoding="utf-8"))
-            for client in (state.get("clients") or {}).values():
-                if not isinstance(client, dict):
+            items = [
+                (str(mid), client)
+                for mid, client in (state.get("clients") or {}).items()
+                if isinstance(client, dict)
+            ]
+            mids = [mid for mid, _client in items]
+            for mid, client in items:
+                cid = unique_short(mid, mids)
+                if not cid or "\n" in cid or "\r" in cid:
                     continue
+                names.append(cid)
                 label = str(client.get("label") or "").strip()
                 host = str(client.get("hostname") or "").strip()
-                name = label or host
-                if name and "\n" not in name and "\r" not in name:
-                    names.append(name)
-                    sids = []
-                    for sid in (client.get("services") or {}):
-                        sid = str(sid)
-                        if sid and "\n" not in sid and "\r" not in sid:
-                            sids.append(sid)
-                    services[name] = sorted(sids)
-                    if host and host != name:
-                        services[host] = list(services[name])
+                clients_meta.append({"id": cid, "label": label, "hostname": host})
+                sids = []
+                for sid in (client.get("services") or {}):
+                    sid = str(sid)
+                    if sid and "\n" not in sid and "\r" not in sid:
+                        sids.append(sid)
+                sids = sorted(sids)
+                services[cid] = sids
+                services[mid] = sids
+                if label:
+                    services[label] = sids
+                if host:
+                    services[host] = sids
     except Exception:
         pass
 st = Path(state_path)
@@ -276,6 +315,7 @@ if st.is_file():
 json.dump({
     "role": role,
     "names": sorted(set(names)),
+    "clients": clients_meta,
     "services": services,
     "local_services": local_services,
 }, sys.stdout)
@@ -309,17 +349,19 @@ this is the only command you need to remember:
     sudo frpctl
 
 With no arguments and a TTY, that starts the persistent management CLI.
-Type 'help' or '?' inside the CLI. Press Tab to complete verbs, resources,
-and names. Type 'menu' for the guided numbered menu.
+Type '?' for context help, or 'help' for full syntax. Press Tab to complete
+the current word (CLIENT IDs and keywords; no candidate list). Type 'menu'
+for the guided numbered menu.
 
 Canonical grammar:
   <verb> <resource> [target] [property] [value]
 
-  show status | show version | show clients | show client NAME
-  set client NAME label|note|tag VALUE
-  unset client NAME label|note|tag [KEY]
+  show status | show version | show clients | show client ID
+  set client ID label|note VALUE
+  set client ID tag KEY VALUE
+  unset client ID label|note|tag [KEY]
   create enrollment | create backup
-  revoke client NAME | release client NAME | release service NAME ID
+  revoke client ID | release client ID | release service ID SID
   update project [--check] | update frp [--check]
   doctor | help | menu | history | exit
 
@@ -865,9 +907,10 @@ frpctl_help_navigation() {
   cat <<'EOF'
 Navigation
   menu                  Open guided menu
-  help, ?               Show this help
+  help                  Detailed help
   help <verb>           Command-specific help
-  Tab                   Complete the next command word
+  ?                     Context-sensitive help
+  Tab                   Complete the current word (no candidate list)
   history               This session only
   clear                 Clear the screen
   exit, quit            Exit frpctl
@@ -908,7 +951,7 @@ frpctl_repl_help() {
   fi
   frpctl_grammar_call help '{"tokens":[]}'
   echo
-  echo "Press Tab to complete commands, client names, and service IDs."
+  echo "Press Tab to complete CLIENT IDs and keywords. Type ? for context help."
   echo
   frpctl_help_navigation
   echo
@@ -991,17 +1034,30 @@ except Exception:
     raise SystemExit(0)
 if not isinstance(state, dict):
     raise SystemExit(0)
-    names = []
-    for client in (state.get('clients') or {}).values():
-        if not isinstance(client, dict):
-            continue
-        host = str(client.get('hostname') or '').strip()
-        label = str(client.get('label') or '').strip()
-        name = label or host
-        if name and '\n' not in name and '\r' not in name:
-            names.append(name)
-    for name in sorted(set(names)):
-        print(name)
+items = [
+    (str(mid), client)
+    for mid, client in (state.get('clients') or {}).items()
+    if isinstance(client, dict)
+]
+mids = [mid for mid, _client in items]
+
+def unique_short(mid, n=8):
+    text = str(mid)
+    length = min(n, len(text)) or 1
+    while length <= len(text):
+        prefix = text[:length]
+        if sum(1 for item in mids if item.startswith(prefix)) == 1:
+            return prefix
+        length += 1
+    return text
+
+names = []
+for mid, _client in items:
+    cid = unique_short(mid)
+    if cid and '\n' not in cid and '\r' not in cid:
+        names.append(cid)
+for name in sorted(set(names)):
+    print(name)
 PY
 }
 
@@ -1129,58 +1185,24 @@ frpctl_tab_reset() {
   _FRP_CTL_TAB_REPEAT_COUNT=0
 }
 
-frpctl_tab_print_candidates() {
-  local -a cands=("$@")
-  local c
-  [[ ${#cands[@]} -gt 0 ]] || return 0
-  printf '\n' >&2
-  printf '%s' "${cands[0]}" >&2
-  for c in "${cands[@]:1}"; do
-    printf '  %s' "$c" >&2
-  done
-  printf '\n' >&2
-}
-
-# bind -x Tab handler. Completes the current line only.
-# Does not run the command parser/dispatcher (no match/incomplete help).
+# bind -x fallback. Completes unique/common-prefix only. Never prints a list.
+# Does not run the command parser/dispatcher.
 frpctl_readline_complete() {
   local line="${READLINE_LINE-}"
   local point="${READLINE_POINT-0}"
   local -a cands=()
-  local new="" joined=""
+  local new=""
   if [[ "$point" != "${#line}" ]]; then
-    frpctl_tab_reset
     return 0
   fi
   mapfile -t cands < <(frpctl_completion_candidates "$line" || true)
   if [[ ${#cands[@]} -eq 0 ]]; then
-    frpctl_tab_reset
     return 0
   fi
   new="$(frpctl_complete_line "$line")"
   if [[ "$new" != "$line" ]]; then
     READLINE_LINE="$new"
     READLINE_POINT=${#READLINE_LINE}
-    frpctl_tab_reset
-    return 0
-  fi
-  if [[ ${#cands[@]} -eq 1 ]]; then
-    frpctl_tab_reset
-    return 0
-  fi
-  joined="$(printf '%s\n' "${cands[@]}")"
-  if [[ "${_FRP_CTL_LAST_TAB_LINE-}" == "$line" \
-     && "${_FRP_CTL_LAST_TAB_POINT-}" == "$point" \
-     && "${_FRP_CTL_LAST_TAB_CANDIDATES-}" == "$joined" ]]; then
-    _FRP_CTL_TAB_REPEAT_COUNT=$(( ${_FRP_CTL_TAB_REPEAT_COUNT:-0} + 1 ))
-  else
-    _FRP_CTL_LAST_TAB_LINE="$line"
-    _FRP_CTL_LAST_TAB_POINT="$point"
-    _FRP_CTL_LAST_TAB_CANDIDATES="$joined"
-    _FRP_CTL_TAB_REPEAT_COUNT=1
-  fi
-  if [[ "${_FRP_CTL_TAB_REPEAT_COUNT}" -eq 2 ]]; then
-    frpctl_tab_print_candidates "${cands[@]}"
   fi
   return 0
 }
@@ -1336,7 +1358,17 @@ frpctl_dispatch_canonical() {
     show_status) frpctl_status $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
     show_version) echo; frpctl_print_version; echo ;;
     show_clients) frpctl_require_server || return 1; frpctl_invoke frp-clients $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
-    show_client) frpctl_require_server || return 1; frpctl_invoke frp-client-info "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("client",""))' "$result")" ;;
+    show_client)
+      frpctl_require_server || return 1
+      frpctl_invoke frp-client-info \
+        "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("client",""))' "$result")" \
+        "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("view") or "overview")' "$result")"
+      ;;
+    context_help)
+      echo
+      python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("message","").rstrip())' "$result"
+      echo
+      ;;
     show_enrollments) frpctl_require_server || return 1; frpctl_invoke frp-enrollments ;;
     show_audit) frpctl_require_server || return 1; frpctl_audit_tail ;;
     show_upstream) frpctl_require_server || return 1; frpctl_run frp-upstream $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
@@ -1715,13 +1747,9 @@ frpctl_repl_banner() {
   echo "FRP version     : $(frpctl_frp_version)"
   echo "Bundle SHA256   : $(frpctl_bundle_sha256)"
   echo
-  echo "Type 'help' or '?' for available commands."
-  if [[ "${_FRP_CTL_BOUND_TAB:-}" == "1" || -n "${FRP_CTL_TEST_INPUT:-}" ]]; then
-    echo "Press Tab to complete commands."
-    echo "On a server, Tab also completes client names and service IDs."
-  else
-    echo "Tab completion is unavailable on this shell; type commands in full."
-  fi
+  echo "Type '?' for a short command list, or 'help' for full syntax."
+  echo "Press Tab to complete the current word. Tab never lists candidates."
+  echo "On a server, Tab completes CLIENT IDs and service IDs."
   echo "Type 'menu' for the guided menu."
   echo "Type 'exit' to leave."
   echo
@@ -1778,7 +1806,17 @@ frpctl_repl() {
   frpctl_tab_reset
   trap 'frpctl_repl_sigint' INT
 
-  if [[ -z "${FRP_CTL_TEST_INPUT:-}" && -t 0 ]]; then
+  if [[ -z "${FRP_CTL_TEST_INPUT:-}" && -t 0 && "${FRP_CTL_DISABLE_TAB:-}" != "1" ]]; then
+    if _FRP_CTL_REPL_PY="$(frpctl_repl_py 2>/dev/null)" && python3 -c 'import readline' 2>/dev/null; then
+      _FRP_CTL_BOUND_TAB=1
+      frpctl_repl_banner
+      FRP_CTL_GRAMMAR_PAYLOAD="$(frpctl_grammar_payload)" \
+        FRPCTL_BIN="${BASH_SOURCE[0]}" \
+        python3 "$_FRP_CTL_REPL_PY" --frpctl "${BASH_SOURCE[0]}"
+      trap - INT
+      FRP_CTL_REPL=0
+      return 0
+    fi
     frpctl_repl_enable_completion
   fi
 

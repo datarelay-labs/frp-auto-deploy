@@ -13,18 +13,30 @@ Grammar:
 Host role decides which commands appear in Tab and help. Dual-role hosts see
 the union. There is no `server …` / `client …` top-level namespace.
 
-Tab completes the next word in place. A unique match or a longer common
-prefix extends the current token. A second Tab on the same ambiguous token
-lists candidates once. Tab never runs the command. `help <verb>` and
-incomplete commands (submitted with Enter) show what can come next.
+Interactive keys:
+
+```text
+Tab   = completion only
+?     = context-sensitive help
+Enter = execute
+↑/↓   = session history
+```
+
+Tab extends a unique match or a longer common prefix in place. If several
+candidates remain, Tab does nothing (optional bell). Tab never prints a
+candidate list, never inserts a newline, and never runs the command.
+Type `?` (then Enter) to see what can come next.
+
 `↑` / `↓` walk this session only. History is never written to disk
 (`~/.bash_history`, `~/.frpctl_history`, or `HISTFILE`).
 
-The canonical client selector is **NAME**: the administrator label if one
-exists, otherwise the hostname. `show clients` prints NAME as the first
-identity column. Tab completes NAME only. A unique hostname or Client ID /
-machine-ID prefix still works as a lookup. An SSH connection string such as
-`user@host:port` is not a selector.
+The canonical client selector is **CLIENT ID**: the immutable short machine
+identity (usually 8 hex characters; longer when that prefix is not unique).
+Changing label, note, tags, or hostname never changes CLIENT ID.
+`show clients` prints CLIENT ID as the first identity column. Tab completes
+CLIENT ID only. A unique label or unique hostname still works when typed by
+hand. An SSH connection string such as `user@host:port` is not a selector.
+An ambiguous prefix fails closed; use a longer CLIENT ID prefix.
 
 `unset` removes stored metadata. `release` returns public port reservations.
 `revoke` removes management identity. Those three are never aliases of each
@@ -38,9 +50,9 @@ other. There is no `delete client`.
 show status
 show version
 show clients
-show client <NAME>
-show client <NAME> services
-show client <NAME> tags
+show client <ID>
+show client <ID> services
+show client <ID> tags
 show enrollments
 show audit
 show upstream
@@ -51,18 +63,24 @@ show info
 `status` and `version` remain shortcuts for `show status` / `show version`.
 Canonical help prefers the `show` form.
 
-`show clients` reuses the existing client table and labels the first column
-NAME. `show client <NAME>` reuses `frp-client-info`.
+`show clients` reuses the existing client table. The identity columns are
+CLIENT ID, LABEL, and HOSTNAME. `show client <ID>` is the overview.
+`show client <ID> services` and `show client <ID> tags` print only that view.
 
 ## set
 
 Server:
 
 ```text
-set client <NAME> label <value>
-set client <NAME> note <value>
-set client <NAME> tag <key>=<value>
+set client <ID> label <value>
+set client <ID> note <value>
+set client <ID> tag <key> <value>
 ```
+
+The backend still accepts `--tag key=value`. The parser converts
+`tag <key> <value>` to that form. Quoted values work
+(`tag location "OCI Osaka"`). The older `tag key=value` token is still
+accepted.
 
 Client:
 
@@ -80,12 +98,12 @@ not release the server reservation.
 ## unset
 
 ```text
-unset client <NAME> label
-unset client <NAME> note
-unset client <NAME> tag <key>
+unset client <ID> label
+unset client <ID> note
+unset client <ID> tag <key>
 ```
 
-Removes administrator metadata only. Display name falls back to hostname.
+Removes administrator metadata only. Display label falls back to hostname.
 Does not change identity, hostname, machine-id, ports, or enrollment.
 
 ## create / add
@@ -99,7 +117,7 @@ add service [--preset ssh|http|https|custom] ...
 ```
 
 Enrollment Code and bootstrap ticket secrets are never completed or shown by
-`show` / Tab.
+`show` / `?` / Tab.
 
 ## enable / disable / apply / discard
 
@@ -115,10 +133,10 @@ Client-local pending changes. `apply` does not release server ports.
 ## revoke / release / restore
 
 ```text
-revoke client <NAME>
+revoke client <ID>
 revoke enrollment <ticket-id>
-release service <NAME> <service-id>
-release client <NAME>
+release service <ID> <service-id>
+release client <ID>
 restore backup <path>
 ```
 
@@ -145,13 +163,17 @@ help
 help show
 help set client
 help legacy
+?
+show ?
+set client <ID> ?
 menu
 history
 clear
 exit
 ```
 
-`?` is `help`. `menu` is the guided numbered interface using the same
+Root `?` lists verbs only. Detailed syntax is under `help` / `help <verb>`
+or a context `?`. `menu` is the guided numbered interface using the same
 vocabulary (Show / Set / Unset / Create / Update / Revoke / Release).
 
 ---

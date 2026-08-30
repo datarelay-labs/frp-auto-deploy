@@ -250,7 +250,7 @@ grep -q 'FRP Auto Deploy CLI' "$WORKDIR/client-repl.out" || fail "client repl ba
 grep -q 'Role            : Client' "$WORKDIR/client-repl.out" || fail "client repl role"
 grep -q 'Project version : 1.4.0' "$WORKDIR/client-repl.out" || fail "client repl version"
 grep -q 'FRP version     : 0.70.1' "$WORKDIR/client-repl.out" || fail "client repl frp version"
-grep -q "Type 'help' or '?' for available commands." "$WORKDIR/client-repl.out" || fail "client repl hint"
+grep -q "Type '?' for a short command list, or 'help' for full syntax." "$WORKDIR/client-repl.out" || fail "client repl hint"
 [[ "$(prompt_count "$WORKDIR/client-repl.out")" -ge 3 ]] || fail "client repl stays after status/help"
 grep -q 'FRP Client' "$WORKDIR/client-repl.out" || fail "client repl status body"
 grep -q 'FRP Auto Deploy — Client Commands' "$WORKDIR/client-repl.out" || fail "client repl help"
@@ -262,7 +262,11 @@ pass "FRPCTL_REPL_STATUS"
 pass "FRPCTL_REPL_EXIT"
 
 run_repl "$CLIENT" "$WORKDIR/client-qhelp.out" '?' exit || fail "client ? help"
-grep -q 'FRP Auto Deploy — Client Commands' "$WORKDIR/client-qhelp.out" || fail "question mark help"
+grep -q 'show' "$WORKDIR/client-qhelp.out" || fail "question mark help show"
+grep -q 'set' "$WORKDIR/client-qhelp.out" || fail "question mark help set"
+if grep -q 'Grammar: <verb>' "$WORKDIR/client-qhelp.out"; then
+  fail "root ? dumped full syntax tree"
+fi
 pass "FRPCTL_REPL_QUESTION_MARK_HELP"
 
 export FRP_CTL_DRY_RUN=1
@@ -472,7 +476,7 @@ export FRP_CTL_DRY_RUN=1
 "$CTL" show clients >"$WORKDIR/show-clients.out"
 grep -qx 'DISPATCH frp-clients' "$WORKDIR/show-clients.out" || fail "show clients"
 "$CTL" show client customer-dp >"$WORKDIR/show-client.out"
-grep -qx 'DISPATCH frp-client-info customer-dp' "$WORKDIR/show-client.out" || fail "show client"
+grep -qx 'DISPATCH frp-client-info customer-dp overview' "$WORKDIR/show-client.out" || fail "show client"
 "$CTL" set client customer-dp label production >"$WORKDIR/set-label.out"
 grep -qx 'DISPATCH frp-client-set customer-dp --label production' "$WORKDIR/set-label.out" || fail "set client label"
 "$CTL" set client customer-dp tag env=oci >"$WORKDIR/set-tag.out"
@@ -501,7 +505,7 @@ pass "FRPCTL_UPDATE_COMMANDS"
 
 run_repl "$SERVER" "$WORKDIR/incomplete.out" "set client oci-e2e-renamed" exit || fail "incomplete set"
 grep -q 'Missing client setting' "$WORKDIR/incomplete.out" || fail "incomplete message"
-grep -q 'set client <NAME> label <value>' "$WORKDIR/incomplete.out" || fail "incomplete usage"
+grep -q 'set client <ID> label <value>' "$WORKDIR/incomplete.out" || fail "incomplete usage"
 pass "FRPCTL_INCOMPLETE_SET"
 
 export FRP_CTL_DRY_RUN=1
@@ -538,7 +542,7 @@ pass "DIRECT_SCRIPT_COMPATIBILITY"
 export FRP_CTL_TEST_ROOT="$SERVER"
 run_repl "$SERVER" "$WORKDIR/help-set.out" "help set client" exit || fail "help set client"
 grep -q 'Set client configuration' "$WORKDIR/help-set.out" || fail "help set heading"
-grep -q 'set client <NAME> tag' "$WORKDIR/help-set.out" || fail "help set tag"
+grep -q 'set client <ID> tag' "$WORKDIR/help-set.out" || fail "help set tag"
 pass "CONTEXT_HELP"
 
 run_repl "$SERVER" "$WORKDIR/help-legacy.out" "help legacy" exit || fail "help legacy"
@@ -584,21 +588,24 @@ pass "GUIDED_MENU_METADATA"
 pass "GUIDED_MENU_TAGS"
 pass "GUIDED_MENU_UPDATED"
 
-# --- Canonical client NAME selector (real tools, not dry-run)
+# --- Canonical CLIENT ID selector (real tools, not dry-run)
 python3 - "$SERVER/var/lib/frp-auto-deploy/registry.json" <<'PY'
 import json, sys
 from pathlib import Path
 p = Path(sys.argv[1])
 data = json.loads(p.read_text())
 data["clients"]["24cd7856aabbccdd0011223344556677"] = {
-    "hostname": "aaa-host",
+    "hostname": "dp-os-upgrade-2",
     "label": "aaa",
     "mgmt_status": "enrolled",
     "mgmt_mac_key": "SECRET_MAC_SELECTOR_AAA",
+    "tags": {"env": "oci", "stage": "acceptance"},
+    "note": "acceptance box",
     "services": {
         "ssh": {
             "id": "ssh", "remote_port": 6001, "enabled": True,
-            "preset": "ssh", "ssh_user": "aella",
+            "preset": "ssh", "ssh_user": "aella", "protocol": "tcp",
+            "local_ip": "127.0.0.1", "local_port": 22,
         }
     },
 }
@@ -613,78 +620,147 @@ data["clients"]["0303cedf99999999aabbccdd00112233"] = {
         }
     },
 }
+data["clients"]["abcdabcd111122223333444455556666"] = {
+    "hostname": "amb-one", "label": "amb-one", "mgmt_status": "enrolled",
+    "services": {},
+}
+data["clients"]["abcdabcd999988887777666655554444"] = {
+    "hostname": "amb-two", "label": "amb-two", "mgmt_status": "enrolled",
+    "services": {},
+}
 p.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
 PY
 unset FRP_CTL_DRY_RUN
 export FRP_CTL_TEST_ROOT="$SERVER"
 export FRP_DEPLOY_TEST_ROOT="$SERVER"
 python3 "$ROOT/tools/frp-clients" >"$WORKDIR/sel-list.out"
-grep -qE '^#[[:space:]]+NAME[[:space:]]+HOSTNAME' "$WORKDIR/sel-list.out" || fail "NAME column"
-grep -qE '^[[:space:]]*[0-9]+[[:space:]]+aaa[[:space:]]+' "$WORKDIR/sel-list.out" || fail "NAME aaa"
-grep -qE '^[[:space:]]*[0-9]+[[:space:]]+aella[[:space:]]+' "$WORKDIR/sel-list.out" || fail "NAME aella"
-grep -qE '^[[:space:]]*[0-9]+[[:space:]]+oci-e2e-renamed[[:space:]]+' "$WORKDIR/sel-list.out" \
-  || fail "NAME from label"
-grep -q 'dp-os-upgrade' "$WORKDIR/sel-list.out" || fail "hostname column kept"
-grep -q 'Use NAME in client commands.' "$WORKDIR/sel-list.out" || fail "NAME footer"
+grep -qE '^#[[:space:]]+CLIENT ID[[:space:]]+LABEL' "$WORKDIR/sel-list.out" || fail "CLIENT ID column"
+grep -q '24cd7856' "$WORKDIR/sel-list.out" || fail "list short id"
+grep -q 'aaa' "$WORKDIR/sel-list.out" || fail "list label"
+grep -q 'Use CLIENT ID in client commands.' "$WORKDIR/sel-list.out" || fail "CLIENT ID footer"
 if grep -q 'SECRET_MAC_SELECTOR' "$WORKDIR/sel-list.out"; then
   fail "selector list leaked secret"
 fi
-pass "CLIENT_SELECTOR_CANONICAL_NAME"
+pass "CLIENT_ID_CANONICAL_SELECTOR"
 
 FRP_CTL_REPL=1 "$CTL" show client aaa >"$WORKDIR/sel-label.out"
-grep -qi 'aaa' "$WORKDIR/sel-label.out" || fail "show client label NAME"
-pass "CLIENT_SELECTOR_LABEL"
+grep -q '24cd7856' "$WORKDIR/sel-label.out" || fail "label shortcut"
+pass "LABEL_SHORTCUT_STILL_WORKS"
 
 FRP_CTL_REPL=1 "$CTL" show client dp-os-upgrade >"$WORKDIR/sel-host.out"
 grep -q 'dp-os-upgrade' "$WORKDIR/sel-host.out" || fail "hostname lookup"
-pass "CLIENT_SELECTOR_HOSTNAME"
+pass "HOSTNAME_SHORTCUT_STILL_WORKS"
 
-FRP_CTL_REPL=1 "$CTL" show client 0303cedf >"$WORKDIR/sel-prefix.out"
-grep -q 'aella' "$WORKDIR/sel-prefix.out" || fail "id prefix lookup"
-pass "CLIENT_SELECTOR_ID_PREFIX"
+FRP_CTL_REPL=1 "$CTL" set client 24cd7856 label production >"$WORKDIR/sel-relabel.out"
+grep -q 'Updated client 24cd7856' "$WORKDIR/sel-relabel.out" || fail "label update header"
+grep -q 'old: aaa' "$WORKDIR/sel-relabel.out" || fail "label old value"
+grep -q 'new: production' "$WORKDIR/sel-relabel.out" || fail "label new value"
+grep -q 'Client ID remains: 24cd7856' "$WORKDIR/sel-relabel.out" || fail "label id remains"
+FRP_CTL_REPL=1 "$CTL" show client 24cd7856 >"$WORKDIR/sel-after-label.out"
+grep -q 'production' "$WORKDIR/sel-after-label.out" || fail "id still works after label change"
+set +e
+FRP_CTL_REPL=1 "$CTL" show client aaa >"$WORKDIR/sel-old-label.out" 2>"$WORKDIR/sel-old-label.err"
+old_rc=$?
+set -e
+[[ "$old_rc" -ne 0 ]] || fail "old label should not remain identity"
+pass "LABEL_CHANGE_DOES_NOT_CHANGE_SELECTOR"
 
 set +e
-FRP_CTL_REPL=1 "$CTL" show client 'aella@129.225.184.60:6000' >"$WORKDIR/sel-ssh.out" 2>"$WORKDIR/sel-ssh.err"
-ssh_rc=$?
+FRP_CTL_REPL=1 "$CTL" show client abcdabcd >"$WORKDIR/amb.out" 2>"$WORKDIR/amb.err"
+amb_rc=$?
 set -e
-[[ "$ssh_rc" -ne 0 ]] || fail "ssh endpoint should not resolve"
-cat "$WORKDIR/sel-ssh.err" >>"$WORKDIR/sel-ssh.out"
-grep -q 'ERROR: client not found: aella@129.225.184.60:6000' "$WORKDIR/sel-ssh.out" \
-  || fail "ssh endpoint not-found quote"
-grep -q 'Use a client NAME, unique hostname, or Client ID prefix.' "$WORKDIR/sel-ssh.out" \
-  || fail "ssh endpoint guidance"
-grep -q 'show clients' "$WORKDIR/sel-ssh.out" || fail "ssh endpoint show clients hint"
-if grep -q 'SECRET_MAC_SELECTOR' "$WORKDIR/sel-ssh.out"; then
-  fail "not-found leaked secret"
+[[ "$amb_rc" -ne 0 ]] || fail "ambiguous prefix should fail"
+grep -qi 'multiple clients matched' "$WORKDIR/amb.err" || fail "ambiguous prefix message"
+pass "AMBIGUOUS_PREFIX_FAILS_CLOSED"
+
+FRP_CTL_REPL=1 "$CTL" show client 24cd7856 >"$WORKDIR/ov.out"
+grep -q 'Client ID' "$WORKDIR/ov.out" || fail "overview client id"
+grep -q 'Service count' "$WORKDIR/ov.out" || fail "overview service count"
+if grep -qE '^SERVICE ' "$WORKDIR/ov.out"; then
+  fail "overview dumped services table"
 fi
-pass "CLIENT_SELECTOR_SSH_ENDPOINT_REJECTED_HELPFULLY"
+if grep -qE '^KEY ' "$WORKDIR/ov.out"; then
+  fail "overview dumped tags table"
+fi
+pass "SHOW_CLIENT_OVERVIEW_ONLY"
+
+FRP_CTL_REPL=1 "$CTL" show client 24cd7856 services >"$WORKDIR/svc.out"
+grep -qE '^SERVICE ' "$WORKDIR/svc.out" || fail "services header"
+grep -q '127.0.0.1:22' "$WORKDIR/svc.out" || fail "services target"
+if grep -q 'Service count' "$WORKDIR/svc.out"; then
+  fail "services view printed overview"
+fi
+if grep -q 'Description    :' "$WORKDIR/svc.out"; then
+  fail "services view printed description"
+fi
+pass "SHOW_CLIENT_SERVICES_ONLY"
+
+FRP_CTL_REPL=1 "$CTL" show client 24cd7856 tags >"$WORKDIR/tags.out"
+grep -qE '^KEY ' "$WORKDIR/tags.out" || fail "tags header"
+grep -q 'env' "$WORKDIR/tags.out" || fail "tags env"
+grep -q 'oci' "$WORKDIR/tags.out" || fail "tags value"
+if grep -q 'Service count' "$WORKDIR/tags.out"; then
+  fail "tags view printed overview"
+fi
+pass "SHOW_CLIENT_TAGS_ONLY"
+
+export FRP_CTL_DRY_RUN=1
+"$CTL" set client 24cd7856 tag env oci >"$WORKDIR/tag2.out"
+grep -qx 'DISPATCH frp-client-set 24cd7856 --tag env=oci' "$WORKDIR/tag2.out" || fail "tag key value"
+pass "TAG_KEY_VALUE_TWO_ARGUMENTS"
+run_repl "$SERVER" "$WORKDIR/tagq.out" 'set client 24cd7856 tag location "OCI Osaka"' exit \
+  || fail "quoted tag"
+grep -q 'DISPATCH frp-client-set 24cd7856 --tag location=OCI Osaka' "$WORKDIR/tagq.out" \
+  || fail "quoted tag dispatch"
+pass "TAG_QUOTED_VALUE"
+"$CTL" set client 24cd7856 tag stage=acceptance >"$WORKDIR/tag-eq.out"
+grep -qx 'DISPATCH frp-client-set 24cd7856 --tag stage=acceptance' "$WORKDIR/tag-eq.out" \
+  || fail "legacy tag key=value"
+pass "LEGACY_TAG_KEY_EQUALS_VALUE_COMPAT"
+unset FRP_CTL_DRY_RUN
+
+run_repl "$SERVER" "$WORKDIR/ctx-root.out" "?" exit || fail "root ?"
+grep -q 'show' "$WORKDIR/ctx-root.out" || fail "root ? show"
+grep -q 'set' "$WORKDIR/ctx-root.out" || fail "root ? set"
+if grep -q 'Grammar: <verb>' "$WORKDIR/ctx-root.out"; then
+  fail "root ? dumped full syntax tree"
+fi
+pass "CONTEXT_HELP_ROOT"
+pass "ROOT_HELP_SIMPLIFIED"
+
+run_repl "$SERVER" "$WORKDIR/ctx-show.out" "show ?" exit || fail "show ?"
+grep -q 'clients' "$WORKDIR/ctx-show.out" || fail "show ? clients"
+pass "CONTEXT_HELP_SHOW"
+
+run_repl "$SERVER" "$WORKDIR/ctx-clist.out" "show client ?" exit || fail "show client ?"
+grep -q 'CLIENT ID' "$WORKDIR/ctx-clist.out" || fail "show client ? header"
+grep -q '24cd7856' "$WORKDIR/ctx-clist.out" || fail "show client ? id"
+if grep -q 'SECRET_MAC_SELECTOR' "$WORKDIR/ctx-clist.out"; then
+  fail "context client list leaked secret"
+fi
+pass "CONTEXT_HELP_CLIENT_LIST"
+pass "NO_SECRET_CONTEXT_HELP"
+
+run_repl "$SERVER" "$WORKDIR/ctx-setc.out" "set client 24cd7856 ?" exit || fail "set client ?"
+grep -q 'label' "$WORKDIR/ctx-setc.out" || fail "set client ? label"
+grep -q 'tag' "$WORKDIR/ctx-setc.out" || fail "set client ? tag"
+pass "CONTEXT_HELP_SET_CLIENT"
+
+run_repl "$SERVER" "$WORKDIR/ctx-tag.out" "set client 24cd7856 tag ?" exit || fail "set tag ?"
+grep -q 'tag <key> <value>' "$WORKDIR/ctx-tag.out" || fail "set tag ? usage"
+pass "CONTEXT_HELP_TAG"
 
 run_repl "$SERVER" "$WORKDIR/miss-show.out" "show client" exit || fail "show client missing"
 grep -q 'Missing client.' "$WORKDIR/miss-show.out" || fail "show missing title"
-grep -q 'Available clients:' "$WORKDIR/miss-show.out" || fail "show missing available"
-grep -qE '^[[:space:]]+aaa$' "$WORKDIR/miss-show.out" || fail "show missing lists aaa"
-grep -qE '^[[:space:]]+aella$' "$WORKDIR/miss-show.out" || fail "show missing lists aella"
-grep -q 'show client <NAME>' "$WORKDIR/miss-show.out" || fail "show missing usage NAME"
-grep -q 'unique hostname' "$WORKDIR/miss-show.out" || fail "show missing hostname hint"
-grep -q 'Press Tab after "show client "' "$WORKDIR/miss-show.out" || fail "show missing tab tip"
-if grep -q 'SECRET_MAC_SELECTOR' "$WORKDIR/miss-show.out"; then
-  fail "missing-client help leaked secret"
-fi
+grep -q 'Available CLIENT IDs:' "$WORKDIR/miss-show.out" || fail "show missing available"
+grep -q '24cd7856' "$WORKDIR/miss-show.out" || fail "show missing lists id"
+grep -q 'show client <ID>' "$WORKDIR/miss-show.out" || fail "show missing usage ID"
 pass "SHOW_CLIENT_MISSING_TARGET_HELP"
 
-run_repl "$SERVER" "$WORKDIR/miss-set.out" "set client" exit || fail "set client missing"
-grep -q 'Missing client.' "$WORKDIR/miss-set.out" || fail "set missing title"
-grep -q 'Available clients:' "$WORKDIR/miss-set.out" || fail "set missing available"
-grep -qE '^[[:space:]]+aaa$' "$WORKDIR/miss-set.out" || fail "set missing lists aaa"
-grep -q 'set client <NAME> label <value>' "$WORKDIR/miss-set.out" || fail "set missing usage"
-grep -q 'Press Tab after "set client "' "$WORKDIR/miss-set.out" || fail "set missing tab tip"
-run_repl "$SERVER" "$WORKDIR/miss-unset.out" "unset client" exit || fail "unset client missing"
-grep -q 'Missing client.' "$WORKDIR/miss-unset.out" || fail "unset missing title"
-grep -q 'unset client <NAME> label' "$WORKDIR/miss-unset.out" || fail "unset missing usage"
-run_repl "$SERVER" "$WORKDIR/miss-revoke.out" "revoke client" exit || fail "revoke client missing"
-grep -q 'revoke client <NAME>' "$WORKDIR/miss-revoke.out" || fail "revoke missing usage"
-run_repl "$SERVER" "$WORKDIR/miss-release.out" "release client" exit || fail "release client missing"
-grep -q 'release client <NAME>' "$WORKDIR/miss-release.out" || fail "release missing usage"
+run_repl "$SERVER" "$WORKDIR/miss-set.out" "set" exit || fail "set missing"
+grep -q 'Missing resource.' "$WORKDIR/miss-set.out" || fail "set missing title"
+grep -q 'client' "$WORKDIR/miss-set.out" || fail "set missing lists client"
+grep -q 'type: set ?' "$WORKDIR/miss-set.out" || fail "set missing tip"
 pass "SET_CLIENT_MISSING_TARGET_HELP"
 
 echo "FRPCTL_TESTS=PASS"

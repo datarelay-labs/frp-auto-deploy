@@ -263,6 +263,22 @@ def short_machine_id(machine_id, length=SHORT_MACHINE_ID_LEN):
     return text[:length]
 
 
+def unique_short_id(machine_id, all_ids, min_len=SHORT_MACHINE_ID_LEN):
+    """Shortest unique prefix of machine_id, at least min_len characters."""
+    text = str(machine_id or '')
+    if not text:
+        return ''
+    others = [str(item) for item in (all_ids or []) if str(item)]
+    length = min(max(int(min_len), 1), len(text))
+    while length <= len(text):
+        prefix = text[:length]
+        matches = [item for item in others if item.startswith(prefix)]
+        if len(matches) == 1:
+            return prefix
+        length += 1
+    return text
+
+
 def display_name(client, machine_id):
     if not isinstance(client, dict):
         client = {}
@@ -326,12 +342,14 @@ def sorted_clients(state):
 
 def format_candidate_table(matches):
     lines = [
-        '%-18s %-12s %s' % ('NAME', 'HOSTNAME', 'CLIENT ID'),
+        '%-10s %-18s %s' % ('CLIENT ID', 'LABEL', 'HOSTNAME'),
     ]
+    mids = [item[0] for item in matches]
     for mid, client in matches:
-        name = sanitize_display(display_name(client, mid), 18)
+        cid = sanitize_display(unique_short_id(mid, mids), 16)
+        label = sanitize_display(client.get('label') or '-', 18)
         host = sanitize_display(client.get('hostname') or '-', 12)
-        lines.append('%-18s %-12s %s' % (name, host, short_machine_id(mid)))
+        lines.append('%-10s %-18s %s' % (cid, label, host))
     return '\n'.join(lines) + '\n'
 
 
@@ -378,12 +396,12 @@ def resolve_client_or_exit(state, query):
         if exc.matches:
             sys.stderr.write('ERROR: multiple clients matched.\n\n')
             sys.stderr.write(format_candidate_table(exc.matches))
-            sys.stderr.write('\nUse the NAME or a longer Client ID prefix.\n')
+            sys.stderr.write('\nUse a longer CLIENT ID prefix.\n')
         elif str(exc) == 'client not found':
             shown = sanitize_display(query, 128)
             sys.stderr.write('ERROR: client not found: %s\n' % shown)
-            sys.stderr.write('\nUse a client NAME, unique hostname, or Client ID prefix.\n')
-            sys.stderr.write('Run:\n  show clients\n\nor:\n  show client <Tab>\n')
+            sys.stderr.write('\nUse a CLIENT ID, unique label, or unique hostname.\n')
+            sys.stderr.write('Run:\n  show clients\n\nor:\n  show client ?\n')
         else:
             sys.stderr.write('ERROR: %s\n' % exc)
         raise SystemExit(1)

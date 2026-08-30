@@ -6,10 +6,11 @@
   `revoke`, `release`, `update`, …). Older flat commands remain as hidden
   compatibility aliases. See [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md).
 - Interactive `frpctl` keeps session `↑`/`↓` history in memory only, parses
-  quoted arguments without shell expansion, and completes the command tree
-  (including tags and canonical client NAME values). Tab extends a unique
-  match or common prefix in place; a second Tab lists ambiguous candidates
-  once. `show clients` prints NAME (label, else hostname) as the selector.
+  quoted arguments without shell expansion, and completes CLIENT IDs and
+  keywords. Tab extends a unique match or common prefix in place and never
+  prints a candidate list. Type `?` for context-sensitive help. The canonical
+  client selector is immutable CLIENT ID; label and hostname are shortcuts.
+  `set client <ID> tag <key> <value>` is the canonical tag syntax.
 - Client bundles now embed `release-manifest.json` so candidate channel and
   source-ref can be validated before a live update.
 - Same-version client updates compare verified bundle SHA256, not only

@@ -181,24 +181,25 @@ echo "$enroll_flags" | has_line --ttl || fail "create-client flags missing --ttl
 echo "$enroll_flags" | has_line --note || fail "create-client flags missing --note"
 pass "FRPCTL_TAB_CREATE_CLIENT_FLAGS"
 export FRP_CTL_TEST_ROOT="$SERVER"
-[[ "$(cands "show client oci")" == "oci-e2e-renamed" ]] || fail "show client oci -> label"
-[[ "$(frpctl_complete_line "show client oci")" == "show client oci-e2e-renamed " ]] || fail "show client complete line"
+[[ "$(cands "show client aa")" == "aabbccdd" ]] || fail "show client aa -> CLIENT ID"
+[[ "$(frpctl_complete_line "show client aa")" == "show client aabbccdd " ]] || fail "show client complete line"
 names="$(cands "show client ")"
-echo "$names" | has_line oci-e2e-renamed || fail "canonical label missing"
-echo "$names" | has_line other-client || fail "hostname fallback missing"
-if echo "$names" | has_line dp-os-upgrade; then fail "hostname shown beside label"; fi
-[[ "$(cands "set client oci")" == "oci-e2e-renamed" ]] || fail "set client oci"
-# Legacy commands still complete names
-[[ "$(cands "client oci")" == "oci-e2e-renamed" ]] || fail "legacy client oci"
-[[ "$(cands "revoke-client oci")" == "oci-e2e-renamed" ]] || fail "legacy release/revoke names"
+echo "$names" | has_line aabbccdd || fail "canonical CLIENT ID missing"
+echo "$names" | has_line eeff9988 || fail "second CLIENT ID missing"
+if echo "$names" | has_line oci-e2e-renamed; then fail "label completed as identity"; fi
+if echo "$names" | has_line dp-os-upgrade; then fail "hostname completed as identity"; fi
+if echo "$names" | has_line other-client; then fail "hostname completed as identity"; fi
+[[ "$(cands "set client aa")" == "aabbccdd" ]] || fail "set client aa"
+[[ "$(cands "client aa")" == "aabbccdd" ]] || fail "legacy client aa"
+[[ "$(cands "revoke-client aa")" == "aabbccdd" ]] || fail "legacy revoke names"
 pass "FRPCTL_TAB_CLIENT_NAME"
 pass "FRPCTL_TAB_CLIENT_CANONICAL_NAME"
 pass "FRPCTL_TAB_NO_DUPLICATE_CLIENT_IDENTITY"
 pass "CANONICAL_CLIENT_COMPLETION"
 
-[[ "$(cands "release service oci-e2e-renamed e")" == "e2e-ssh" ]] || fail "service e -> e2e-ssh"
-[[ "$(frpctl_complete_line "release service oci-e2e-renamed e")" == "release service oci-e2e-renamed e2e-ssh " ]] || fail "service complete line"
-svc="$(cands "release service oci-e2e-renamed ")"
+[[ "$(cands "release service aabbccdd e")" == "e2e-ssh" ]] || fail "service e -> e2e-ssh"
+[[ "$(frpctl_complete_line "release service aabbccdd e")" == "release service aabbccdd e2e-ssh " ]] || fail "service complete line"
+svc="$(cands "release service aabbccdd ")"
 echo "$svc" | has_line e2e-ssh || fail "service list e2e-ssh"
 echo "$svc" | has_line grafana || fail "service list grafana"
 if echo "$svc" | has_line ssh; then fail "other client service leaked"; fi
@@ -228,9 +229,9 @@ sel_secret="$(cands "show client "; cands "set client "; cands "revoke client ";
 if echo "$sel_secret" | grep -qE 'SECRET_MAC_KEY_SHOULD_NOT_LEAK|SECRET_PUBKEY_SHOULD_NOT_LEAK|OTHER_SECRET_MAC'; then
   fail "selector completion leaked secret"
 fi
-echo "$sel_secret" | has_line oci-e2e-renamed || fail "selector completion missing NAME"
+echo "$sel_secret" | has_line aabbccdd || fail "selector completion missing CLIENT ID"
 if echo "$sel_secret" | has_line dp-os-upgrade; then
-  fail "selector completion listed hostname beside NAME"
+  fail "selector completion listed hostname beside CLIENT ID"
 fi
 pass "NO_SECRET_SELECTOR_COMPLETION"
 
@@ -273,8 +274,8 @@ FRP_CTL_TEST_INPUT=$'help\nstatus\nexit\n'
 export FRP_CTL_TEST_INPUT
 "$CTL" >"$WORKDIR/repl.out" 2>"$WORKDIR/repl.err" || fail "repl after completion"
 cat "$WORKDIR/repl.err" >>"$WORKDIR/repl.out"
-grep -q 'Press Tab to complete commands' "$WORKDIR/repl.out" || fail "banner tab"
-grep -q 'Tab                   Complete the next command word' "$WORKDIR/repl.out" || fail "help tab"
+grep -q 'Press Tab to complete the current word' "$WORKDIR/repl.out" || fail "banner tab"
+grep -q 'Tab                   Complete the current word' "$WORKDIR/repl.out" || fail "help tab"
 grep -q 'DISPATCH frp-server-status' "$WORKDIR/repl.out" || fail "status after help"
 [[ "$(grep -c '^frpctl>' "$WORKDIR/repl.out")" -ge 3 ]] || fail "tab docs stayed in repl"
 [[ ! -f "$HOME/.frpctl_history" ]] || fail "history file created"
@@ -287,12 +288,12 @@ show_res="$(cands "show ")"
 echo "$show_res" | has_line clients || fail "show resources missing clients"
 echo "$show_res" | has_line client || fail "show resources missing client"
 echo "$show_res" | has_line status || fail "show resources missing status"
-set_props="$(cands "set client oci-e2e-renamed ")"
+set_props="$(cands "set client aabbccdd ")"
 echo "$set_props" | has_line label || fail "set props missing label"
 echo "$set_props" | has_line note || fail "set props missing note"
 echo "$set_props" | has_line tag || fail "set props missing tag"
 if echo "$set_props" | has_line --label; then fail "flag-style set completion"; fi
-unset_props="$(cands "unset client oci-e2e-renamed ")"
+unset_props="$(cands "unset client aabbccdd ")"
 echo "$unset_props" | has_line tag || fail "unset props missing tag"
 pass "FRPCTL_TAB_RESOURCE"
 pass "FRPCTL_TAB_CONTEXT_AWARE"
@@ -300,7 +301,7 @@ pass "FRPCTL_TAB_TAG_SUPPORT"
 pass "TAG_COMPLETION"
 pass "CONTEXT_TAB_COMPLETION"
 
-# Space in label is quoted in completion
+# Label rename must not change CLIENT ID completion.
 python3 - "$SERVER/var/lib/frp-auto-deploy/registry.json" <<'PY'
 import json,sys
 from pathlib import Path
@@ -309,12 +310,19 @@ d=json.loads(p.read_text())
 d["clients"]["aabbccdd0011"]["label"]="Seoul DP"
 p.write_text(json.dumps(d)+"\n")
 PY
-[[ "$(frpctl_complete_line "show client S")" == 'show client "Seoul DP" ' ]] || fail "quoted label completion"
+[[ "$(cands "show client S")" == "" ]] || fail "mutable label must not complete"
+[[ "$(cands "show client aa")" == "aabbccdd" ]] || fail "CLIENT ID complete after label change"
 pass "FRPCTL_TAB_QUOTED_LABEL"
 
 # --- Real readline ↑/↓ on a PTY (not a source grep)
 python3 - "$CTL" "$SERVER" "$WORKDIR/pty-home" <<'PY' || fail "PTY history interaction"
-import os, pty, select, sys, time, errno
+import errno
+import os
+import pty
+import re
+import select
+import sys
+import time
 
 ctl, tree, home = sys.argv[1:4]
 os.makedirs(home, exist_ok=True)
@@ -332,6 +340,13 @@ env.update({
 env.pop("FRP_CTL_TEST_INPUT", None)
 env.pop("FRP_CTL_SOURCED", None)
 env.pop("FRP_CTL_DISABLE_TAB", None)
+
+ANSI_RE = re.compile(br"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()].")
+
+
+def strip_ansi(data):
+    return ANSI_RE.sub(b"", data)
+
 
 pid, fd = pty.fork()
 if pid == 0:
@@ -361,9 +376,9 @@ def wait_prompt(timeout=8):
     end = time.time() + timeout
     while time.time() < end:
         read_more(0.25)
-        if buf.endswith(b"frpctl> ") or b"\nfrpctl> " in buf or buf.endswith(b"frpctl>"):
-            if buf.rfind(b"frpctl>") >= 0:
-                return True
+        stripped = strip_ansi(bytes(buf)).replace(b"\r", b"").rstrip(b"\x00")
+        if stripped.endswith(b"frpctl> ") or stripped.endswith(b"frpctl>"):
+            return True
     return False
 
 if not wait_prompt():
@@ -430,7 +445,7 @@ pass "FRPCTL_UP_ARROW_HISTORY"
 pass "FRPCTL_DOWN_ARROW_HISTORY"
 pass "UP_DOWN_HISTORY"
 
-# Restore a plain label so later NAME completion stays simple, then PTY-test Tab UX.
+# Restore a plain label, then PTY-test zero-flicker Tab UX.
 python3 - "$SERVER/var/lib/frp-auto-deploy/registry.json" <<'PY'
 import json, sys
 from pathlib import Path
@@ -545,92 +560,49 @@ if not wait_prompt():
 after_unique = bytes(buf[before:])
 if b"DISPATCH frp-server-status" not in after_unique:
     fail_pty("PTY: unique tab did not complete status", after_unique)
-print("TAB_UNIQUE_INLINE_NO_NEWLINE")
+print("TAB_UNIQUE_INLINE")
 
-# Common prefix: show c<Tab> -> show client, no list.
-before = len(buf)
-os.write(fd, b"show c")
-read_more(0.4)
-os.write(fd, b"\t")
-read_more(0.8)
-prefix_chunk = bytes(buf[before:])
-if list_blocks(prefix_chunk):
-    fail_pty("PTY: common-prefix tab printed a candidate list", prefix_chunk)
-if b"Missing client" in prefix_chunk or b"Unknown show resource" in prefix_chunk:
-    fail_pty("PTY: common-prefix tab dispatched", prefix_chunk)
-os.write(fd, b"\r")
-if not wait_prompt():
-    fail_pty("PTY: no prompt after common-prefix completion", bytes(buf[before:]))
-after_prefix = bytes(buf[before:])
-if b"Missing client" not in after_prefix:
-    fail_pty("PTY: common-prefix tab did not extend to show client", after_prefix)
-if b"Unknown show resource" in after_prefix:
-    fail_pty("PTY: show c was submitted without extension", after_prefix)
-print("TAB_COMMON_PREFIX_INLINE_NO_LIST")
-
-# Ambiguous: set <Tab> silent, second Tab lists once, third does not repeat.
+# Ambiguous Tab: no list, no extra newline, no extra prompt, no dispatch.
 before = len(buf)
 os.write(fd, b"set ")
 read_more(0.4)
+typed = bytes(buf[before:])
+nl_before = visible(typed).count(b"\n")
+prompt_before = visible(bytes(buf)).count(b"frpctl>")
 os.write(fd, b"\t")
 read_more(0.8)
 first = bytes(buf[before:])
 if list_blocks(first):
-    fail_pty("PTY: first ambiguous tab printed candidates", first)
-if b"Missing resource" in first:
-    fail_pty("PTY: first ambiguous tab ran incomplete dispatch", first)
-print("TAB_AMBIGUOUS_FIRST_NO_OUTPUT")
-print("TAB_DOES_NOT_RUN_INCOMPLETE_DISPATCH")
+    fail_pty("PTY: ambiguous tab printed candidates", first)
+if b"Missing resource" in first or b"Available:" in first:
+    fail_pty("PTY: ambiguous tab ran incomplete dispatch", first)
+if b"installer-url" in visible(first):
+    fail_pty("PTY: ambiguous tab leaked candidate text", first)
+if visible(first).count(b"\n") > nl_before:
+    fail_pty("PTY: ambiguous tab emitted a newline", first)
+if visible(bytes(buf)).count(b"frpctl>") > prompt_before:
+    fail_pty("PTY: ambiguous tab redrew an extra prompt", first)
+print("TAB_AMBIGUOUS_ZERO_OUTPUT")
+print("TAB_AMBIGUOUS_NO_NEWLINE")
+print("TAB_AMBIGUOUS_NO_PROMPT_REDRAW")
+print("TAB_DOES_NOT_DISPATCH")
+print("TAB_ZERO_FLICKER")
+print("TAB_NO_REDRAW")
+print("TAB_NO_DISPATCH")
 
-mid = len(buf)
 os.write(fd, b"\t")
-read_more(0.8)
-second = bytes(buf[mid:])
-blocks = list_blocks(second)
-if not blocks:
-    fail_pty("PTY: second ambiguous tab did not list candidates", second)
-joined = b" ".join(blocks)
-if b"client" not in joined or b"installer-url" not in joined:
-    fail_pty("PTY: second tab list missing expected resources", second)
-if b"Missing resource" in second:
-    fail_pty("PTY: second tab ran incomplete dispatch", second)
-print("TAB_AMBIGUOUS_SECOND_SHOWS_ONCE")
-
-listed = visible(second).count(b"installer-url")
-third_at = len(buf)
+read_more(0.6)
 os.write(fd, b"\t")
-read_more(0.8)
-third = bytes(buf[third_at:])
-if visible(third).count(b"installer-url") > 0 and list_blocks(third):
-    fail_pty("PTY: third tab reprinted the candidate list", third)
-if visible(bytes(buf[mid:])).count(b"installer-url") != listed:
-    fail_pty("PTY: candidate list repeated after third tab", bytes(buf[mid:]))
-print("TAB_AMBIGUOUS_THIRD_NO_DUPLICATE_LIST")
-
-# Line change resets double-Tab state: edit token, first Tab silent, second lists.
-os.write(fd, b"\x15")  # Ctrl-U clear line
-read_more(0.3)
-before = len(buf)
-os.write(fd, b"show ")
-read_more(0.3)
-os.write(fd, b"\t")
-read_more(0.8)
-reset_first = bytes(buf[before:])
-if list_blocks(reset_first):
-    fail_pty("PTY: first tab after line change printed a list", reset_first)
-mid = len(buf)
-os.write(fd, b"\t")
-read_more(0.8)
-reset_second = bytes(buf[mid:])
-reset_blocks = list_blocks(reset_second)
-if not reset_blocks:
-    fail_pty("PTY: second tab after line change did not list", reset_second)
-print("TAB_LINE_CHANGE_RESETS_REPEAT")
+read_more(0.6)
+repeated = bytes(buf[before:])
+if list_blocks(repeated) or b"installer-url" in visible(repeated):
+    fail_pty("PTY: repeated tab printed candidates", repeated)
+print("TAB_REPEATED_NO_OUTPUT")
 os.write(fd, b"\x15")
 read_more(0.2)
 os.write(fd, b"\r")
 if not wait_prompt():
-    fail_pty("PTY: no prompt after clearing show ", bytes(buf[before:]))
+    fail_pty("PTY: no prompt after clearing set ", bytes(buf[before:]))
 
 # History recall then Tab completion.
 os.write(fd, b"show version\r")
@@ -663,13 +635,16 @@ if os.WIFEXITED(status) and os.WEXITSTATUS(status) not in (0,):
     raise SystemExit(1)
 print("PTY_TAB_OK")
 PY
-pass "TAB_UNIQUE_INLINE_NO_NEWLINE"
-pass "TAB_COMMON_PREFIX_INLINE_NO_LIST"
-pass "TAB_AMBIGUOUS_FIRST_NO_OUTPUT"
-pass "TAB_AMBIGUOUS_SECOND_SHOWS_ONCE"
-pass "TAB_AMBIGUOUS_THIRD_NO_DUPLICATE_LIST"
-pass "TAB_LINE_CHANGE_RESETS_REPEAT"
+pass "TAB_UNIQUE_INLINE"
+pass "TAB_AMBIGUOUS_ZERO_OUTPUT"
+pass "TAB_AMBIGUOUS_NO_NEWLINE"
+pass "TAB_AMBIGUOUS_NO_PROMPT_REDRAW"
+pass "TAB_REPEATED_NO_OUTPUT"
+pass "TAB_DOES_NOT_DISPATCH"
+pass "TAB_ZERO_FLICKER"
+pass "TAB_NO_REDRAW"
+pass "TAB_NO_DISPATCH"
 pass "TAB_HISTORY_RECALL_COMPATIBLE"
-pass "TAB_DOES_NOT_RUN_INCOMPLETE_DISPATCH"
+pass "PTY_CLI_TEST"
 
 echo "FRPCTL_COMPLETION_TESTS=PASS"

@@ -631,8 +631,9 @@ assert client['services']['ssh']['remote_port'] == 18300
 assert client.get('note') == 'customer-01'
 PY
 FRP_DEPLOY_TEST_ROOT="$LIVE_TREE" python3 "$ROOT/tools/frp-client-info" zt-host >"$WORKDIR/info.out"
-grep -q '203.0.113.10:18300' "$WORKDIR/info.out" || fail "client-info public endpoint"
-grep -q "ssh -p 18300 ${SSH_USER}@203.0.113.10" "$WORKDIR/info.out" || fail "client-info ssh connect"
+FRP_DEPLOY_TEST_ROOT="$LIVE_TREE" python3 "$ROOT/tools/frp-client-info" zt-host services >"$WORKDIR/info-svc.out"
+grep -q '203.0.113.10:18300' "$WORKDIR/info-svc.out" || fail "client-info public endpoint"
+grep -q "ssh -p 18300 ${SSH_USER}@203.0.113.10" "$WORKDIR/info-svc.out" || fail "client-info ssh connect"
 grep -q 'Description    : customer-01' "$WORKDIR/info.out" || fail "client-info note"
 if grep -q '127.0.0.1:18300' "$WORKDIR/info.out"; then
   fail "internal listener in connection info"

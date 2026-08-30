@@ -62,7 +62,26 @@ def test_display_and_match():
     mid, client = creg.resolve_client(state, '0303cedf')
     if mid != '0303cedf99999999':
         fail('prefix lookup', mid)
+    ids = ['abcdabcd11112222', 'abcdabcd99998888', '24cd7856aabbccdd']
+    if creg.unique_short_id('24cd7856aabbccdd', ids) != '24cd7856':
+        fail('unique short id')
+    if creg.unique_short_id('abcdabcd11112222', ids) != 'abcdabcd1':
+        fail('longer unique prefix', creg.unique_short_id('abcdabcd11112222', ids))
+    amb = {
+        'schema_version': 2,
+        'clients': {
+            'abcdabcd11112222': {'hostname': 'amb-one'},
+            'abcdabcd99998888': {'hostname': 'amb-two'},
+        },
+    }
+    try:
+        creg.resolve_client(amb, 'abcdabcd')
+        fail('ambiguous prefix should fail closed')
+    except creg.ClientLookupError as exc:
+        if len(exc.matches) != 2:
+            fail('ambiguous prefix candidates', exc.matches)
     pass_('LABEL_HOSTNAME_PREFIX_LOOKUP')
+    pass_('CLIENT_ID_UNIQUE_SHORT')
 
 
 def test_seed_does_not_overwrite():

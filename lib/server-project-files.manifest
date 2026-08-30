@@ -24,6 +24,7 @@ project usr/local/lib/frp-auto-deploy/frp-common.sh 0644 lib/frp-common.sh bash
 project usr/local/lib/frp-auto-deploy/frp-doctor-common.sh 0644 lib/frp-doctor-common.sh bash
 project usr/local/lib/frp-auto-deploy/frp_doctor.py 0644 lib/frp_doctor.py python
 project usr/local/lib/frp-auto-deploy/frp_ctl_grammar.py 0644 lib/frp_ctl_grammar.py python
+project usr/local/lib/frp-auto-deploy/frp_ctl_repl.py 0644 lib/frp_ctl_repl.py python
 project usr/local/lib/frp-auto-deploy/frp_install_txn.py 0644 lib/frp_install_txn.py python
 project usr/local/lib/frp-auto-deploy/frp-server-upgrade.sh 0644 lib/frp-server-upgrade.sh bash
 project usr/local/lib/frp-auto-deploy/frp_client_registry.py 0644 lib/frp_client_registry.py python

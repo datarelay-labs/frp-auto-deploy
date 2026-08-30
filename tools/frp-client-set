@@ -159,6 +159,9 @@ try:
     require_v2(state)
     mid, client = CREG.resolve_client_or_exit(state, args.query)
     hostname_before = client.get('hostname')
+    old_label = str(client.get('label') or '').strip()
+    all_mids = list((state.get('clients') or {}))
+    client_id = CREG.unique_short_id(mid, all_mids)
     machine_ports = {}
     for sid, svc in (client.get('services') or {}).items():
         if isinstance(svc, dict) and svc.get('remote_port') is not None:
@@ -214,14 +217,16 @@ try:
 finally:
     unlock_registry(lock_fd)
 
-print('Updated %s (%s)' % (
-    CREG.sanitize_display(CREG.display_name(client, mid), 64),
-    CREG.sanitize_display(CREG.short_machine_id(mid), 16),
-))
-if args.clear_label:
-    print('Label : (cleared)')
-elif label is not None:
-    print('Label : %s' % CREG.sanitize_display(label, 64))
+cid = CREG.sanitize_display(client_id, 16)
+print('Updated client %s' % cid)
+if args.clear_label or label is not None:
+    new_shown = '(cleared)' if args.clear_label or not label else CREG.sanitize_display(label, 64)
+    print()
+    print('Label:')
+    print('  old: %s' % (CREG.sanitize_display(old_label, 64) or '(none)'))
+    print('  new: %s' % new_shown)
+    print()
+    print('Client ID remains: %s' % cid)
 if args.clear_note:
     print('Note  : (cleared)')
 elif note is not None:

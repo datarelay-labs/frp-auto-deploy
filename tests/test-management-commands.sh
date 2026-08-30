@@ -103,13 +103,17 @@ INFO="$WORKDIR/info.out"
 python3 "$ROOT/tools/frp-client-info" dev-dp-mirror >"$INFO"
 grep -q 'Hostname' "$INFO" || fail "info hostname field"
 grep -q 'dev-dp-mirror' "$INFO" || fail "info hostname"
-grep -q 'Services' "$INFO" || fail "info services field"
+grep -q 'Service count' "$INFO" || fail "info service count"
 grep -q '2' "$INFO" || fail "info enabled count"
-grep -q '127.0.0.1:22' "$INFO" || fail "info ssh target"
-grep -q '203.0.113.10:6002' "$INFO" || fail "info ssh public"
-grep -q 'ssh -p 6002 aella@203.0.113.10' "$INFO" || fail "info ssh connect"
-grep -q '127.0.0.1:3000' "$INFO" || fail "info grafana target"
-if grep -q '6004' "$INFO"; then
+if grep -q '127.0.0.1:22' "$INFO"; then
+  fail "overview dumped service detail"
+fi
+python3 "$ROOT/tools/frp-client-info" dev-dp-mirror services >"$WORKDIR/info-svc.out"
+grep -q '127.0.0.1:22' "$WORKDIR/info-svc.out" || fail "info ssh target"
+grep -q '203.0.113.10:6002' "$WORKDIR/info-svc.out" || fail "info ssh public"
+grep -q 'ssh -p 6002 aella@203.0.113.10' "$WORKDIR/info-svc.out" || fail "info ssh connect"
+grep -q '127.0.0.1:3000' "$WORKDIR/info-svc.out" || fail "info grafana target"
+if grep -q '6004' "$WORKDIR/info-svc.out"; then
   fail "info should omit disabled service"
 fi
 pass "frp-client-info generic"
@@ -205,7 +209,7 @@ PY
 
 python3 "$ROOT/tools/frp-clients" >"$WORKDIR/legacy-clients.out"
 grep -q 'legacy / unspecified' "$WORKDIR/legacy-clients.out" || fail "legacy SSH user display"
-python3 "$ROOT/tools/frp-client-info" legacy-ssh >"$WORKDIR/legacy-info.out"
+python3 "$ROOT/tools/frp-client-info" legacy-ssh services >"$WORKDIR/legacy-info.out"
 grep -q 'legacy / unspecified' "$WORKDIR/legacy-info.out" || fail "legacy SSH info display"
 python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY' || fail "list mutated legacy record"
 import json,sys

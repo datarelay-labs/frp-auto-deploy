@@ -102,7 +102,7 @@ print('Registered clients')
 print('==================')
 print()
 print(
-    f'{"#":<3} {"NAME":<18} {"HOSTNAME":<14} {"CLIENT ID":<10} '
+    f'{"#":<3} {"CLIENT ID":<10} {"LABEL":<12} {"HOSTNAME":<14} '
     f'{"SERVICES":<8} {"STATE":<8} {"MGMT":<10} SSH'
 )
 print('-' * 104)
@@ -110,11 +110,12 @@ print('-' * 104)
 if not clients:
     print('(none)')
 
+all_mids = [mid for mid, _client in clients]
 for idx, (mid, client) in enumerate(clients, start=1):
     services = CREG.enabled_services(client)
-    label = CREG.sanitize_display(CREG.display_name(client, mid), 18)
+    label = CREG.sanitize_display(client.get('label') or '-', 12)
     hostname = CREG.sanitize_display(client.get('hostname') or '-', 14)
-    short_id = CREG.short_machine_id(mid)
+    short_id = CREG.sanitize_display(CREG.unique_short_id(mid, all_mids), 10)
     state_txt = client_state(services, listener_snapshot)
     mgmt = CREG.mgmt_status(client)
     ssh_txt = '-'
@@ -128,15 +129,15 @@ for idx, (mid, client) in enumerate(clients, start=1):
             ssh_txt = 'legacy / unspecified'
         ssh_txt = CREG.sanitize_display(ssh_txt, 48)
     print(
-        f'{idx:<3} {label:<18} {hostname:<14} {short_id:<10} '
+        f'{idx:<3} {short_id:<10} {label:<12} {hostname:<14} '
         f'{str(len(services)):<8} {state_txt:<8} {mgmt:<10} {ssh_txt}'
     )
 
 print()
-print('Use NAME in client commands.')
-print('Hostname or a unique Client ID prefix is also accepted.')
+print('Use CLIENT ID in client commands.')
+print('A unique label or hostname is also accepted as a shortcut.')
 if clients:
-    example = CREG.sanitize_display(CREG.display_name(clients[0][1], clients[0][0]), 64)
+    example = CREG.sanitize_display(CREG.unique_short_id(clients[0][0], all_mids), 16)
     if example:
         print()
         print('Example:')

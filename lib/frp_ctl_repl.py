@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""Zero-flicker frpctl line editor.
+
+Uses the stdlib readline module only. Never writes a history file.
+Never runs eval, bash -c, or the command dispatcher from Tab.
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+
+try:
+    import readline
+except ImportError:  # pragma: no cover
+    readline = None
+
+
+def _load_grammar():
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import frp_ctl_grammar as grammar  # noqa: WPS433
+
+    return grammar
+
+
+def _no_display_matches(_substitution, _matches, _longest):
+    return
+
+
+class LineEditor:
+    def __init__(self, payload):
+        self.grammar = _load_grammar()
+        self.payload = payload
+        self.role = payload.get("role") or "unknown"
+        self.names = payload.get("names") or []
+        self.services = payload.get("services") or {}
+        self.local_services = payload.get("local_services") or []
+        self._matches = []
+
+    def completer(self, text, state):
+        if state == 0:
+            line = readline.get_line_buffer() if readline else (text or "")
+            trailing = bool(line) and line[-1:] in " \t"
+            cands = self.grammar.completion_candidates(
+                line,
+                self.role,
+                self.names,
+                self.services,
+                self.local_services,
+                trailing=trailing,
+            )
+            # Unique -> replace current word (append space). Longer common
+            # prefix -> extend only. Fully ambiguous -> return candidates so
+            # readline can bell, but display hook prints nothing.
+            if not cands:
+                self._matches = []
+            elif len(cands) == 1:
+                self._matches = [cands[0] + " "]
+            else:
+                shared = cands[0]
+                for item in cands[1:]:
+                    while shared and not item.startswith(shared):
+                        shared = shared[:-1]
+                prefix = text or ""
+                if shared and shared != prefix and len(shared) > len(prefix):
+                    self._matches = [shared]
+                else:
+                    self._matches = list(cands)
+        try:
+            return self._matches[state]
+        except IndexError:
+            return None
+
+    def bind(self):
+        if readline is None:
+            return False
+        try:
+            readline.parse_and_bind("set show-all-if-ambiguous off")
+            readline.parse_and_bind("set show-all-if-unmodified off")
+            readline.parse_and_bind("set page-completions off")
+            readline.parse_and_bind("set completion-query-items 999999")
+            readline.parse_and_bind("set bell-style audible")
+            readline.parse_and_bind("tab: complete")
+            readline.set_completer(self.completer)
+            readline.set_completer_delims(" \t")
+            hook = getattr(readline, "set_completion_display_matches_hook", None)
+            if hook is not None:
+                hook(_no_display_matches)
+        except Exception:
+            try:
+                readline.set_completer(self.completer)
+                readline.set_completer_delims(" \t")
+                hook = getattr(readline, "set_completion_display_matches_hook", None)
+                if hook is not None:
+                    hook(_no_display_matches)
+            except Exception:
+                return False
+        try:
+            readline.clear_history()
+        except Exception:
+            pass
+        try:
+            readline.set_history_length(1000)
+        except Exception:
+            pass
+        return True
+
+
+def _looks_secret(grammar, line):
+    try:
+        return grammar.looks_secret(line)
+    except Exception:
+        return False
+
+
+def run_repl(frpctl_bin, payload):
+    grammar = _load_grammar()
+    editor = LineEditor(payload)
+    editor.bind()
+    hist = []
+    while True:
+        try:
+            line = input("frpctl> ")
+        except EOFError:
+            print()
+            return 0
+        except KeyboardInterrupt:
+            print()
+            continue
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if _looks_secret(grammar, line):
+            if readline is not None:
+                try:
+                    n = readline.get_current_history_length()
+                    if n and readline.get_history_item(n) == line:
+                        readline.remove_history_item(n - 1)
+                except Exception:
+                    pass
+        else:
+            hist.append(line)
+            if readline is not None:
+                try:
+                    n = readline.get_current_history_length()
+                    last = readline.get_history_item(n) if n else None
+                    if last != line:
+                        readline.add_history(line)
+                except Exception:
+                    pass
+        try:
+            tokens = grammar.tokenize(line)
+        except grammar.ParseError as exc:
+            sys.stderr.write("ERROR: %s\n" % exc)
+            continue
+        if not tokens:
+            continue
+        if tokens[0].startswith("!") or tokens[0] in grammar.SHELL_REJECT:
+            sys.stderr.write("ERROR: arbitrary shell execution is not allowed.\n")
+            continue
+        if tokens[0] in ("exit", "quit", "q"):
+            return 0
+        if tokens[0] == "history" and (len(tokens) == 1 or tokens[-1] != "?"):
+            if not hist:
+                print("(no session history)")
+            else:
+                for idx, item in enumerate(hist, start=1):
+                    print("%5s  %s" % (idx, item))
+            continue
+        env = os.environ.copy()
+        env["FRP_CTL_REPL"] = "1"
+        env.pop("FRP_CTL_SOURCED", None)
+        env.pop("FRP_CTL_TEST_INPUT", None)
+        try:
+            proc = subprocess.run([frpctl_bin] + tokens, env=env, check=False)
+        except OSError as exc:
+            sys.stderr.write("ERROR: could not run frpctl: %s\n" % exc)
+            continue
+        if proc.returncode not in (0, 130) and tokens[0] not in ("?", "help"):
+            print()
+            print("Command failed with exit code %s." % proc.returncode)
+            print()
+    return 0
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if "--self-test" in argv:
+        if readline is None:
+            print("READLINE_UNAVAILABLE")
+            return 1
+        print("READLINE_OK")
+        return 0
+    frpctl_bin = os.environ.get("FRPCTL_BIN") or "frpctl"
+    if "--frpctl" in argv:
+        idx = argv.index("--frpctl")
+        if idx + 1 < len(argv):
+            frpctl_bin = argv[idx + 1]
+    payload = {}
+    raw = os.environ.get("FRP_CTL_GRAMMAR_PAYLOAD") or ""
+    if raw.strip():
+        payload = json.loads(raw)
+    elif not sys.stdin.isatty():
+        incoming = sys.stdin.read()
+        if incoming.strip():
+            payload = json.loads(incoming)
+    if readline is None:
+        sys.stderr.write("ERROR: Python readline is unavailable.\n")
+        return 2
+    return run_repl(frpctl_bin, payload)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

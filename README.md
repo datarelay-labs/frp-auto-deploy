@@ -386,10 +386,10 @@ For normal operation, remember:
 sudo frpctl
 ```
 
-That starts the persistent CLI. Type `help` or `?`. Press Tab to complete
-verbs, resources, and names. Incomplete commands show the next word. `↑` / `↓`
-walk this session only (nothing is saved to disk). `menu` opens the guided
-numbered menu.
+That starts the persistent CLI. Type `?` for context help, or `help` for the
+full syntax. Press Tab to complete the current word (no candidate list).
+`↑` / `↓` walk this session only (nothing is saved to disk). `menu` opens the
+guided numbered menu. The canonical client selector is CLIENT ID.
 
 Grammar: `<verb> <resource> [target] [property] [value]`. Full tree:
 [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md).
@@ -415,13 +415,13 @@ commands belong to this project.
 | --- | --- |
 | Interactive CLI | `sudo frpctl` |
 | List clients | `sudo frpctl show clients` |
-| Client details | `sudo frpctl show client NAME` |
-| Set label / note / tag | `sudo frpctl set client NAME label VALUE` |
-| Unset metadata | `sudo frpctl unset client NAME label` |
+| Client details | `sudo frpctl show client ID` |
+| Set label / note / tag | `sudo frpctl set client ID label VALUE` |
+| Unset metadata | `sudo frpctl unset client ID label` |
 | Enroll / zero-touch | `sudo frpctl create enrollment --ssh --ssh-user USER --label NAME` |
-| Revoke identity | `sudo frpctl revoke client NAME` |
-| Release one service | `sudo frpctl release service NAME ID` |
-| Release client | `sudo frpctl release client NAME` |
+| Revoke identity | `sudo frpctl revoke client ID` |
+| Release one service | `sudo frpctl release service ID SVC` |
+| Release client | `sudo frpctl release client ID` |
 | Update project | `sudo frpctl update project` |
 | Client services | `sudo frpctl show services` / `sudo frpctl add service` |
 

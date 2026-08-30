@@ -3125,6 +3125,10 @@ frp_client_install_management_files() {
     echo "ERROR: missing ${source}/lib/frp_ctl_grammar.py" >&2
     return 1
   }
+  [[ -f "${source}/lib/frp_ctl_repl.py" ]] || {
+    echo "ERROR: missing ${source}/lib/frp_ctl_repl.py" >&2
+    return 1
+  }
   [[ -f "${source}/tools/frp-client" ]] || {
     echo "ERROR: missing ${source}/tools/frp-client" >&2
     return 1
@@ -3139,6 +3143,7 @@ frp_client_install_management_files() {
   install -m 0644 "${source}/lib/frp-doctor-common.sh" "${libdir}/frp-doctor-common.sh"
   install -m 0644 "${source}/lib/frp_doctor.py" "${libdir}/frp_doctor.py"
   install -m 0644 "${source}/lib/frp_ctl_grammar.py" "${libdir}/frp_ctl_grammar.py"
+  install -m 0644 "${source}/lib/frp_ctl_repl.py" "${libdir}/frp_ctl_repl.py"
   install -m 0755 "${source}/tools/frp-client" "${bindir}/frp-client"
   install -m 0755 "${source}/tools/frpctl" "${bindir}/frpctl"
   frp_client_upgrade_source_version "$source"
@@ -3154,6 +3159,7 @@ frp_client_upgrade_destinations() {
     "usr/local/lib/frp-auto-deploy/frp-doctor-common.sh:0644:lib/frp-doctor-common.sh" \
     "usr/local/lib/frp-auto-deploy/frp_doctor.py:0644:lib/frp_doctor.py" \
     "usr/local/lib/frp-auto-deploy/frp_ctl_grammar.py:0644:lib/frp_ctl_grammar.py" \
+    "usr/local/lib/frp-auto-deploy/frp_ctl_repl.py:0644:lib/frp_ctl_repl.py" \
     "usr/local/bin/frp-client:0755:tools/frp-client" \
     "usr/local/bin/frpctl:0755:tools/frpctl"
 }
@@ -3197,6 +3203,7 @@ frp_client_upgrade_validate_staged() {
   python3 -m py_compile "${staged}/usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py" || return 1
   python3 -m py_compile "${staged}/usr/local/lib/frp-auto-deploy/frp_doctor.py" || return 1
   python3 -m py_compile "${staged}/usr/local/lib/frp-auto-deploy/frp_ctl_grammar.py" || return 1
+  python3 -m py_compile "${staged}/usr/local/lib/frp-auto-deploy/frp_ctl_repl.py" || return 1
   rm -rf "${staged}/usr/local/lib/frp-auto-deploy/__pycache__" \
     "${staged}/usr/local/lib/frp-auto-deploy/"*.pyc 2>/dev/null || true
   [[ -x "${staged}/usr/local/bin/frp-client" ]] || {

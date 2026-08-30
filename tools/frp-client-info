@@ -53,11 +53,18 @@ def require_v2(state):
             )
 
 
-if len(sys.argv) != 2:
-    print(f'Usage: {sys.argv[0]} <label|hostname|machine-id-prefix>', file=sys.stderr)
+if len(sys.argv) not in (2, 3):
+    print(f'Usage: {sys.argv[0]} <client-id|label|hostname> [overview|services|tags]', file=sys.stderr)
     sys.exit(2)
 
 q = sys.argv[1]
+view = (sys.argv[2] if len(sys.argv) > 2 else 'overview').strip().lower()
+if view in ('', 'info'):
+    view = 'overview'
+if view not in ('overview', 'services', 'tags'):
+    print('ERROR: unknown view. Use overview, services, or tags.', file=sys.stderr)
+    sys.exit(2)
+
 cfg = json.loads(Path(ROOT + '/etc/frp-auto-deploy/config.json').read_text())
 reg = Path(cfg['registry_file'])
 if ROOT and not str(reg).startswith(ROOT):
@@ -66,61 +73,88 @@ state = json.loads(reg.read_text())
 require_v2(state)
 
 mid, client = CREG.resolve_client_or_exit(state, q)
+all_mids = list((state.get('clients') or {}))
 public_ip = CREG.sanitize_display(cfg.get('public_host') or cfg.get('public_ip') or '', 253)
 services = client.get('services') or {}
 if not isinstance(services, dict):
     services = {}
 enabled = CREG.enabled_services(client)
-label = CREG.sanitize_display(client.get('label') or CREG.display_name(client, mid))
-hostname = CREG.sanitize_display(client.get('hostname') or '')
+label = CREG.sanitize_display(client.get('label') or '-')
+hostname = CREG.sanitize_display(client.get('hostname') or '-')
 note = CREG.sanitize_display(client.get('note') or '')
+cid = CREG.sanitize_display(CREG.unique_short_id(mid, all_mids), 16)
+tags = client.get('tags') or {}
+if not isinstance(tags, dict):
+    tags = {}
 
-print('Client: %s' % label)
-print('=' * max(8, len(label) + 8))
-print()
-print(f'Label          : {label}')
-print(f'Hostname       : {hostname}')
-print(f'Machine ID     : {CREG.sanitize_display(mid, 128)}')
-print(f'Client ID      : {CREG.sanitize_display(CREG.short_machine_id(mid), 16)}')
-print(f'Management     : {CREG.mgmt_status(client)}')
-fp = str(client.get('mgmt_fingerprint') or '')
-if fp:
-    print(f'Fingerprint    : sha256:{fp[:16]}')
-print(f'Last source IP : {CREG.sanitize_display(client.get("last_source_ip") or "-")}')
-print(f'Last seen      : {CREG.sanitize_display(client.get("last_seen_at") or "-")}')
-print(f'Last enrolled  : {CREG.sanitize_display(client.get("last_enrolled_at") or "-")}')
-print(f'Description    : {note or "-"}')
-print(f'Services       : {len(enabled)}')
 
-print()
-print('Services')
-print('--------')
-if not enabled:
-    print('(none enabled)')
+def print_overview():
+    print('Client ID      : %s' % cid)
+    print('Machine ID     : %s' % CREG.sanitize_display(mid, 128))
+    print('Label          : %s' % (label or '-'))
+    print('Hostname       : %s' % (hostname or '-'))
+    print('Management     : %s' % CREG.mgmt_status(client))
+    print('Last source IP : %s' % CREG.sanitize_display(client.get('last_source_ip') or '-'))
+    print('Last seen      : %s' % CREG.sanitize_display(client.get('last_seen_at') or '-'))
+    print('Last enrolled  : %s' % CREG.sanitize_display(client.get('last_enrolled_at') or '-'))
+    print('Description    : %s' % (note or '-'))
+    print('Service count  : %s' % len(enabled))
+    print('Tag count      : %s' % len(tags))
 
-for sid, svc in enabled:
-    protocol = str(svc.get('protocol') or 'tcp').upper()
-    local_ip = CREG.sanitize_display(svc.get('local_ip') or '', 253)
-    local_port = svc.get('local_port')
-    remote_port = svc.get('remote_port')
-    preset = svc.get('preset') or 'custom'
-    sid = CREG.sanitize_display(sid, 32)
-    name = CREG.sanitize_display(svc.get('name') or sid)
-    print()
-    print(name if name != sid else sid)
-    print(f'  Type      : {protocol}')
-    print(f'  Target    : {local_ip}:{local_port}')
-    print(f'  Public    : {public_ip}:{remote_port}')
-    if preset == 'ssh':
-        ssh_user = CREG.ssh_user_display(svc)
-        if svc.get('ssh_user'):
-            print('  Connect   :')
-            print(f'    ssh -p {remote_port} {ssh_user}@{public_ip}')
+
+def print_services():
+    print('%-10s %-6s %-14s %-22s %s' % ('SERVICE', 'TYPE', 'TARGET', 'PUBLIC', 'STATE'))
+    if not services:
+        print('(no services)')
+        return
+    for sid, svc in sorted(
+        services.items(),
+        key=lambda kv: (kv[1].get('remote_port') or 0, kv[0]) if isinstance(kv[1], dict) else (0, kv[0]),
+    ):
+        if not isinstance(svc, dict):
+            continue
+        if svc.get('enabled', True) is False:
+            continue
+        protocol = str(svc.get('protocol') or 'tcp').upper()
+        local_ip = CREG.sanitize_display(svc.get('local_ip') or '-', 64)
+        local_port = svc.get('local_port') or '-'
+        remote_port = svc.get('remote_port') or '-'
+        enabled_flag = 'enabled' if svc.get('enabled', True) is not False else 'disabled'
+        sid_txt = CREG.sanitize_display(sid, 10)
+        target = '%s:%s' % (local_ip, local_port)
+        public = '%s:%s' % (public_ip or 'host', remote_port)
+        print('%-10s %-6s %-14s %-22s %s' % (
+            sid_txt, protocol, target[:14], public[:22], enabled_flag,
+        ))
+    ssh_sid, ssh = CREG.first_ssh_service(client)
+    if ssh:
+        print()
+        print('Connect:')
+        if ssh.get('ssh_user'):
+            print('  ssh -p %s %s@%s' % (
+                ssh.get('remote_port') or '-',
+                CREG.ssh_user_display(ssh),
+                public_ip or 'host',
+            ))
         else:
-            print(f'  SSH user  : {ssh_user}')
-    elif preset == 'http':
-        print('  URL       :')
-        print(f'    http://{public_ip}:{remote_port}')
-    elif preset == 'https':
-        print('  URL       :')
-        print(f'    https://{public_ip}:{remote_port}')
+            print('  legacy / unspecified')
+
+
+def print_tags():
+    if not tags:
+        print('(no tags)')
+        return
+    print('%-12s %s' % ('KEY', 'VALUE'))
+    for key in sorted(tags):
+        print('%-12s %s' % (
+            CREG.sanitize_display(key, 12),
+            CREG.sanitize_display(tags.get(key), 64),
+        ))
+
+
+if view == 'overview':
+    print_overview()
+elif view == 'services':
+    print_services()
+else:
+    print_tags()
