@@ -1,826 +1,790 @@
 # frp-auto-deploy
 
-`frp-auto-deploy` is a lightweight deployment and management layer for the official
+`frp-auto-deploy` is a lightweight deployment and operations layer for the official
 [fatedier/frp](https://github.com/fatedier/frp) binaries. It does **not** fork or
 modify FRP.
 
-It installs `frps`/`frpc`, assigns persistent public TCP ports, enrolls clients
-over HTTPS, and provides `frpctl` for day-to-day operations.
+It solves the operational work around FRP:
 
-> The addresses `203.0.113.10`, `192.0.2.50`, and `198.51.100.10` in this README
-> are documentation-only (RFC 5737). Replace them with your own public and
-> internal addresses.
+- install and update `frps` / `frpc`
+- enroll remote clients securely over HTTPS
+- assign persistent public TCP ports
+- publish one or many services from each client
+- manage clients and services with a single operator CLI: `frpctl`
+- preserve identity, CA, token, registry, and port reservations across normal updates
+- provide backup / restore, diagnostics, audit events, and release-safe lifecycle controls
 
-Current project version: **2.1.0**
-Current pinned FRP version: **v0.70.1**
+> Example addresses such as `203.0.113.10`, `192.0.2.50`, and `198.51.100.10`
+> are documentation-only RFC 5737 addresses. Replace them with your own values.
 
-2.1.0 is the **current stable release**. Direct mode remains the default.
-Optional Enterprise single-443 mode is included. FRP stays at **0.70.1**.
-See [CHANGELOG.md](CHANGELOG.md),
-[docs/DEPLOYMENT_MODES.md](docs/DEPLOYMENT_MODES.md), and
-[docs/SECURITY.md](docs/SECURITY.md).
+## Release status
 
----
+| Item | Current |
+| --- | --- |
+| Stable project release | **v2.1.0** |
+| Pinned / tested FRP | **v0.70.1** |
+| Default deployment mode | **Direct** |
+| Optional enterprise mode | **single-443** |
+| Stable install source | immutable `v2.1.0` tag |
+| `main` branch | development channel; may contain post-v2.1.0 changes |
 
-# What this project does
+`main` intentionally remains on `PROJECT_VERSION=2.1.0` until the next stable
+tag is cut. On development builds, use release channel, source ref, and verified
+bundle SHA256 to identify the exact build.
 
-- Install the FRP server and a project-managed HTTPS allocator
-- Create clients with a short-lived Enrollment Code **or** a one-line zero-touch command
-- Publish SSH and other TCP services with persistent public ports
-- Manage services (add / edit / disable / re-enable / release) without reinstalling FRP
-- Diagnose with read-only `frpctl doctor`
-- Update and uninstall without silently destroying CA, token, or port reservations
-
-FRP tunnel: native TLS + FRP token.
-Management: HTTPS only + private CA + ECDSA client identity.
-There is no mTLS, no plain HTTP enrollment, and Direct mode does not require
-FRP to own public TCP/443. Enterprise networks that reset TLS on non-standard
-ports should use [single-443 mode](docs/DEPLOYMENT_MODES.md) instead of HTTP.
+FRP **0.71.x is not automatically adopted**. `show upstream` is informational;
+the project remains pinned to the version that has been tested.
 
 ---
 
-# Quick Start
+# 1. The mental model
 
-Operator path:
+A client can sit behind NAT or a firewall and still publish local or LAN services
+through one public FRP server.
 
-```text
-1. Install the FRP server
-2. Configure public vs listen ports and NAT/firewall
-3. Verify the server
-4. Create a client (zero-touch SSH is the fastest path)
-5. Install / enroll the client
-6. Connect using the public host and public service port
+```mermaid
+flowchart LR
+    U["Operator / Internet user"]
+    S["FRP Server<br/>Public entry point"]
+    C1["Client A<br/>behind NAT"]
+    C2["Client B<br/>behind NAT"]
+    L1["127.0.0.1:22<br/>SSH"]
+    L2["127.0.0.1:443<br/>HTTPS"]
+    L3["10.10.20.30:22<br/>LAN SSH"]
+    L4["10.10.20.40:80<br/>LAN HTTP"]
+
+    U -->|"public service port"| S
+    C1 -->|"FRP control"| S
+    C2 -->|"FRP control"| S
+    C1 --> L1
+    C1 --> L2
+    C2 --> L3
+    C2 --> L4
 ```
 
-Two network models for Direct mode, plus an optional Enterprise mode:
+The FRP server does not need to know how an application works. It publishes TCP
+connections. SSH, HTTP, HTTPS passthrough, and custom TCP are all represented as
+services.
 
-1. **Behind NAT/firewall** — public ports may differ from local listen ports
-2. **Direct public IP** — public and listen ports are usually the same
-3. **Enterprise single-443** — public TCP/443 carries allocator HTTPS and FRP
-   control over WSS; published services stay 6000-6098
+A typical client may therefore be:
 
-In Direct mode, TCP/443 is a convenience default, not a requirement. Published
-service ports use 1:1 public/internal port numbers (public 6002 → FRP remote
-port 6002). If `curl` can TCP-connect to the allocator port but TLS ClientHello
-is reset, see [docs/DEPLOYMENT_MODES.md](docs/DEPLOYMENT_MODES.md).
+- **SSH only** — publish the client's own `127.0.0.1:22`
+- **multiple local services** — SSH + HTTPS from the same client
+- **a small gateway** — publish services on other hosts reachable from the client,
+  for example `10.10.20.30:22` and `10.10.20.40:80`
 
-## 1. Choose ports
+---
 
-### Behind NAT (example: something else already uses TCP/443)
+# 2. Choose the deployment pattern
 
-```text
-Public host:                 203.0.113.10
-Internal FRP server:         192.0.2.50
-FRP control:                 public 8443  ->  listen 443
-Allocator HTTPS:             public 9443  ->  listen 6099
-Published services:          6000-6098 (1:1)
+There are only **two deployment modes**: `direct` and `single443`.
+
+**NAT is a network topology, not a deployment mode.**  
+A Direct server can have a public IP or sit behind a firewall/NAT.
+
+| Environment | Recommended pattern | Public inbound TCP |
+| --- | --- | --- |
+| Public-IP server, normal firewall policy | Direct, default ports | `443`, `6099`, `6000-6098` |
+| Server behind firewall / NAT | Direct with public/listen port split | example `8443`, `9443`, `6000-6098` |
+| Enterprise network that strongly prefers TLS on 443 | Enterprise single-443 | `443`, `6000-6098` |
+
+## 2.1 Public-IP server — Direct defaults
+
+```mermaid
+flowchart LR
+    I["Internet"]
+    subgraph S["FRP Server (Public IP)"]
+        C["FRP Control<br/>TCP/443"]
+        A["Enrollment / Management HTTPS<br/>TCP/6099"]
+        P["Published Services<br/>TCP/6000-6098"]
+    end
+
+    I -->|"TCP/443"| C
+    I -->|"TCP/6099"| A
+    I -->|"TCP/6000-6098"| P
 ```
 
-Firewall/DNAT:
+Default Direct values:
 
 ```text
-203.0.113.10:8443  ->  192.0.2.50:443
-203.0.113.10:9443  ->  192.0.2.50:6099
-203.0.113.10:6002  ->  192.0.2.50:6002
+FRP control       public 443  = listen 443
+Allocator HTTPS   public 6099 = listen 6099
+Published ports   6000-6098
 ```
 
-Clients use public endpoints only:
+## 2.2 Server behind firewall / NAT — Direct with port split
+
+Example: public `8443` and `9443` are translated to the private FRP server.
+
+```mermaid
+flowchart LR
+    I["Internet"]
+    F["Firewall / NAT"]
+    subgraph S["FRP Server<br/>Private IP 192.0.2.50"]
+        C["FRP Control<br/>listen TCP/443"]
+        A["Enrollment / Management HTTPS<br/>listen TCP/6099"]
+        P["Published Services<br/>TCP/6000-6098"]
+    end
+
+    I -->|"TCP/8443"| F
+    I -->|"TCP/9443"| F
+    I -->|"TCP/6000-6098"| F
+    F -->|"8443 → 443"| C
+    F -->|"9443 → 6099"| A
+    F -->|"6000-6098 → same ports"| P
+```
+
+Example DNAT:
 
 ```text
-FRP Server:  203.0.113.10:8443
-Allocator:   https://203.0.113.10:9443/enroll
-SSH:         ssh -p 6002 ubuntu@203.0.113.10
+203.0.113.10:8443       -> 192.0.2.50:443
+203.0.113.10:9443       -> 192.0.2.50:6099
+203.0.113.10:6000-6098  -> 192.0.2.50:6000-6098
+```
+
+Clients always use the **public** endpoints:
+
+```text
+FRP control : 203.0.113.10:8443
+Enrollment  : https://203.0.113.10:9443/enroll
+SSH example : ssh -p 6000 user@203.0.113.10
 ```
 
 See [examples/pfsense-firewall.md](examples/pfsense-firewall.md).
 
-### Direct public IP
+## 2.3 Enterprise single-443
+
+Use this when a corporate network allows TCP connectivity to non-standard ports
+but resets TLS ClientHello there, or when policy strongly prefers control and
+enrollment on TCP/443.
+
+```mermaid
+flowchart LR
+    I["Internet"]
+
+    subgraph S["FRP Server"]
+        F["FRP Frontend<br/>Public TCP/443"]
+        A["Allocator / Enrollment HTTPS<br/>127.0.0.1:6099"]
+        C["FRP Control<br/>127.0.0.1:7000"]
+        P["Published Services<br/>TCP/6000-6098"]
+
+        F -->|"/enroll, /ca.crt"| A
+        F -->|"/~!frp (WSS)"| C
+    end
+
+    I -->|"TCP/443"| F
+    I -->|"TCP/6000-6098"| P
+```
+
+Public inbound:
 
 ```text
-Public host:                 203.0.113.10
-FRP control:                 public 443   =  listen 443
-Allocator HTTPS:             public 6099  =  listen 6099
-Published services:          6000-6098
+TCP/443        HTTPS enrollment + FRP control over WSS
+TCP/6000-6098 published services
 ```
 
-Open those ports on the host firewall or cloud security group. The installer
-does not configure firewalls. If 443 is already taken, put FRP control on 8443
-(or any free port).
-
-### Enterprise single-443
-
-Use this when a corporate filter allows TCP to a non-standard port but resets
-TLS ClientHello there. Do not switch the allocator to HTTP.
+Internal only:
 
 ```text
-Public host:                 203.0.113.10
-Public TCP/443:              nginx (allocator HTTPS + FRP control over WSS)
-Allocator backend:           127.0.0.1:6099 (not published)
-FRP control backend:         127.0.0.1:7000 (not published)
-Published services:          6000-6098
+127.0.0.1:6099 allocator backend
+127.0.0.1:7000 FRP control backend
 ```
+
+**Do not publish 6099 or 7000 in single-443 mode.**
+
+More detail: [docs/DEPLOYMENT_MODES.md](docs/DEPLOYMENT_MODES.md)
+
+---
+
+# 3. Install the server
+
+For a stable installation, use the immutable v2.1.0 bundle:
 
 ```bash
-FRP_PUBLIC_HOST=203.0.113.10 FRP_DEPLOYMENT_MODE=single443 sudo bash install-server.sh
+curl -fsSL \
+  https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/bootstrap-server.sh \
+  | sudo bash
 ```
 
-Inbound: TCP/443 and TCP/6000-6098. Details, migration, and rollback:
-[docs/DEPLOYMENT_MODES.md](docs/DEPLOYMENT_MODES.md).
+A fresh interactive install asks for the values in this order:
 
-## 2. Install the FRP server
+| Step | Prompt | Typical Direct default | single-443 default |
+| --- | --- | --- | --- |
+| 1 | Public hostname or IP | detected public IP | detected public IP |
+| 2 | Internal FRP server IP | detected private IP | detected private IP |
+| 3 | Deployment mode | `Direct` | choose `Enterprise single-443` |
+| 4 | Public FRP control port | `443` | `443` |
+| 5 | FRP listen/backend port | `443` | `7000` |
+| 6 | Public enrollment HTTPS port | `6099` | `443` |
+| 7 | Allocator listen/backend port | `6099` | `6099` |
+| 8 | Published service range | `6000-6098` | `6000-6098` |
+| 9 | Allocator public URL | derived HTTPS URL | derived `https://host/enroll` |
 
-Stable installs pull from the immutable `v2.1.0` tag (not mutable `main`):
+The installer stores runtime settings in:
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/bootstrap-server.sh | sudo bash
+```text
+/etc/frp-auto-deploy/config.json
 ```
 
-Opt into follow-`main` only with `FRP_RELEASE_CHANNEL=dev` (or an explicit
-`main` raw URL). A stable server's generated client installer URL also pins
-`v2.1.0`.
+It does **not** configure OCI Security Lists, AWS security groups, UFW,
+firewalld, iptables, or external NAT. Open or translate the ports required by
+the deployment pattern you selected.
 
-The installer asks for the public hostname/IP and public vs listen ports. Values
-are stored in `/etc/frp-auto-deploy/config.json`. There is no hard-coded public
-address.
-
-Non-interactive variables:
+Useful non-interactive variables:
 
 ```text
 FRP_PUBLIC_HOST
-FRP_DEPLOYMENT_MODE              (direct | single443; default direct)
-FRP_CONFIRM_MODE_SWITCH          (yes; required for a non-interactive mode cutover)
-FRP_CONTROL_PUBLIC_PORT          (alias: FRP_CONTROL_PORT when both public and listen are unset)
+FRP_INTERNAL_IP
+FRP_DEPLOYMENT_MODE              direct | single443
+FRP_CONTROL_PUBLIC_PORT
 FRP_CONTROL_LISTEN_PORT
 FRP_ALLOCATOR_PUBLIC_PORT
-FRP_ALLOCATOR_LISTEN_PORT        (alias: FRP_ALLOCATOR_PORT)
+FRP_ALLOCATOR_LISTEN_PORT
+FRP_ALLOCATOR_PUBLIC_URL
 FRP_PORT_START
 FRP_PORT_END
-FRP_ALLOCATOR_PUBLIC_URL         (alias: FRP_ALLOCATOR_URL; HTTPS required)
+FRP_CONFIRM_MODE_SWITCH          yes, for non-interactive mode cutover
 ```
 
-Direct-mode defaults for a simple exposed server: control 443/443, allocator
-6099/6099, services 6000-6098. Single-443 defaults: public 443 for both
-allocator HTTPS and FRP WSS, allocator backend 127.0.0.1:6099, FRP backend
-127.0.0.1:7000. Re-running the installer reuses the existing runtime config
-unless those variables are set. An existing private CA, FRP token, registry,
-and reservations are preserved. Switching Direct ↔ single-443 is a
-maintenance-window cutover; see [docs/DEPLOYMENT_MODES.md](docs/DEPLOYMENT_MODES.md).
+Switching Direct ↔ single-443 is a maintenance-window cutover, not a
+zero-downtime operation.
 
-`curl | sudo bash` fetches the installer bundle from GitHub. That is a separate
-trust domain from allocator CA pinning. See [docs/SECURITY.md](docs/SECURITY.md).
-
-### Verify the server (after install)
-
-The project CA exists on the **server** only after `install-server.sh` finishes.
-Use `--cacert /etc/frp-auto-deploy/pki/ca.crt` for those post-install checks.
-Do not use `curl -k` as a production verification flow. Do not download
-`/ca.crt` with `--cacert` pointing at a file that does not exist yet
-(that is not first-trust bootstrap; see B below).
-
-**A. Pre-enrollment diagnostic (transport only, not a trust test)**
-
-From an operator workstation, TCP reachability is a connectivity check only:
+## Verify the server
 
 ```bash
-nc -vz 203.0.113.10 6099    # Direct allocator port; omit for single-443
-nc -vz 203.0.113.10 443
+sudo frpctl show version
+sudo frpctl show status
+sudo frpctl doctor
 ```
 
-If TCP connects but TLS ClientHello is reset, that is the enterprise DPI
-pattern. Use [single-443 mode](docs/DEPLOYMENT_MODES.md). Do not disable TLS,
-do not switch the allocator to HTTP, and do not treat `curl -k` as validation.
-
-**B. First bootstrap fingerprint verification**
-
-The client installer (not a manual `curl --cacert`) does this:
-
-1. GET `/ca.crt` over HTTPS (the local CA file does not exist yet)
-2. Parse it as X.509 and SHA256 the **canonical DER** of the **CA**
-3. Compare that fingerprint to `FRP_ALLOCATOR_CA_SHA256`
-4. Store `/etc/frp-auto-deploy/allocator-ca.crt` only on match
-
-Operators copy the install command printed by `frp-create-client`, which already
-sets `FRP_ALLOCATOR_CA_SHA256`. There is no TOFU and no self-signed
-`--cacert /tmp/ca.crt https://host/ca.crt -o /tmp/ca.crt` loop.
-
-**C. Post-enrollment / post-install verified HTTPS**
-
-On the **server**, after install (CA file is present):
-
-```bash
-sudo frpctl status
-sudo frp-server-status --check
-sudo systemctl status frps --no-pager
-sudo systemctl status frp-port-allocator --no-pager
-# Direct mode (allocator listen default 6099):
-curl -fsS --cacert /etc/frp-auto-deploy/pki/ca.crt https://127.0.0.1:6099/healthz
-# Single-443: public frontend is TCP/443; allocator backend stays localhost:6099
-curl -fsS --cacert /etc/frp-auto-deploy/pki/ca.crt https://127.0.0.1:6099/healthz
-curl -fsS --cacert /etc/frp-auto-deploy/pki/ca.crt https://127.0.0.1/healthz
-sudo systemctl status frp-frontend --no-pager
-```
-
-On the **client**, after enrollment, later allocator calls use the stored CA:
+For single-443 you should see:
 
 ```text
-/etc/frp-auto-deploy/allocator-ca.crt
+frps       : active
+allocator  : active
+frontend   : active
+
+FRP control public : <public-host>:443
+FRP control local  : 127.0.0.1:7000
+Allocator public   : https://<public-host>/enroll
+Allocator local    : 127.0.0.1:6099
 ```
 
-Adjust the Direct-mode healthz port if the allocator listen port is not 6099.
+`doctor` is read-only and performs deeper installation, security, state,
+runtime, and network consistency checks.
 
-## 3. Create a client — zero-touch SSH (recommended)
+---
 
-On the FRP server, interactive TTY collects the SSH login account that already
-exists on the client. There is no default username (`ubuntu`, `root`, or any
-distro-specific account). Blank usernames are rejected.
+# 4. Enroll a client
 
-```bash
-sudo frp-create-client \
-  --one-line \
-  --ssh \
-  --note customer-01
-```
+There are two normal first-install workflows:
 
-The same flow is available as `sudo frpctl enroll --one-line --ssh` or from the
-guided enrollment menu (`sudo frpctl` → Create enrollment → Zero-touch SSH).
+1. **Zero-touch** — server generates one command for the remote machine
+2. **Manual Enrollment Code** — operator creates an Enrollment Code and the client
+   chooses services interactively
 
-```text
-SSH service setup
-=================
+Enrollment establishes a persistent client management identity. Normal later
+service changes and software updates do **not** require re-enrollment.
 
-Enter the SSH login account that already exists on the client machine.
-
-Client SSH user: aella
-SSH port [22]:
-
-Client configuration
---------------------
-SSH user : aella
-SSH port : 22
-Target   : 127.0.0.1:22
-```
-
-Automation may pass `--ssh-user` and skip the prompt:
-
-```bash
-sudo frp-create-client \
-  --one-line \
-  --ssh \
-  --ssh-user aella \
-  --note customer-01
-```
-
-Non-interactive `--one-line --ssh` without `--ssh-user` fails:
-
-```text
-ERROR: --ssh-user is required for non-interactive zero-touch SSH creation.
-```
-
-Send the generated **one-line** command to the remote user. They paste it and
-press Enter. There is no Enrollment Code prompt, no service menu, and no FRP
-configuration knowledge required. The command includes `FRP_SSH_USER` from the
-account entered (or supplied) above.
-
-The command contains a short-lived Bootstrap Ticket. Treat it as sensitive until
-used or expired. Use a placeholder like `<short-lived-bootstrap-ticket>` in
-docs; never publish a real ticket.
-
-Zero-touch does **not**:
-
-- create a user
-- install an SSH server
-- change passwords
-- modify `authorized_keys`
-- enable root login
-- change `sshd_config`
-
-Required beforehand:
-
-- `sshd` already listening
-- the SSH user already exists
-- the administrator already has an authentication method
-
-After the client connects:
-
-```bash
-sudo frpctl show clients
-sudo frpctl show client customer-01
-```
-
-Connect with the **public** host and **public** service port:
-
-```bash
-ssh -p <public-port> ubuntu@203.0.113.10
-```
-
-Never use the internal listen IP/port in connection commands.
-
-## 4. Manual enrollment (still supported)
-
-Zero-touch is not mandatory.
+## 4.1 Zero-touch SSH
 
 On the server:
 
 ```bash
-sudo frp-create-client
+sudo frpctl create enrollment \
+  --one-line \
+  --ssh \
+  --ssh-user aella \
+  --label branch-a
 ```
 
-Example (truncated; not a real secret):
+The SSH account must already exist on the client. Zero-touch does not create OS
+users, passwords, SSH keys, or `authorized_keys`.
+
+The server prints a one-time install command containing a short-lived bootstrap
+ticket. Send that command securely to the remote operator and run it once.
+
+After enrollment:
+
+```bash
+sudo frpctl show clients
+sudo frpctl show enrollments
+```
+
+Connect with the assigned public service port:
+
+```bash
+ssh -p <public-port> aella@203.0.113.10
+```
+
+## 4.2 Manual Enrollment Code
+
+On the server:
+
+```bash
+sudo frpctl create enrollment
+```
+
+The output includes:
+
+- a non-secret Enrollment ID for tracking/revocation
+- a short-lived Enrollment Code shown at creation time
+- the allocator HTTPS URL
+- the allocator CA SHA256 fingerprint
+- the client bootstrap command
+
+Copy the generated client install command **as printed**. On the client, run it
+and enter the Enrollment Code when prompted.
+
+The client then opens a service menu:
 
 ```text
-Enrollment Code:
-7e41d99163a5c410.73f36d...
-
-Expires: 2026-08-26T11:10:00Z (600 seconds)
-
-FRP Server:
-203.0.113.10:8443
-
-Allocator:
-https://203.0.113.10:9443/enroll
-
-CA SHA256:
-<64 lowercase hex characters>
-
-Client install:
-curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/bootstrap-client.sh |
-sudo env \
-  FRP_ALLOCATOR_URL='https://203.0.113.10:9443/enroll' \
-  FRP_ALLOCATOR_CA_SHA256='<sha256>' \
-  bash
+1) SSH
+2) HTTP
+3) HTTPS
+4) Custom TCP
+5) Back
 ```
 
-Run that install command on the client. Enter the Enrollment Code interactively,
-select services, confirm, install.
-
-`FRP_ALLOCATOR_URL` must be HTTPS. First install is sequence **B** above: download
-`/ca.crt`, check the SHA256 fingerprint, store
-`/etc/frp-auto-deploy/allocator-ca.crt`. Later calls are sequence **C**
-(`curl --cacert` with that stored CA). The CA fingerprint does not validate the
-GitHub bootstrap script.
-
-Built-in TCP presets (passthrough, not FRP virtual hosts): SSH `127.0.0.1:22`,
-HTTP `127.0.0.1:80`, HTTPS `127.0.0.1:443`, custom TCP.
-
-Example local targets (LAN application addresses, not FRP public endpoints):
-
-```text
-SSH         127.0.0.1:22
-Grafana     127.0.0.1:3000
-Web Admin   192.0.2.80:443
-```
-
-A successful install writes `/etc/frp/client-state.json` (mode 600, no secrets).
-`frpc.toml` and `access-info.txt` are generated from that state.
-
-If the first-install bootstrap is run again on an already-installed client, it
-refuses re-enrollment and points at `sudo frpctl update`.
+The FRP server assigns public service ports automatically. The client chooses
+the **target host and target port**, not the external public port.
 
 ---
 
-# Everyday operations
+# 5. Common client scenarios
 
-For normal operation, remember:
+## Scenario A — publish only the client's SSH
+
+During the first manual enrollment:
+
+```text
+Type        : SSH
+Service ID  : ssh
+Target host : 127.0.0.1
+Target port : 22
+SSH user    : aella
+```
+
+Result:
+
+```text
+Internet -> FRP Server:<assigned-port> -> client 127.0.0.1:22
+```
+
+## Scenario B — publish SSH + local HTTPS
+
+Add two services before selecting **Install and connect**:
+
+```text
+Service 1
+  Type        : SSH
+  Service ID  : ssh
+  Target      : 127.0.0.1:22
+
+Service 2
+  Type        : HTTPS
+  Service ID  : web-admin
+  Target      : 127.0.0.1:443
+```
+
+Each service gets its own persistent public port.
+
+HTTPS is TCP passthrough. FRP does not terminate the application's HTTPS
+session.
+
+## Scenario C — use the client as a gateway to other LAN hosts
+
+The FRP client does not have to publish a service running on itself.
+
+Example:
+
+```text
+Service 1
+  Type        : SSH
+  Service ID  : lan-ssh
+  Target      : 10.10.20.30:22
+
+Service 2
+  Type        : HTTP
+  Service ID  : lan-web
+  Target      : 10.10.20.40:80
+```
+
+Flow:
+
+```mermaid
+flowchart LR
+    U["Internet user"]
+    S["FRP Server"]
+    C["FRP Client<br/>gateway host"]
+    H1["10.10.20.30:22<br/>SSH"]
+    H2["10.10.20.40:80<br/>HTTP"]
+
+    U -->|"public service port"| S
+    C -->|"FRP tunnel"| S
+    C --> H1
+    C --> H2
+```
+
+The FRP client only needs normal IP reachability to those internal targets.
+
+## Scenario D — custom TCP service
+
+Examples:
+
+```text
+Grafana       127.0.0.1:3000
+API           10.10.30.20:8080
+PostgreSQL    10.10.30.30:5432
+Appliance UI  10.10.40.50:8443
+```
+
+Choose **Custom TCP**, give the service a stable Service ID, and enter the target
+host/port.
+
+---
+
+# 6. `frpctl` — the everyday operator CLI
+
+For normal operations, remember one command:
 
 ```bash
 sudo frpctl
 ```
 
-That starts the persistent CLI. Type `?` for context help, or `help` for the
-full syntax. Press Tab to complete a unique match or list next-token candidates.
-`↑` / `↓` walk this session only (nothing is saved to disk). `menu` opens the
-guided numbered menu. The canonical client selector is CLIENT ID.
+`frpctl` starts a persistent interactive CLI.
 
-Grammar: `<verb> <resource> [target] [property] [value]`. Full tree:
-[docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md).
+```text
+Tab   show or complete valid next tokens immediately
+?     context-sensitive help
+help  full command help
+↑/↓   in-memory history for this session only
+menu  guided numbered menu
+exit  leave the CLI
+```
+
+Grammar:
+
+```text
+<verb> <resource> [target] [property] [value]
+```
+
+The canonical server-side client selector is immutable **CLIENT ID**. Label and
+hostname are convenient shortcuts, but changing metadata never changes the
+CLIENT ID.
+
+## Server examples
+
+```text
+show status
+show version
+show clients
+show client <ID>
+show client <ID> services
+show client <ID> tags
+show enrollments
+show audit
+show upstream
+
+set client <ID> label production-gateway
+set client <ID> note "Seoul office gateway"
+set client <ID> tag site seoul
+
+unset client <ID> label
+unset client <ID> note
+unset client <ID> tag site
+
+create enrollment
+create enrollment --one-line --ssh --ssh-user aella --label branch-a
+create enrollments --count 3
+create backup
+
+revoke enrollment <ID>
+revoke client <CLIENT-ID>
+
+release service <CLIENT-ID> <service-id>
+release client <CLIENT-ID>
+
+update project --check
+update project
+update frp --check
+
+doctor
+```
+
+## Client examples
+
+```text
+show status
+show version
+show services
+show info
+
+add service
+set service <service-id> target-host <host>
+set service <service-id> target-port <port>
+set service <service-id> ssh-user <user>
+set service <service-id> name <value>
+
+enable service <service-id>
+disable service <service-id>
+
+apply
+discard
+
+update project --check
+doctor
+```
+
+Client service edits are staged. Use `apply` to make them live or `discard` to
+drop pending changes.
+
+Full reference: [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md)
+
+---
+
+# 7. Lifecycle semantics — important
+
+These operations are deliberately different:
+
+```text
+disable   != release
+revoke    != release
+uninstall != release
+uninstall != purge
+update    != re-enrollment
+```
+
+| Operation | What it does | Public port reservation |
+| --- | --- | --- |
+| `disable service` | temporarily stops publishing the service | **kept** |
+| `enable service` | republishes the service | **same port reused** |
+| edit + `apply` | changes target/name/config | **kept when possible** |
+| `revoke client` | removes management identity / blocks management | **kept** |
+| `release service` | returns one service's public port | **released** |
+| `release client` | removes the server client record and all reservations | **released** |
+| client uninstall | removes local client state only | **server ports remain** |
+| server uninstall | removes runtime/software | state is preserved |
+| server purge | destructive server cleanup | state deleted |
+
+There is intentionally no ambiguous `delete client` command. If you mean
+"free the public ports and remove the server record", use `release client`.
+
+---
+
+# 8. Backup, restore, and updates
+
+## Backup / restore
+
+On the server:
 
 ```bash
-sudo frpctl show status
-sudo frpctl show version
-sudo frpctl doctor
-sudo frpctl doctor --json
+sudo frpctl create backup
+sudo frpctl restore backup <path>
+```
+
+Backup/restore covers project state such as configuration, registry, enrollment
+metadata, token, and PKI according to the documented backup format.
+
+## Project update
+
+Check first:
+
+```bash
 sudo frpctl update project --check
-sudo frpctl help
-sudo frpctl help set client
 ```
 
-`show status` (`status`) is a fast snapshot. `doctor` is deeper and read-only.
-Configuration uses `set` / `unset`. Lifecycle uses `create`, `revoke`,
-`release`, `update`, and `restore`. Those verbs are not interchangeable.
+Then update:
 
-Official upstream binaries are `frps` and `frpc`. `frpctl` and the other `frp-*`
-commands belong to this project.
+```bash
+sudo frpctl update project
+```
 
-| Task | Command |
+The updater verifies release metadata and `SHA256SUMS`. Same-version updates are
+identified by verified bundle SHA256, not by `PROJECT_VERSION` alone. This
+allows a development build to refresh management code without falsely reporting
+"not needed" only because both trees say `2.1.0`.
+
+A normal project update does not re-enroll clients or intentionally rotate the
+CA, FRP token, client identity, or persistent service ports.
+
+## FRP binary update
+
+```bash
+sudo frpctl show upstream
+sudo frpctl update frp --check
+```
+
+`show upstream` may report a newer upstream FRP release. That does not mean the
+project will install it. Only the pinned/tested FRP version is accepted by the
+normal update path.
+
+---
+
+# 9. Security model
+
+The management plane is designed to fail closed.
+
+- Enrollment and management use **HTTPS only**
+- The server maintains a project private CA
+- First client trust uses a supplied **CA SHA256 fingerprint** and X.509 parsing
+- Later management requests use the stored CA
+- Clients receive a persistent ECDSA management identity after enrollment
+- FRP data/control authentication still uses the FRP token
+- Zero-touch bootstrap tickets are short-lived and sensitive
+- `show enrollments`, Tab completion, help, status, and audit views do not expose
+  enrollment secrets
+- `frpctl` history is session-only and is not written to disk
+- `frpctl` tokenization does not perform shell variable expansion, globbing, or
+  command substitution
+- Plain HTTP allocator operation is not supported
+- Production verification should not disable TLS verification
+- Installer bundles are covered by `SHA256SUMS`; this project does not currently
+  ship cryptographic signatures for its own bootstrap scripts
+
+Security details: [docs/SECURITY.md](docs/SECURITY.md)
+
+---
+
+# 10. Supported platforms and validation
+
+Automated userspace/container portability is exercised on:
+
+| Distribution | Automated container matrix |
 | --- | --- |
-| Interactive CLI | `sudo frpctl` |
-| List clients | `sudo frpctl show clients` |
-| Client details | `sudo frpctl show client ID` |
-| Set label / note / tag | `sudo frpctl set client ID label VALUE` |
-| Unset metadata | `sudo frpctl unset client ID label` |
-| Enroll / zero-touch | `sudo frpctl create enrollment --ssh --ssh-user USER --label NAME` |
-| Revoke identity | `sudo frpctl revoke client ID` |
-| Release one service | `sudo frpctl release service ID SVC` |
-| Release client | `sudo frpctl release client ID` |
-| Update project | `sudo frpctl update project` |
-| Client services | `sudo frpctl show services` / `sudo frpctl add service` |
+| Ubuntu 22.04 | PASS |
+| Ubuntu 24.04 | PASS |
+| Rocky Linux 9 | PASS |
+| AlmaLinux 9 | PASS |
+| Amazon Linux 2023 | PASS |
+| Amazon Linux 2 | PASS |
+
+Real-environment validation and container validation are **not the same claim**.
+For example, SELinux Enforcing, native ARM64 systemd, and some older OpenSSL
+environments have separate validation gates.
+
+See [docs/RELEASE_VALIDATION.md](docs/RELEASE_VALIDATION.md) for the authoritative
+support/validation classification.
 
 ---
 
-# Lifecycle semantics
+# 11. Useful files and services
+
+Server:
 
 ```text
-disable  !=  release
-revoke   !=  release
-uninstall !=  release
-uninstall !=  purge
-update   !=  re-enrollment
-```
-
-## Services
-
-Add, Edit, Disable, Re-enable, Release.
-
-- Edit preserves the public port
-- Disable preserves the public port
-- Re-enable reuses the same public port
-- Release frees the port
-
-At least one enabled service is required.
-
-## Clients
-
-Enroll → Active → Revoke and/or Release → Uninstall → Re-enroll/recovery.
-
-- Uninstall on the client is local removal only; the server keeps reservations
-- Revoke blocks signed management; reservations remain
-- Release frees ports
-- Lost local identity is recovered with a new Enrollment Code, not with `frpctl update`
-
-## Failure / transaction model
-
-Operations are staged. Critical writes are atomic. Runtime apply is verified.
-Failed update/apply rolls back where that is safe. Ambiguous reservation state
-is preserved. `RECOVERY_REQUIRED` / `FAILURE_CLASS=` are explicit. Follow
-`sudo frpctl doctor` rather than editing the registry by hand.
-
-Retries of the same logical Apply (new timestamp/nonce/signature) reuse existing
-public ports. Exact replay of a signed nonce is rejected.
-
----
-
-# Update
-
-Project version and FRP binary version are different.
-
-| Host | `sudo frpctl update` does |
-| --- | --- |
-| Client | Upgrades `frp-auto-deploy` tools. Preserves CA file, identity, `client-state.json`, ports. No Enrollment Code when trust exists. Does not rewrite a working `frpc.toml` or restart `frpc` unless the pinned FRP binary actually changes. |
-| Server | Upgrades the **pinned FRP binary** (`frps`) only, with health-check rollback. Does not rotate CA, token, or registry. |
-
-Server **project tooling** (allocator scripts, `frpctl`, …) is refreshed by
-re-running the server installer / `bootstrap-server.sh`. That reinstall
-preserves private CA, FRP token, registry, and reservations unless you change
-configuration that requires a leaf certificate reissue.
-
-```bash
-sudo frpctl update
-sudo frp-update --check          # server FRP binary, check only
-sudo frpctl project-update --check
-sudo frp-client update           # client project tools
-```
-
-Same-version server project updates compare **build identity** (the SHA256SUMS
-digest of `dist/bootstrap-server.sh`), not only `PROJECT_VERSION`. `--check` is
-read-only. A matching semantic version with a different or unknown bundle SHA
-is an update; the same verified SHA is `not needed` and does not mutate state.
-
-Hosts installed before `frpctl`:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/bootstrap-client.sh \
-| sudo bash -s -- --upgrade
-```
-
-Update is not re-enrollment. Already enrolled 1.9.1 clients remain compatible
-with a 2.0.0 server (management protocol schema 1 is unchanged).
-
-Legacy clients installed before secure project-update metadata
-require a one-time verified bridge. The old updater cannot retroactively
-verify an artifact before executing it. Do not pipe a mutable `main` URL
-into `sudo`. Download `SHA256SUMS` and `dist/bootstrap-client.sh` from the
-same immutable commit, require the checksums to match, then run the bundle
-with explicit `FRP_RELEASE_CHANNEL` / `FRP_EXPECTED_SOURCE_REF` and
-`FRP_BUNDLE_SHA256`. See `docs/FRP_UPGRADE.md`.
-
----
-
-# Uninstall and purge
-
-| Operation | Effect |
-| --- | --- |
-| Client uninstall | Local removal only. Does **not** contact the server. Does **not** release ports. |
-| Server uninstall | Removes software/runtime. Token, CA, config, registry, reservations **preserved**. |
-| Server purge | Destructive. Requires `--purge --yes`. Deletes token, CA, registry, enrollments, config. |
-
-### Client
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/uninstall-client.sh | sudo bash
-```
-
-After uninstall, a later install is a new enrollment because local identity is
-gone. Release ports on the server if they should be freed.
-
-### Server
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/uninstall-server.sh | sudo bash
-```
-
-Purge (test hosts / decommission only):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/uninstall-server.sh | sudo bash -s -- --purge --yes
-```
-
----
-
-# Doctor and troubleshooting
-
-```bash
-sudo frpctl status              # fast snapshot
-sudo frpctl doctor              # deeper read-only diagnostics
-sudo frpctl doctor --json       # machine-readable; JSON schema_version 1
-```
-
-Doctor is **read-only**. It does not restart services, rewrite configuration,
-release ports, revoke clients, consume a management nonce, or update software.
-
-Exit 0: no FAIL findings (warnings allowed). Exit 1: one or more FAIL findings.
-Exit 2: doctor itself could not complete.
-
-Check IDs in `--json` are a stable automation surface (for example
-`client_state`, `frpc_config`, `allocator_health`, `frp_version`,
-`pending_transaction`). Do not rename them casually.
-
-Primary recovery: run doctor, then the recommended action.
-
-| Symptom | Typical action |
-| --- | --- |
-| `client-state.json` invalid | Restore `/etc/frp/client-state.json` from the latest valid backup |
-| `frpc.toml` missing | `sudo frp-client` → Apply current configuration (generated from client-state) |
-| Allocator TLS hostname mismatch | Re-run the **server** installer (same CA; leaf reissued) |
-| FRP binary version mismatch | `sudo frpctl update` |
-| Pending Apply / pending update | Retry `sudo frpctl update` or Apply; do not delete markers by hand |
-| Rollback failure / `RECOVERY_REQUIRED` | Follow the printed `FAILURE_CLASS`; doctor for state |
-| Registry corruption | Restore `registry.json` from backup; doctor does not repair it |
-| Allocator unreachable | Check public HTTPS URL, NAT, firewall, `frp-port-allocator` unit |
-| TCP connect works, TLS ClientHello reset | Enterprise DPI on a non-standard TLS port; use single-443 mode, not HTTP |
-| `frpc` / `frps` inactive | `systemctl status`; then doctor |
-
----
-
-# Architecture
-
-Public endpoints and local listeners are independent. Direct mode does not
-need FRP to own public TCP/443. Enterprise single-443 shares one public TLS
-port; see [docs/DEPLOYMENT_MODES.md](docs/DEPLOYMENT_MODES.md).
-
-```text
-FRP control:     public port  may differ from  listen port
-Allocator HTTPS: public port  may differ from  listen port
-Published svc:   public port  ==  remote/listen service port (1:1)
-```
-
-Example:
-
-```text
-Public FRP 8443       ->  internal frps 443
-Public allocator 9443 ->  internal allocator 6099
-Public service 6002   ->  internal service port 6002
-```
-
-On a direct public host, matching ports (443/443, 6099/6099) are valid
-convenience defaults.
-
-Connection info always uses the public host and public service port.
-
-Canonical local files:
-
-```text
-client-state.json   canonical desired local state (no secrets)
-frpc.toml           generated runtime artifact
-access-info.txt     generated display artifact
-registry.json       server port/identity registry (do not hand-edit)
-```
-
-Registry schema is **v2**. Schema v1 registries are refused, not rewritten.
-See [docs/SCHEMA_V2_DEPLOYMENT.md](docs/SCHEMA_V2_DEPLOYMENT.md).
-
----
-
-# Security model
-
-Summary (full write-up: [docs/SECURITY.md](docs/SECURITY.md)):
-
-1. FRP tunnel = FRP TLS + FRP token (tunnel only)
-2. Management transport = HTTPS + private CA + server certificate verification
-3. Bootstrap = Enrollment Code **or** short-lived Bootstrap Ticket
-4. Persistent management = ECDSA P-256 + timestamp + nonce + signed request
-5. Replay window: `MAX_CLOCK_SKEW=300`, `MGMT_NONCE_TTL=900`, `MAX_NONCES_PER_CLIENT=256`
-
-Local root compromise on the FRP server or client is **outside** the protection
-boundary.
-
-**Secrets:** FRP token, Enrollment Code, valid Bootstrap Ticket, client private
-key, management MAC, CA key, TLS server key.
-
-**Not secrets:** CA cert, CA fingerprint, server cert, management public key,
-service ID, public port, public hostname.
-
-Expected modes include `server_token`/`ca.key`/`server.key`/`client-identity.key`
-`0600`, and `ca.crt`/`server.crt`/`allocator-ca.crt` `0644`.
-
-Checksums validate FRP archives and repository `SHA256SUMS`. This project does
-not currently ship signatures of its own bootstrap scripts.
-
----
-
-# Compatibility
-
-Automated **systemd Linux** on **x86_64** and **aarch64/arm64**.
-
-Runtime minimums: Bash 4.2, Python 3.7 (distro `python3`, no PyPI), usable
-systemd (`/run/systemd/system`), and `apt-get` / `dnf` / `yum`. Also `curl`,
-`openssl`, `tar`, and `sha256sum` (or equivalent).
-
-The installers do not disable SELinux and do not change firewalld, ufw,
-iptables, or nftables.
-
-### Support matrix
-
-Do not read one `PASS` as covering every column.
-
-| Distribution | Container userspace | LXD systemd PID1 | Real VM | SELinux Enforcing | TTY |
-| --- | --- | --- | --- | --- | --- |
-| Ubuntu 22.04 | PASS | N/A | PASS (live baseline) | N/A | PASS (live baseline) |
-| Ubuntu 24.04 | PASS | N/A | PASS (live baseline) | N/A | PASS (live baseline) |
-| Rocky Linux 9 | PASS | PASS | NOT_TESTED | NOT_TESTED | PASS (LXD TTY) |
-| AlmaLinux 9 | PASS | PASS | NOT_TESTED | NOT_TESTED | PASS (LXD TTY) |
-| Amazon Linux 2023 | PASS | PASS | NOT_TESTED | N/A | PASS (LXD TTY) |
-| Amazon Linux 2 | PASS | NOT_TESTED | NOT_TESTED | N/A | NOT_TESTED |
-| Debian 12 | Best-effort | NOT_TESTED | NOT_TESTED | N/A | Unit tests |
-| Fedora current | Best-effort | NOT_TESTED | NOT_TESTED | N/A | Unit tests |
-| RHEL 9 / CentOS Stream 9 | Best-effort | NOT_TESTED | NOT_TESTED | N/A | Unit tests |
-
-**Container** = Docker userspace (`./tests/run-distro-matrix.sh`). Not a real VM,
-not real systemd PID 1, not SELinux Enforcing.
-
-Rocky/Alma **SELinux Enforcing** remains `NOT_TESTED`. This project does not
-claim full support on Enforcing until that gate is recorded in
-[docs/RELEASE_VALIDATION.md](docs/RELEASE_VALIDATION.md).
-
-2.1.0 field-validated Enterprise single-443 on **Ubuntu 24.04 x86_64** with a
-direct public-IP server and an enterprise-restricted client: HTTPS/443
-enrollment, WSS/443 control, published SSH, and client/server reboot recovery.
-That evidence does **not** cover firewall DNAT / private FRP-server topology,
-SELinux Enforcing, ARM64 hosts, or OpenSSL 1.0.2 hosts.
-
-Full ARM64 systemd install: `NOT_TESTED` (arch mapping is unit-tested).
-Real OpenSSL 1.0.2 TLS enrollment: `NOT_TESTED` (Amazon Linux 2 container is
-userspace only).
-Firewall DNAT / private FRP-server topology: `NOT_TESTED` in a real environment.
-
-Windows: FRP supports Windows; this package automates systemd Linux only. See
-[windows/README.md](windows/README.md).
-
-On Amazon Linux 2 (systemd 219), the allocator unit omits newer hardening
-directives (`ProtectSystem=strict`, `ReadWritePaths`, `NoNewPrivileges`).
-`PrivateTmp` is kept.
-
----
-
-# Backups
-
-Server (minimum):
-
-```text
-/etc/frp-auto-deploy/pki/
-/etc/frp/server_token
-/etc/frp-auto-deploy/config.json
-/var/lib/frp-auto-deploy/registry.json
-```
-
-Losing the private CA is not fixed by `frpctl update`. See
-[docs/SECURITY.md](docs/SECURITY.md) for disaster recovery.
-
-Do not copy client private keys over insecure channels. Client uninstall
-removes local identity on purpose.
-
----
-
-# Existing server migration
-
-The server installer can run over an existing FRP deployment. An existing
-`/etc/frp/server_token` is reused. Legacy inline `auth.token` is migrated into
-that file without changing its value. A new token is generated only on a genuine
-fresh install.
-
-Before rewriting `frps.toml`, the old configuration is copied to a timestamped
-mode-`600` backup. Active listeners in the configured service range are reserved
-so existing published ports are not handed to a new client.
-
----
-
-# Important files
-
-### Server
-
-```text
-/etc/frp/server_token
 /etc/frp/frps.toml
+/etc/frp/server_token
 /etc/frp-auto-deploy/config.json
 /etc/frp-auto-deploy/version
-/etc/frp-auto-deploy/pki/ca.crt
-/etc/frp-auto-deploy/pki/ca.key
-/etc/frp-auto-deploy/pki/server.crt
-/etc/frp-auto-deploy/pki/server.key
+/etc/frp-auto-deploy/pki/
 /var/lib/frp-auto-deploy/registry.json
-/var/lib/frp-auto-deploy/mgmt-nonces.json
 /var/lib/frp-auto-deploy/enrollments/
 /var/lib/frp-auto-deploy/bootstrap/
-/usr/local/sbin/frpctl
 ```
 
-### Client
+Client:
 
 ```text
 /etc/frp/frpc.toml
 /etc/frp/client-state.json
 /etc/frp/client-identity.key
-/etc/frp/client-identity.pub
-/etc/frp/client-identity.mac
-/etc/frp/access-info.txt
-/etc/frp-auto-deploy/version
 /etc/frp-auto-deploy/allocator-ca.crt
-/usr/local/bin/frpc
-/usr/local/bin/frp-client
-/usr/local/bin/frpctl
+```
+
+Systemd units:
+
+```text
+frps.service
+frp-port-allocator.service
+frp-frontend.service    # single-443 only
+frpc.service            # client
 ```
 
 ---
 
-# Development
+# 12. Uninstall and decommission
+
+Client uninstall is **local-only**. It intentionally does not contact the server
+or free public ports.
 
 ```bash
-git clone https://github.com/datarelay-labs/frp-auto-deploy.git
-cd frp-auto-deploy
+curl -fsSL \
+  https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/uninstall-client.sh \
+  | sudo bash
 ```
 
-Local non-Docker regression (CI-equivalent minus the container matrix):
+If the client is being permanently decommissioned, release its server-side
+reservations separately.
+
+Server uninstall preserves token, CA, configuration, registry, and reservations:
 
 ```bash
-./tests/run-all.sh
+curl -fsSL \
+  https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/uninstall-server.sh \
+  | sudo bash
 ```
 
-Release gate:
+Destructive purge is for test/decommission scenarios only:
 
 ```bash
-./tests/run-all.sh
-./tests/run-distro-matrix.sh
-./scripts/build-bundles.sh
-git diff --exit-code dist/
-./scripts/verify-sha256sums.sh
-git diff --check HEAD
+curl -fsSL \
+  https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/uninstall-server.sh \
+  | sudo bash -s -- --purge --yes
 ```
-
-`CONTAINER_MATRIX=PASS` is not `REAL_VM=PASS`. Real-environment procedure:
-[docs/RELEASE_VALIDATION.md](docs/RELEASE_VALIDATION.md).
-Checklist: [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md).
-
-Read-only live host collector: `tests/live-distro-smoke.sh`.
-
-Rebuild standalone bundles after source changes:
-
-```bash
-./scripts/build-bundles.sh
-./scripts/update-sha256sums.sh
-```
-
-The repository must not contain real tokens, enrollment secrets, private keys,
-runtime configs, or live infrastructure addresses.
 
 ---
 
-# Known limitations
+# 13. Known limits
 
-- TCP services only (no UDP automation)
-- Service NAT is 1:1 port-number mapping
-- No automatic firewall, SELinux policy, or SSH account/key management
-- No Web UI, database, HA, mTLS, or CA-rotation UI
+- TCP services only
+- Published service NAT uses the same public/internal FRP service port number
+- No automatic cloud firewall, security group, UFW, firewalld, iptables, or
+  external NAT configuration
+- No automatic SSH account, password, or SSH key management
 - Windows client automation is not included
-- Real VM / SELinux Enforcing / ARM64 systemd / real OpenSSL 1.0.2 TLS enrollment
-  remain `NOT_TESTED` where the matrix says so
-- Firewall DNAT / private FRP-server topology was not field-validated in 2.1.0
-- Installer bundles are checksummed, not signed by this project
+- Some real-VM / SELinux / ARM64 / older OpenSSL combinations remain separately
+  classified in the validation matrix
+- Project bootstrap scripts are checksummed, not cryptographically signed
+
+---
+
+# 14. Documentation map
+
+| Topic | Document |
+| --- | --- |
+| CLI grammar and all commands | [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md) |
+| Direct vs single-443 | [docs/DEPLOYMENT_MODES.md](docs/DEPLOYMENT_MODES.md) |
+| Security and trust model | [docs/SECURITY.md](docs/SECURITY.md) |
+| FRP / project upgrade behavior | [docs/FRP_UPGRADE.md](docs/FRP_UPGRADE.md) |
+| Release validation claims | [docs/RELEASE_VALIDATION.md](docs/RELEASE_VALIDATION.md) |
+| Release checklist | [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md) |
+| OCI acceptance | [docs/OCI_ACCEPTANCE.md](docs/OCI_ACCEPTANCE.md) |
+| pfSense / DNAT example | [examples/pfsense-firewall.md](examples/pfsense-firewall.md) |
+| Changes by release | [CHANGELOG.md](CHANGELOG.md) |
+
+---
+
+## Quick operator checklist
+
+Server:
+
+```bash
+sudo frpctl show version
+sudo frpctl show status
+sudo frpctl show clients
+sudo frpctl show enrollments
+sudo frpctl doctor
+```
+
+Client:
+
+```bash
+sudo frpctl show status
+sudo frpctl show services
+sudo frpctl show info
+sudo frpctl doctor
+```
+
+If those commands are healthy and the assigned public service port is reachable,
+the normal FRP path is ready.
