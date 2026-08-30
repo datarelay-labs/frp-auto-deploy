@@ -1,41 +1,15 @@
 name: windows-client
 on:
   push:
-    paths:
-      - 'windows/**'
-      - 'tests/windows/**'
-      - 'docs/WINDOWS_CLIENT.md'
-      - 'docs/WINDOWS_CLIENT_DESIGN.md'
-      - 'scripts/build-bundles.py'
-      - 'tools/frp-create-client'
-      - 'server/frp-port-allocator.py'
-      - 'lib/frp_mgmt_auth.py'
-      - '.github/workflows/windows-client.yml'
   pull_request:
-    paths:
-      - 'windows/**'
-      - 'tests/windows/**'
-      - 'docs/WINDOWS_CLIENT.md'
-      - 'docs/WINDOWS_CLIENT_DESIGN.md'
-      - 'scripts/build-bundles.py'
-      - 'tools/frp-create-client'
-      - 'server/frp-port-allocator.py'
-      - 'lib/frp_mgmt_auth.py'
-      - '.github/workflows/windows-client.yml'
 
 permissions:
   contents: read
 
 jobs:
-  windows-pwsh:
-    name: Windows ${{ matrix.shell }}
+  windows-powershell51:
+    name: Windows PowerShell 5.1
     runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        shell:
-          - powershell
-          - pwsh
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Setup Python
@@ -48,13 +22,13 @@ jobs:
           python3 scripts/build-bundles.py
           test -f dist/bootstrap-client.ps1
       - name: Run Windows client test suite
-        shell: ${{ matrix.shell }}
+        shell: powershell
         run: |
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
           & .\tests\windows\run-all.ps1
-      - name: Optional local FRP binary smoke (download + hash + version)
-        shell: pwsh
+      - name: FRP binary smoke (download + hash + version)
+        shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           . .\windows\lib\FrpPaths.ps1
@@ -73,6 +47,27 @@ jobs:
             Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
             Remove-Item Env:FRP_WINDOWS_ROOT -ErrorAction SilentlyContinue
           }
+
+  windows-pwsh7:
+    name: Windows PowerShell 7
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build Windows bootstrap artifact
+        shell: bash
+        run: |
+          python3 scripts/build-bundles.py
+          test -f dist/bootstrap-client.ps1
+      - name: Run Windows client test suite
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          & .\tests\windows\run-all.ps1
 
   linux-pwsh-cross:
     name: Linux pwsh cross-language
