@@ -47,7 +47,7 @@ protocol = str(raw.get('protocol', 'tcp') or 'tcp').strip().lower()
 if protocol != 'tcp':
     raise SystemExit('ERROR: only tcp services are supported')
 preset = str(raw.get('preset', 'custom') or 'custom').strip().lower()
-if preset not in ('ssh', 'http', 'https', 'custom'):
+if preset not in ('ssh', 'http', 'https', 'rdp', 'custom'):
     raise SystemExit('ERROR: invalid service preset')
 name = str(raw.get('name', '') or sid).strip() or sid
 if len(name) > 64 or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in name):
@@ -1025,7 +1025,7 @@ frp_client_add_service_cli() {
       name="${name:-$sid}"
       [[ -n "$port" ]] || { echo "ERROR: --target-port is required" >&2; return 2; }
       ;;
-    *) echo "ERROR: preset must be ssh, http, https, or custom" >&2; return 2 ;;
+    *) echo "ERROR: preset must be ssh, http, https, rdp, or custom" >&2; return 2 ;;
   esac
   frp_client_ensure_pending
   local payload

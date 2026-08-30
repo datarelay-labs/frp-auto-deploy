@@ -645,7 +645,11 @@ frpctl_zt_prompt_ssh() {
 
 frpctl_zt_invoke_create_client() {
   # Usage: frpctl_zt_invoke_create_client [extra frp-create-client args...]
-  local -a args=("$@")
+  local -a args=()
+  if [[ -n "${_FRP_ZT_PLATFORM:-}" ]]; then
+    args+=(--platform "$_FRP_ZT_PLATFORM")
+  fi
+  args+=("$@")
   if [[ -n "${_FRP_ZT_CLIENT_NAME:-}" ]]; then
     args+=(--client-name "$_FRP_ZT_CLIENT_NAME")
   fi
@@ -660,6 +664,7 @@ frpctl_zt_run_ssh() {
   _FRP_ZT_NOTE=""
   _FRP_ZT_SSH_USER=""
   _FRP_ZT_SSH_PORT=""
+  _FRP_ZT_PLATFORM="${_FRP_ZT_PLATFORM:-linux}"
   frpctl_zt_prompt_client_identification || return 1
   frpctl_zt_prompt_ssh || return 1
   frpctl_zt_invoke_create_client \
@@ -667,6 +672,32 @@ frpctl_zt_run_ssh() {
     --ssh \
     --ssh-user "$_FRP_ZT_SSH_USER" \
     --ssh-port "$_FRP_ZT_SSH_PORT"
+}
+
+frpctl_zt_run_rdp() {
+  _FRP_ZT_CLIENT_NAME=""
+  _FRP_ZT_NOTE=""
+  _FRP_ZT_PLATFORM="${_FRP_ZT_PLATFORM:-windows}"
+  local rdp_port=""
+  frpctl_zt_prompt_client_identification || return 1
+  echo
+  echo "RDP"
+  echo "==="
+  echo
+  echo "Default local target: 127.0.0.1:3389"
+  echo "This installer does not enable Remote Desktop or change Windows Firewall."
+  echo
+  rdp_port="$(frpctl_read "RDP port [3389]: " "3389")" || return 1
+  rdp_port="${rdp_port#"${rdp_port%%[![:space:]]*}"}"
+  rdp_port="${rdp_port%"${rdp_port##*[![:space:]]}"}"
+  if [[ ! "$rdp_port" =~ ^[0-9]+$ ]] || ((rdp_port < 1 || rdp_port > 65535)); then
+    echo "ERROR: invalid RDP port; must be an integer 1-65535" >&2
+    return 1
+  fi
+  frpctl_zt_invoke_create_client \
+    --one-line \
+    --rdp \
+    --rdp-port "$rdp_port"
 }
 
 frpctl_zt_run_management() {
@@ -774,11 +805,12 @@ PY
 }
 
 frpctl_zt_run_services() {
-  local choice services_file="" rc=0
+  local choice services_file="" rc=0 menu_mode="${1:-linux}"
   local -a svc_jsons=()
   _FRP_ZT_CLIENT_NAME=""
   _FRP_ZT_NOTE=""
   _FRP_ZT_SVC_JSON=""
+  _FRP_ZT_PLATFORM="${_FRP_ZT_PLATFORM:-$menu_mode}"
 
   frpctl_zt_prompt_client_identification || return 1
 
@@ -787,50 +819,110 @@ frpctl_zt_run_services() {
     echo "Configure services"
     echo "=================="
     echo
-    echo "1) Add SSH"
-    echo "2) Add HTTP"
-    echo "3) Add HTTPS"
-    echo "4) Add Custom TCP"
-    echo "5) Finish"
-    echo "6) Cancel"
+    if [[ "$menu_mode" == "windows" ]]; then
+      echo "1) Add RDP"
+      echo "2) Add SSH"
+      echo "3) Add HTTP"
+      echo "4) Add HTTPS"
+      echo "5) Add Custom TCP"
+      echo "6) Finish"
+      echo "7) Cancel"
+    else
+      echo "1) Add SSH"
+      echo "2) Add HTTP"
+      echo "3) Add HTTPS"
+      echo "4) Add RDP"
+      echo "5) Add Custom TCP"
+      echo "6) Finish"
+      echo "7) Cancel"
+    fi
     echo
     choice="$(frpctl_read "Select: " "")" || return 1
-    case "$choice" in
-      1)
-        frpctl_zt_prompt_service_fields ssh ssh SSH 127.0.0.1 22 || continue
-        svc_jsons+=("$_FRP_ZT_SVC_JSON")
-        echo "Added SSH service."
-        ;;
-      2)
-        frpctl_zt_prompt_service_fields http http HTTP 127.0.0.1 80 || continue
-        svc_jsons+=("$_FRP_ZT_SVC_JSON")
-        echo "Added HTTP service."
-        ;;
-      3)
-        frpctl_zt_prompt_service_fields https https HTTPS 127.0.0.1 443 || continue
-        svc_jsons+=("$_FRP_ZT_SVC_JSON")
-        echo "Added HTTPS service."
-        ;;
-      4)
-        frpctl_zt_prompt_service_fields custom "" "Custom TCP" 127.0.0.1 "" || continue
-        svc_jsons+=("$_FRP_ZT_SVC_JSON")
-        echo "Added Custom TCP service."
-        ;;
-      5)
-        if [[ ${#svc_jsons[@]} -eq 0 ]]; then
-          echo "ERROR: add at least one service, or choose Cancel." >&2
-          continue
-        fi
-        break
-        ;;
-      6|"")
-        echo "Cancelled."
-        return 0
-        ;;
-      *)
-        echo "ERROR: select 1-6" >&2
-        ;;
-    esac
+    if [[ "$menu_mode" == "windows" ]]; then
+      case "$choice" in
+        1)
+          frpctl_zt_prompt_service_fields rdp rdp RDP 127.0.0.1 3389 || continue
+          svc_jsons+=("$_FRP_ZT_SVC_JSON")
+          echo "Added RDP service."
+          ;;
+        2)
+          frpctl_zt_prompt_service_fields ssh ssh SSH 127.0.0.1 22 || continue
+          svc_jsons+=("$_FRP_ZT_SVC_JSON")
+          echo "Added SSH service."
+          ;;
+        3)
+          frpctl_zt_prompt_service_fields http http HTTP 127.0.0.1 80 || continue
+          svc_jsons+=("$_FRP_ZT_SVC_JSON")
+          echo "Added HTTP service."
+          ;;
+        4)
+          frpctl_zt_prompt_service_fields https https HTTPS 127.0.0.1 443 || continue
+          svc_jsons+=("$_FRP_ZT_SVC_JSON")
+          echo "Added HTTPS service."
+          ;;
+        5)
+          frpctl_zt_prompt_service_fields custom "" "Custom TCP" 127.0.0.1 "" || continue
+          svc_jsons+=("$_FRP_ZT_SVC_JSON")
+          echo "Added Custom TCP service."
+          ;;
+        6)
+          if [[ ${#svc_jsons[@]} -eq 0 ]]; then
+            echo "ERROR: add at least one service, or choose Cancel." >&2
+            continue
+          fi
+          break
+          ;;
+        7|"")
+          echo "Cancelled."
+          return 0
+          ;;
+        *)
+          echo "ERROR: select 1-7" >&2
+          ;;
+      esac
+    else
+      case "$choice" in
+        1)
+          frpctl_zt_prompt_service_fields ssh ssh SSH 127.0.0.1 22 || continue
+          svc_jsons+=("$_FRP_ZT_SVC_JSON")
+          echo "Added SSH service."
+          ;;
+        2)
+          frpctl_zt_prompt_service_fields http http HTTP 127.0.0.1 80 || continue
+          svc_jsons+=("$_FRP_ZT_SVC_JSON")
+          echo "Added HTTP service."
+          ;;
+        3)
+          frpctl_zt_prompt_service_fields https https HTTPS 127.0.0.1 443 || continue
+          svc_jsons+=("$_FRP_ZT_SVC_JSON")
+          echo "Added HTTPS service."
+          ;;
+        4)
+          frpctl_zt_prompt_service_fields rdp rdp RDP 127.0.0.1 3389 || continue
+          svc_jsons+=("$_FRP_ZT_SVC_JSON")
+          echo "Added RDP service."
+          ;;
+        5)
+          frpctl_zt_prompt_service_fields custom "" "Custom TCP" 127.0.0.1 "" || continue
+          svc_jsons+=("$_FRP_ZT_SVC_JSON")
+          echo "Added Custom TCP service."
+          ;;
+        6)
+          if [[ ${#svc_jsons[@]} -eq 0 ]]; then
+            echo "ERROR: add at least one service, or choose Cancel." >&2
+            continue
+          fi
+          break
+          ;;
+        7|"")
+          echo "Cancelled."
+          return 0
+          ;;
+        *)
+          echo "ERROR: select 1-7" >&2
+          ;;
+      esac
+    fi
   done
 
   services_file="$(mktemp)" || return 1
@@ -853,13 +945,11 @@ frpctl_zt_run_services() {
   return "$rc"
 }
 
-frpctl_guided_zero_touch() {
+frpctl_guided_zero_touch_linux() {
   local choice
   echo
-  echo "Zero-touch enrollment"
-  echo "====================="
-  echo
-  echo "How do you want to configure this client?"
+  echo "Linux Zero-touch enrollment"
+  echo "==========================="
   echo
   echo "1) SSH only"
   echo "2) Configure services"
@@ -867,8 +957,54 @@ frpctl_guided_zero_touch() {
   echo
   choice="$(frpctl_read "Select: " "")" || return 1
   case "$choice" in
-    1) frpctl_zt_run_ssh ;;
-    2) frpctl_zt_run_services ;;
+    1) _FRP_ZT_PLATFORM=linux; frpctl_zt_run_ssh ;;
+    2) _FRP_ZT_PLATFORM=linux; frpctl_zt_run_services linux ;;
+    3|"") return 0 ;;
+    *)
+      echo "ERROR: select 1-3" >&2
+      return 1
+      ;;
+  esac
+}
+
+frpctl_guided_zero_touch_windows() {
+  local choice
+  echo
+  echo "Windows Zero-touch enrollment"
+  echo "============================="
+  echo
+  echo "1) RDP only"
+  echo "2) Configure services"
+  echo "3) Back"
+  echo
+  choice="$(frpctl_read "Select: " "")" || return 1
+  case "$choice" in
+    1) _FRP_ZT_PLATFORM=windows; frpctl_zt_run_rdp ;;
+    2) _FRP_ZT_PLATFORM=windows; frpctl_zt_run_services windows ;;
+    3|"") return 0 ;;
+    *)
+      echo "ERROR: select 1-3" >&2
+      return 1
+      ;;
+  esac
+}
+
+frpctl_guided_zero_touch() {
+  local choice
+  echo
+  echo "Zero-touch enrollment"
+  echo "====================="
+  echo
+  echo "Client platform:"
+  echo
+  echo "1) Linux"
+  echo "2) Windows"
+  echo "3) Back"
+  echo
+  choice="$(frpctl_read "Select: " "")" || return 1
+  case "$choice" in
+    1) frpctl_guided_zero_touch_linux ;;
+    2) frpctl_guided_zero_touch_windows ;;
     3|"") return 0 ;;
     *)
       echo "ERROR: select 1-3" >&2
@@ -890,7 +1026,7 @@ frpctl_guided_enroll() {
   choice="$(frpctl_read "Select: " "")" || return 1
   case "$choice" in
     1)
-      frpctl_zt_run_ssh
+      _FRP_ZT_PLATFORM=linux; frpctl_zt_run_ssh
       ;;
     2)
       frpctl_run frp-create-client

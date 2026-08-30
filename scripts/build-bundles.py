@@ -107,7 +107,49 @@ client_lines.append('exec "$TMP/install-client.sh" "$@"')
 (dist/'bootstrap-client.sh').write_text('\n'.join(client_lines)+'\n')
 (dist/'bootstrap-client.sh').chmod(0o755)
 
+# Windows PowerShell bootstrap: embed windows/ tree, extract, run install-client.ps1.
+# Hand-edit of dist/bootstrap-client.ps1 is forbidden; regenerate via this script.
+win_files = []
+windows_root = root / 'windows'
+for path in sorted(windows_root.rglob('*')):
+    if not path.is_file():
+        continue
+    rel = path.relative_to(root).as_posix()
+    win_files.append(rel)
+
+ps_lines = [
+    '#Requires -Version 5.1',
+    '$ErrorActionPreference = \'Stop\'',
+    '$ProgressPreference = \'SilentlyContinue\'',
+    '$tmp = Join-Path $env:TEMP (\'frp-win-bundle-\' + [guid]::NewGuid().ToString(\'N\'))',
+    'New-Item -ItemType Directory -Force -Path $tmp | Out-Null',
+    'try {',
+]
+for rel in win_files:
+    data = base64.b64encode((root / rel).read_bytes()).decode('ascii')
+    parent = str(Path(rel).parent).replace('\\', '/')
+    out_rel = rel.replace('\\', '/')
+    ps_lines.append(f'  $dir = Join-Path $tmp \'{parent}\'')
+    ps_lines.append('  New-Item -ItemType Directory -Force -Path $dir | Out-Null')
+    ps_lines.append(f'  $out = Join-Path $tmp \'{out_rel}\'')
+    # chunk base64 for readability
+    chunks = [data[i:i+120] for i in range(0, len(data), 120)]
+    ps_lines.append('  $b64 = @\'')
+    ps_lines.extend(chunks)
+    ps_lines.append('\'@')
+    ps_lines.append('  [IO.File]::WriteAllBytes($out, [Convert]::FromBase64String(($b64 -replace \'\\s\',\'\')))')
+
+ps_lines.extend([
+    '  $installer = Join-Path $tmp \'windows/install-client.ps1\'',
+    '  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer @args',
+    '  exit $LASTEXITCODE',
+    '} finally {',
+    '  Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue',
+    '}',
+])
+(dist / 'bootstrap-client.ps1').write_text('\n'.join(ps_lines) + '\n', encoding='utf-8')
+
 for src,dst in [('uninstall-client.sh','uninstall-client.sh'),('uninstall-server.sh','uninstall-server.sh')]:
     (dist/dst).write_bytes((root/src).read_bytes())
     (dist/dst).chmod(0o755)
-print('Built dist/bootstrap-server.sh and client bundles')
+print('Built dist/bootstrap-server.sh, bootstrap-client.sh, and bootstrap-client.ps1')

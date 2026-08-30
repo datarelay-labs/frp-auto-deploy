@@ -33,7 +33,7 @@ SERVICE_ID_RE = re.compile(r'^[a-z0-9][a-z0-9._-]{0,31}$')
 MAX_SERVICES = 32
 MAX_NAME_LEN = 64
 MAX_HOST_LEN = 253
-ALLOWED_PRESETS = ('ssh', 'http', 'https', 'custom')
+ALLOWED_PRESETS = ('ssh', 'http', 'https', 'rdp', 'custom')
 ALLOWED_PROTOCOLS = ('tcp',)
 NONCE_RE = re.compile(r'^[0-9a-f]{64}$')
 BOOTSTRAP_TICKET_PREFIX = 'bt1'
@@ -595,6 +595,7 @@ def normalize_service(raw):
         'ssh': 'SSH',
         'http': 'HTTP',
         'https': 'HTTPS',
+        'rdp': 'RDP',
     }.get(preset, sid)
     name = str(raw.get('name', '') or default_name).strip() or default_name
     try:

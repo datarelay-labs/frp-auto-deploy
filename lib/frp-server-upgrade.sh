@@ -470,6 +470,77 @@ if old:
 else:
     sys.stdout.write("Client installer URL : set to release default\n")
 PY
+
+  # Migrate Windows installer URL with the same release-line safety rules.
+  local win_current win_next win_canonical
+  if [[ -n "${FRP_WINDOWS_CLIENT_INSTALLER_URL:-}" ]]; then
+    win_next="${FRP_WINDOWS_CLIENT_INSTALLER_URL}"
+  else
+    win_current="$(
+      python3 - "$config" <<'PY'
+import json, sys
+from pathlib import Path
+try:
+    data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(1)
+print(str(data.get("windows_client_installer_url") or "").strip())
+PY
+    )" || return 1
+    win_canonical="$(
+      PROJECT_VERSION="${target_version:-$PROJECT_VERSION}" \
+      FRP_RELEASE_CHANNEL="${target_channel:-$(frp_release_channel)}" \
+      frp_default_windows_client_installer_url
+    )"
+    win_next="$(
+      PROJECT_VERSION="${target_version:-$PROJECT_VERSION}" \
+      FRP_RELEASE_CHANNEL="${target_channel:-$(frp_release_channel)}" \
+      frp_canonicalize_managed_windows_client_installer_url "$win_current"
+    )"
+    if [[ -z "$win_current" ]]; then
+      win_next="$win_canonical"
+    fi
+  fi
+  python3 - "$config" "$win_next" <<'PY'
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+path = Path(sys.argv[1])
+new_url = sys.argv[2]
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    sys.stderr.write("ERROR: cannot read server config for Windows installer URL migration\n")
+    raise SystemExit(1)
+old = str(data.get("windows_client_installer_url") or "").strip()
+if old == new_url:
+    raise SystemExit(0)
+data["windows_client_installer_url"] = new_url
+text = json.dumps(data, indent=2, sort_keys=True) + "\n"
+fd, tmp = tempfile.mkstemp(prefix=".config.", suffix=".tmp", dir=str(path.parent))
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
+    mode = path.stat().st_mode
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+except Exception:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    sys.stderr.write("ERROR: failed to migrate windows_client_installer_url\n")
+    raise SystemExit(1)
+if old:
+    sys.stdout.write("Windows client installer URL : migrated\n")
+else:
+    sys.stdout.write("Windows client installer URL : set to release default\n")
+PY
 }
 
 frp_server_apply_project_upgrade() {

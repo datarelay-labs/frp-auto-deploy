@@ -127,18 +127,36 @@ def print_services():
             sid_txt, protocol, target[:14], public[:22], enabled_flag,
         ))
     ssh_sid, ssh = CREG.first_ssh_service(client)
-    if ssh:
+    rdp_items = []
+    for sid, svc in sorted(
+        services.items(),
+        key=lambda kv: (kv[1].get('remote_port') or 0, kv[0]) if isinstance(kv[1], dict) else (0, kv[0]),
+    ):
+        if not isinstance(svc, dict):
+            continue
+        if svc.get('enabled', True) is False:
+            continue
+        preset = str(svc.get('preset') or '').strip().lower()
+        if preset == 'rdp' or (preset == 'custom' and int(svc.get('local_port') or 0) == 3389 and str(sid).lower() == 'rdp'):
+            rdp_items.append((sid, svc))
+    if ssh or rdp_items:
         print()
         print('Connect:')
-        if ssh.get('ssh_user'):
-            print('  ssh -p %s %s@%s' % (
-                ssh.get('remote_port') or '-',
-                CREG.ssh_user_display(ssh),
+        if ssh:
+            if ssh.get('ssh_user'):
+                print('  ssh -p %s %s@%s' % (
+                    ssh.get('remote_port') or '-',
+                    CREG.ssh_user_display(ssh),
+                    public_ip or 'host',
+                ))
+            else:
+                print('  legacy / unspecified')
+        for _sid, rdp in rdp_items:
+            print('  mstsc /v:%s:%s' % (
                 public_ip or 'host',
+                rdp.get('remote_port') or '-',
             ))
-        else:
-            print('  legacy / unspecified')
-
+            print('  %s:%s' % (public_ip or 'host', rdp.get('remote_port') or '-'))
 
 def print_tags():
     if not tags:
