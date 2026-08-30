@@ -9,6 +9,7 @@ import argparse
 import json
 import os
 import time
+import unicodedata
 from pathlib import Path
 
 ROOT = os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
@@ -36,16 +37,38 @@ def load_json_dir(directory):
     return records
 
 
+def terminal_safe(value, limit=None, default='-'):
+    """Return terminal-safe operator text without control/format characters."""
+    text = str(value or '')
+    cleaned = ''.join(
+        ' ' if unicodedata.category(ch).startswith('C') else ch
+        for ch in text
+    ).strip()
+    if limit is not None:
+        cleaned = cleaned[:limit]
+    return cleaned or default
+
+
+def parse_epoch(value):
+    if value in (None, ''):
+        return 0, True
+    try:
+        return int(value), True
+    except (TypeError, ValueError):
+        return 0, False
+
+
 def normalize_state(record, now):
     """Map authoritative record fields to a single operator-facing state."""
     if record.get('revoked_at'):
         return 'revoked'
     if record.get('completed_at'):
         return 'completed'
-    # Manual enrollment records mark successful use with used_at.
     if record.get('used_at'):
         return 'completed'
-    expires = int(record.get('expires_at') or 0)
+    expires, valid = parse_epoch(record.get('expires_at'))
+    if not valid:
+        return 'invalid'
     if expires and expires < now:
         return 'expired'
     if record.get('bound_machine_id'):
@@ -56,27 +79,27 @@ def normalize_state(record, now):
 def fmt_created(record):
     created = str(record.get('created_at') or '').strip()
     if created:
-        return created.replace('+00:00', 'Z')
+        return terminal_safe(created.replace('+00:00', 'Z'))
     return '-'
 
 
 def fmt_expires(record):
     iso = str(record.get('expires_at_iso') or '').strip()
     if iso:
-        return iso.replace('+00:00', 'Z')
-    expires = int(record.get('expires_at') or 0)
+        return terminal_safe(iso.replace('+00:00', 'Z'))
+    expires, valid = parse_epoch(record.get('expires_at'))
+    if not valid:
+        return 'invalid'
     if expires:
-        return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(expires))
+        try:
+            return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(expires))
+        except (OverflowError, OSError, ValueError):
+            return 'invalid'
     return '-'
 
 
 def collect_rows(enrollments_dir, bootstrap_dir, now):
-    """Build deduplicated listing rows.
-
-    Zero-touch issuance writes both an enrollment record and a bootstrap
-    ticket. The ticket ID is the canonical operator-facing ID (revoke uses it).
-    The paired enrollment record is omitted to avoid duplicate rows.
-    """
+    """Build deduplicated listing rows."""
     bootstrap = load_json_dir(bootstrap_dir)
     paired_enrollment_ids = set()
     rows = []
@@ -84,35 +107,29 @@ def collect_rows(enrollments_dir, bootstrap_dir, now):
         eid = str(rec.get('enrollment_id') or '').strip().lower()
         if eid:
             paired_enrollment_ids.add(eid)
-        rid = str(rec.get('id') or '').strip().lower() or '-'
-        rows.append(
-            {
-                'id': rid,
-                'type': 'zero-touch',
-                'label': str(rec.get('label') or '-').replace('\n', ' ')[:24] or '-',
-                'created': fmt_created(rec),
-                'expires': fmt_expires(rec),
-                'state': normalize_state(rec, now),
-                'sort_created': str(rec.get('created_at') or ''),
-            }
-        )
+        raw_id = str(rec.get('id') or '').strip().lower()
+        rows.append({
+            'id': terminal_safe(raw_id),
+            'type': 'zero-touch',
+            'label': terminal_safe(rec.get('label'), limit=24),
+            'created': fmt_created(rec),
+            'expires': fmt_expires(rec),
+            'state': normalize_state(rec, now),
+            'sort_created': terminal_safe(rec.get('created_at'), default=''),
+        })
     for rec in load_json_dir(enrollments_dir):
-        rid = str(rec.get('id') or '').strip().lower()
-        if not rid:
+        raw_id = str(rec.get('id') or '').strip().lower()
+        if not raw_id or raw_id in paired_enrollment_ids:
             continue
-        if rid in paired_enrollment_ids:
-            continue
-        rows.append(
-            {
-                'id': rid,
-                'type': 'manual',
-                'label': str(rec.get('label') or '-').replace('\n', ' ')[:24] or '-',
-                'created': fmt_created(rec),
-                'expires': fmt_expires(rec),
-                'state': normalize_state(rec, now),
-                'sort_created': str(rec.get('created_at') or ''),
-            }
-        )
+        rows.append({
+            'id': terminal_safe(raw_id),
+            'type': 'manual',
+            'label': terminal_safe(rec.get('label'), limit=24),
+            'created': fmt_created(rec),
+            'expires': fmt_expires(rec),
+            'state': normalize_state(rec, now),
+            'sort_created': terminal_safe(rec.get('created_at'), default=''),
+        })
     rows.sort(key=lambda row: (row['sort_created'], row['id']))
     return rows
 
@@ -128,12 +145,8 @@ def main(argv=None):
         cfg.get('bootstrap_dir')
         or str(Path(cfg['enrollments_dir']).parent / 'bootstrap')
     )
-    now = int(time.time())
-    rows = collect_rows(enrollments, bootstrap, now)
-    print(
-        f'{"ID":<16} {"TYPE":<11} {"LABEL":<12} '
-        f'{"CREATED":<21} {"EXPIRES":<21} STATE'
-    )
+    rows = collect_rows(enrollments, bootstrap, int(time.time()))
+    print(f'{"ID":<16} {"TYPE":<11} {"LABEL":<12} {"CREATED":<21} {"EXPIRES":<21} STATE')
     print('-' * 96)
     for row in rows:
         print(

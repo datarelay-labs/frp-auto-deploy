@@ -1,10 +1,23 @@
 #!/usr/bin/env python3
 import base64
+import json
 from pathlib import Path
 
 root=Path(__file__).resolve().parents[1]
 dist=root/'dist'
 dist.mkdir(exist_ok=True)
+
+def bundle_payload(rel):
+    data = (root / rel).read_bytes()
+    if rel != 'release-manifest.json':
+        return data
+    # Artifact hashes describe the outer bundles. Strip them from the
+    # embedded manifest so a bundle never contains a hash of itself.
+    import_data = json.loads(data.decode('utf-8'))
+    for meta in (import_data.get('artifacts') or {}).values():
+        if isinstance(meta, dict):
+            meta.pop('sha256', None)
+    return (json.dumps(import_data, indent=2, sort_keys=False) + '\n').encode('utf-8')
 
 files=[
  'VERSION',
@@ -52,7 +65,7 @@ files=[
 
 lines=['#!/usr/bin/env bash','set -euo pipefail','TMP="$(mktemp -d)"','trap \'rm -rf "$TMP"\' EXIT']
 for rel in files:
-    data=base64.b64encode((root/rel).read_bytes()).decode()
+    data=base64.b64encode(bundle_payload(rel)).decode()
     parent=str(Path(rel).parent)
     if parent!='.': lines.append(f'mkdir -p "$TMP/{parent}"')
     lines.append(f"base64 -d >\"$TMP/{rel}\" <<'B64'")
@@ -81,7 +94,7 @@ client_files=[
 ]
 client_lines=['#!/usr/bin/env bash','set -euo pipefail','TMP="$(mktemp -d)"','trap \'rm -rf "$TMP"\' EXIT']
 for rel in client_files:
-    data=base64.b64encode((root/rel).read_bytes()).decode()
+    data=base64.b64encode(bundle_payload(rel)).decode()
     parent=str(Path(rel).parent)
     if parent!='.': client_lines.append(f'mkdir -p "$TMP/{parent}"')
     client_lines.append(f"base64 -d >\"$TMP/{rel}\" <<'B64'")

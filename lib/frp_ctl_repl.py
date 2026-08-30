@@ -165,6 +165,11 @@ def run_repl(frpctl_bin, payload):
     grammar = _load_grammar()
     editor = LineEditor(payload)
     editor.bind()
+    if payload.get("inventory_warning"):
+        sys.stderr.write(
+            "WARNING: completion inventory could not be loaded; "
+            "Tab candidates may be incomplete. Run: doctor\n"
+        )
     hist = []
     while True:
         try:

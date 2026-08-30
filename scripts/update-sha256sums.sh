@@ -26,9 +26,9 @@ for _name, meta in artifacts.items():
     if not isinstance(meta, dict):
         continue
     path = str(meta.get('path') or '')
-    # The server bundle embeds this manifest, so hashing the server bundle
-    # would be self-referential. The client artifact is intentionally external
-    # to the manifest-bearing server bundle and can be pinned here.
+    # Both bundles embed a normalized manifest with artifact sha256 fields
+    # stripped. The top-level manifest can therefore pin the client bundle
+    # without creating a self-referential client-bundle hash.
     if path == 'dist/bootstrap-client.sh':
         meta['sha256'] = sums.get(path, '')
 manifest_path.write_text(

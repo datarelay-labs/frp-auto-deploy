@@ -63,6 +63,57 @@ frpctl_project_version() {
   printf '%s' "$pv"
 }
 
+frpctl_probe_frp_binary_version() {
+  local bin="$1" raw parsed
+  [[ -x "$bin" ]] || return 1
+  raw="$("$bin" --version 2>/dev/null)" || return 1
+  parsed="$(python3 - "$raw" <<'PYVER'
+import re, sys
+raw = sys.argv[1]
+if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw):
+    raise SystemExit(1)
+text = raw.strip()
+match = re.fullmatch(
+    r'(?:frp[cs]\s+version\s+)?v?([0-9]+(?:\.[0-9]+){1,3}(?:[-+][0-9A-Za-z.-]+)?)',
+    text,
+    flags=re.IGNORECASE,
+)
+if not match:
+    raise SystemExit(1)
+print(match.group(1))
+PYVER
+)" || return 1
+  [[ -n "$parsed" ]] || return 1
+  printf '%s' "$parsed"
+}
+
+frpctl_binary_frp_version() {
+  local server_version="" client_version=""
+  if frpctl_is_server; then
+    server_version="$(frpctl_probe_frp_binary_version "$(frpctl_path /usr/local/bin/frps)")" || server_version=""
+  fi
+  if frpctl_is_client; then
+    client_version="$(frpctl_probe_frp_binary_version "$(frpctl_path /usr/local/bin/frpc)")" || client_version=""
+  fi
+  if [[ -n "$server_version" && -n "$client_version" ]]; then
+    if [[ "$server_version" == "$client_version" ]]; then
+      printf '%s' "$server_version"
+    else
+      printf 'frps %s / frpc %s' "$server_version" "$client_version"
+    fi
+    return 0
+  fi
+  if [[ -n "$server_version" ]]; then
+    printf '%s' "$server_version"
+    return 0
+  fi
+  if [[ -n "$client_version" ]]; then
+    printf '%s' "$client_version"
+    return 0
+  fi
+  return 1
+}
+
 frpctl_frp_version() {
   local fv
   fv="$(frpctl_read_kv "$(frpctl_path /etc/frp-auto-deploy/version)" FRP_VERSION)"
@@ -70,7 +121,12 @@ frpctl_frp_version() {
     printf '%s' "$fv"
     return 0
   fi
-  printf '%s' "0.70.1"
+  fv="$(frpctl_binary_frp_version)" || fv=""
+  if [[ -n "$fv" ]]; then
+    printf '%s' "$fv"
+    return 0
+  fi
+  printf '%s' "legacy / unknown"
 }
 
 frpctl_release_channel() {
@@ -257,6 +313,9 @@ import json, sys
 from pathlib import Path
 role, cfg_path, root, state_path = sys.argv[1:5]
 names, services, local_services, clients_meta = [], {}, [], []
+inventory_warning = False
+server_role = role in ("server", "both", "dual")
+client_role = role in ("client", "both", "dual")
 cfg = Path(cfg_path)
 
 def unique_short(mid, mids, n=8):
@@ -269,17 +328,26 @@ def unique_short(mid, mids, n=8):
         length += 1
     return text
 
+if server_role and not cfg.is_file():
+    inventory_warning = True
 if cfg.is_file():
     try:
         data = json.loads(cfg.read_text(encoding="utf-8"))
-        reg = Path(str((data or {}).get("registry_file") or ""))
-        if root and str(reg) and not str(reg).startswith(root):
+        reg_raw = str((data or {}).get("registry_file") or "")
+        if not reg_raw:
+            inventory_warning = True
+        reg = Path(reg_raw)
+        if root and reg_raw and not str(reg).startswith(root):
             reg = Path(root + str(reg))
-        if reg.is_file():
+        if reg_raw and reg.is_file():
             state = json.loads(reg.read_text(encoding="utf-8"))
+            raw_clients = (state or {}).get("clients") or {}
+            if not isinstance(raw_clients, dict):
+                inventory_warning = True
+                raw_clients = {}
             items = [
                 (str(mid), client)
-                for mid, client in (state.get("clients") or {}).items()
+                for mid, client in raw_clients.items()
                 if isinstance(client, dict)
             ]
             mids = [mid for mid, _client in items]
@@ -303,21 +371,30 @@ if cfg.is_file():
                     services[label] = sids
                 if host:
                     services[host] = sids
+        elif server_role:
+            inventory_warning = True
     except Exception:
-        pass
+        inventory_warning = True
 st = Path(state_path)
+if client_role and not st.is_file():
+    inventory_warning = True
 if st.is_file():
     try:
         data = json.loads(st.read_text(encoding="utf-8"))
-        local_services = sorted(str(s) for s in (data.get("services") or {}) if s)
+        raw_services = (data or {}).get("services") or {}
+        if not isinstance(raw_services, dict):
+            inventory_warning = True
+        else:
+            local_services = sorted(str(s) for s in raw_services if s)
     except Exception:
-        pass
+        inventory_warning = True
 json.dump({
     "role": role,
     "names": sorted(set(names)),
     "clients": clients_meta,
     "services": services,
     "local_services": local_services,
+    "inventory_warning": inventory_warning,
 }, sys.stdout)
 PY
 }
