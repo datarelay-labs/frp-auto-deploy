@@ -21,22 +21,21 @@ It solves the operational work around FRP:
 
 | Item | Current |
 | --- | --- |
-| Stable project release | **v2.1.0** |
+| Stable project release | **v2.1.1** |
 | Pinned / tested FRP | **v0.70.1** |
 | Default deployment mode | **Direct** |
 | Optional enterprise mode | **single-443** |
-| Stable install source | immutable `v2.1.0` tag |
-| `main` branch | development channel; may contain post-v2.1.0 changes |
+| Stable install source | immutable `v2.1.1` tag |
+| `main` branch | development channel; may contain post-v2.1.1 changes |
 
-Current project version: **2.1.0**  
+Current project version: **2.1.1**
 Current pinned FRP version: **v0.70.1**
 
-v2.1.0 is the **current stable release**. Stable installs use the immutable tag.
+v2.1.1 is the **current stable release**. Stable installs use the immutable tag.
 Following mutable `main` is explicit opt-in only, for example
 `FRP_RELEASE_CHANNEL=dev`.
 
-`main` intentionally remains on `PROJECT_VERSION=2.1.0` until the next stable
-tag is cut. On development builds, use release channel, source ref, and verified
+On development builds, use release channel, source ref, and verified
 bundle SHA256 to identify the exact build.
 
 FRP **0.71.x is not automatically adopted**. `show upstream` is informational;
@@ -86,7 +85,7 @@ A typical client may therefore be:
 
 There are only **two deployment modes**: `direct` and `single443`.
 
-**NAT is a network topology, not a deployment mode.**  
+**NAT is a network topology, not a deployment mode.**
 A Direct server can have a public IP or sit behind a firewall/NAT.
 
 | Environment | Recommended pattern | Public inbound TCP |
@@ -205,11 +204,11 @@ More detail: [docs/DEPLOYMENT_MODES.md](docs/DEPLOYMENT_MODES.md)
 
 # 3. Install the server
 
-For a stable installation, use the immutable v2.1.0 bundle:
+For a stable installation, use the immutable v2.1.1 bundle:
 
 ```bash
 curl -fsSL \
-  https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/bootstrap-server.sh \
+  https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.1/dist/bootstrap-server.sh \
   | sudo bash
 ```
 
@@ -625,7 +624,7 @@ sudo frpctl update project
 The updater verifies release metadata and `SHA256SUMS`. Same-version updates are
 identified by verified bundle SHA256, not by `PROJECT_VERSION` alone. This
 allows a development build to refresh management code without falsely reporting
-"not needed" only because both trees say `2.1.0`.
+"not needed" only because both trees say the same `PROJECT_VERSION`.
 
 A normal project update does not re-enroll clients or intentionally rotate the
 CA, FRP token, client identity, or persistent service ports.
@@ -737,7 +736,7 @@ or free public ports.
 
 ```bash
 curl -fsSL \
-  https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/uninstall-client.sh \
+  https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.1/dist/uninstall-client.sh \
   | sudo bash
 ```
 
@@ -748,7 +747,7 @@ Server uninstall preserves token, CA, configuration, registry, and reservations:
 
 ```bash
 curl -fsSL \
-  https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/uninstall-server.sh \
+  https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.1/dist/uninstall-server.sh \
   | sudo bash
 ```
 
@@ -756,7 +755,7 @@ Destructive purge is for test/decommission scenarios only:
 
 ```bash
 curl -fsSL \
-  https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/uninstall-server.sh \
+  https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.1/dist/uninstall-server.sh \
   | sudo bash -s -- --purge --yes
 ```
 

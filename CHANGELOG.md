@@ -1,30 +1,38 @@
 # Changelog
 
-## Unreleased (2.1.0 / main)
+## 2.1.1 — 2026-08-30
 
-- `frpctl` uses a verb/resource grammar (`show`, `set`, `unset`, `create`,
-  `revoke`, `release`, `update`, …). Older flat commands remain as hidden
-  compatibility aliases. See [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md).
-- Interactive `frpctl` keeps session `↑`/`↓` history in memory only, parses
-  quoted arguments without shell expansion, and completes CLIENT IDs and
-  keywords. Tab completes a unique match inline; the first Tab on an ambiguous
-  position prints candidates and restores the input line. Repeated Tab on the
-  same line does not reprint the list. Type `?` for detailed context help. The
-  canonical client selector is immutable CLIENT ID; label and hostname are
-  shortcuts. `set client <ID> tag <key> <value>` is the canonical tag syntax.
-- `show enrollments` lists manual and zero-touch enrollment credentials in one
-  table (no secrets). Creation output prints a non-secret Enrollment ID for
-  `revoke enrollment <ID>`.
-- Client bundles now embed `release-manifest.json` so candidate channel and
-  source-ref can be validated before a live update.
-- Same-version client updates compare verified bundle SHA256, not only
-  `PROJECT_VERSION`. Unknown build identity is never "not needed".
-- Same-version server `project-update` uses the same build-identity rule:
-  verified bundle SHA256 (or a local-source staged-tree digest). Matching
-  `PROJECT_VERSION` alone is never "not needed".
+Stable release. FRP remains pinned at **0.70.1**.
+
+- First-class `create zero-touch` in `frpctl` (guided SSH-only and multi-service
+  workflows, including remote LAN targets)
+- Zero-touch guided menu shows SSH only / Configure services / Back;
+  Management-only remains available to the backend but is hidden from the
+  guided menu
+- CLI discoverability and Tab completion behavior retained (first-press
+  candidates, no command dispatch on Back)
+- `frpctl` verb/resource grammar, enrollment listing without secrets, and
+  CLIENT ID as the canonical selector (continued from post-2.1.0 main work)
+- Same-version client/server updates compare verified bundle SHA256, not only
+  `PROJECT_VERSION`
 - Legacy clients without persisted release metadata fail closed on remote
-  update (`LEGACY_CLIENT_SECURE_BRIDGE_REQUIRED`) until a one-time verified
-  bridge. See `docs/FRP_UPGRADE.md`.
+  update until a one-time verified bridge (`docs/FRP_UPGRADE.md`)
+- Server install/rerun and project-update migrate official project-managed
+  `client_installer_url` values to the current release-line canonical installer
+  (`v2.1.1` on stable; `main` on explicit dev). Custom, third-party, look-alike,
+  and explicit `FRP_CLIENT_INSTALLER_URL` overrides are preserved
+- Manual enrollment and legacy one-line client creation continue to use the
+  same persisted installer URL release-line semantics
+
+### Compatibility
+
+Already enrolled 2.1.0 clients remain compatible. After a server project update
+from 2.1.0, newly generated Zero-touch / enrollment installer commands use the
+`v2.1.1` bootstrap URL when the persisted URL was an official managed ref.
+
+## Unreleased (post-2.1.1 / main)
+
+_None yet._
 
 ## 2.1.0 — 2026-08-29
 
