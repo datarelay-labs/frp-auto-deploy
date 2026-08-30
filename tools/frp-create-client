@@ -413,10 +413,15 @@ def resolve_zero_touch_ssh(ssh_user, ssh_port, port_explicit):
 
 def print_manual(cfg, record, ttl, public_host, control_public, allocator, ca_fp, installer):
     print()
+    print('Enrollment ID: %s' % record['id'])
     print('Enrollment Code:')
     print('%s.%s' % (record['id'], record['secret']))
     print()
     print('Expires: %s (%s seconds)' % (record['expires_at_iso'], ttl))
+    print()
+    print('Track or revoke with the Enrollment ID (not the secret):')
+    print('  show enrollments')
+    print('  revoke enrollment %s' % record['id'])
     print()
     if public_host and control_public:
         print('FRP Server: %s:%s' % (public_host, control_public))
@@ -457,7 +462,7 @@ def print_manual(cfg, record, ttl, public_host, control_public, allocator, ca_fp
     print()
 
 
-def print_one_line(ticket, ttl, note, public_host, control_public, allocator, ca_fp, installer, ssh_user, ssh_port, client_name='', management_only=False):
+def print_one_line(ticket, ttl, note, public_host, control_public, allocator, ca_fp, installer, ssh_user, ssh_port, client_name='', management_only=False, ticket_id=''):
     env_parts = [
         'FRP_ALLOCATOR_URL=%s' % shell_quote(allocator),
         'FRP_ALLOCATOR_CA_SHA256=%s' % shell_quote(ca_fp),
@@ -474,12 +479,20 @@ def print_one_line(ticket, ttl, note, public_host, control_public, allocator, ca
         shell_quote(installer),
         ' '.join(env_parts),
     )
+    tracking_id = str(ticket_id or '').strip()
+    if not tracking_id and ticket:
+        parts = str(ticket).split('.')
+        if len(parts) >= 2:
+            tracking_id = parts[1]
     print()
     print('Zero-touch client command')
     print()
     print('This command contains a short-lived one-time bootstrap ticket.')
     print('Treat the command as sensitive until it expires or is used.')
     print()
+    if tracking_id:
+        print('Enrollment ID: %s' % tracking_id)
+        print()
     print(command)
     print()
     print('Expires: %s (%s seconds)' % (iso(int(time.time()) + ttl), ttl))
@@ -497,6 +510,11 @@ def print_one_line(ticket, ttl, note, public_host, control_public, allocator, ca
     print()
     print('The ticket is not the FRP token. It cannot manage the client after enrollment.')
     print('It cannot be reused by another machine once bound.')
+    if tracking_id:
+        print()
+        print('Track or revoke with the Enrollment ID (not the ticket secret):')
+        print('  show enrollments')
+        print('  revoke enrollment %s' % tracking_id)
     print()
 
 
@@ -607,7 +625,7 @@ def main(argv=None):
         bootstrap_dir = enroll_dir.parent / 'bootstrap'
 
     try:
-        ticket, _enroll_record, _ticket_record = alloc_mod.issue_bootstrap_ticket(
+        ticket, _enroll_record, ticket_record = alloc_mod.issue_bootstrap_ticket(
             enroll_dir, bootstrap_dir, services, ttl, note, label=client_name
         )
     except Exception as exc:
@@ -626,6 +644,7 @@ def main(argv=None):
         ssh_pre_port,
         client_name=client_name,
         management_only=not services,
+        ticket_id=str((ticket_record or {}).get('id') or ''),
     )
     try:
         here = Path(__file__).resolve()

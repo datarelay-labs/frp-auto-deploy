@@ -7,10 +7,14 @@
   compatibility aliases. See [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md).
 - Interactive `frpctl` keeps session `↑`/`↓` history in memory only, parses
   quoted arguments without shell expansion, and completes CLIENT IDs and
-  keywords. Tab extends a unique match or common prefix in place and never
-  prints a candidate list. Type `?` for context-sensitive help. The canonical
-  client selector is immutable CLIENT ID; label and hostname are shortcuts.
-  `set client <ID> tag <key> <value>` is the canonical tag syntax.
+  keywords. Tab completes a unique match inline; the first Tab on an ambiguous
+  position prints candidates and restores the input line. Repeated Tab on the
+  same line does not reprint the list. Type `?` for detailed context help. The
+  canonical client selector is immutable CLIENT ID; label and hostname are
+  shortcuts. `set client <ID> tag <key> <value>` is the canonical tag syntax.
+- `show enrollments` lists manual and zero-touch enrollment credentials in one
+  table (no secrets). Creation output prints a non-secret Enrollment ID for
+  `revoke enrollment <ID>`.
 - Client bundles now embed `release-manifest.json` so candidate channel and
   source-ref can be validated before a live update.
 - Same-version client updates compare verified bundle SHA256, not only

@@ -350,7 +350,7 @@ this is the only command you need to remember:
 
 With no arguments and a TTY, that starts the persistent management CLI.
 Type '?' for context help, or 'help' for full syntax. Press Tab to complete
-the current word (CLIENT IDs and keywords; no candidate list). Type 'menu'
+a unique match or list next-token candidates. Type 'menu'
 for the guided numbered menu.
 
 Canonical grammar:
@@ -910,7 +910,7 @@ Navigation
   help                  Detailed help
   help <verb>           Command-specific help
   ?                     Context-sensitive help
-  Tab                   Complete the current word (no candidate list)
+  Tab                   Show/complete next tokens (first press)
   history               This session only
   clear                 Clear the screen
   exit, quit            Exit frpctl
@@ -951,7 +951,7 @@ frpctl_repl_help() {
   fi
   frpctl_grammar_call help '{"tokens":[]}'
   echo
-  echo "Press Tab to complete CLIENT IDs and keywords. Type ? for context help."
+  echo "Press Tab to complete a unique match or list next-token candidates. Type ? for context help."
   echo
   frpctl_help_navigation
   echo
@@ -1748,7 +1748,7 @@ frpctl_repl_banner() {
   echo "Bundle SHA256   : $(frpctl_bundle_sha256)"
   echo
   echo "Type '?' for a short command list, or 'help' for full syntax."
-  echo "Press Tab to complete the current word. Tab never lists candidates."
+  echo "Press Tab to complete a unique match or list next-token candidates."
   echo "On a server, Tab completes CLIENT IDs and service IDs."
   echo "Type 'menu' for the guided menu."
   echo "Type 'exit' to leave."
@@ -1812,7 +1812,8 @@ frpctl_repl() {
       frpctl_repl_banner
       FRP_CTL_GRAMMAR_PAYLOAD="$(frpctl_grammar_payload)" \
         FRPCTL_BIN="${BASH_SOURCE[0]}" \
-        python3 "$_FRP_CTL_REPL_PY" --frpctl "${BASH_SOURCE[0]}"
+        PYTHONUNBUFFERED=1 \
+        python3 -u "$_FRP_CTL_REPL_PY" --frpctl "${BASH_SOURCE[0]}"
       trap - INT
       FRP_CTL_REPL=0
       return 0

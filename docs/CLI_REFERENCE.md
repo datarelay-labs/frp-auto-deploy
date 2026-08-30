@@ -16,16 +16,17 @@ the union. There is no `server …` / `client …` top-level namespace.
 Interactive keys:
 
 ```text
-Tab   = completion only
-?     = context-sensitive help
+Tab   = immediately show/complete what can be entered here
+?     = detailed contextual explanation
 Enter = execute
 ↑/↓   = session history
 ```
 
-Tab extends a unique match or a longer common prefix in place. If several
-candidates remain, Tab does nothing (optional bell). Tab never prints a
-candidate list, never inserts a newline, and never runs the command.
-Type `?` (then Enter) to see what can come next.
+Tab completes a unique match inline. When several next tokens remain, the
+first Tab prints the candidate list above the prompt and restores the exact
+input line for editing. A second Tab on the same unchanged line does not
+reprint the list. Tab never runs the command and never clears the screen.
+Type `?` (then Enter) for detailed context help when needed.
 
 `↑` / `↓` walk this session only. History is never written to disk
 (`~/.bash_history`, `~/.frpctl_history`, or `HISTFILE`).
@@ -66,6 +67,15 @@ Canonical help prefers the `show` form.
 `show clients` reuses the existing client table. The identity columns are
 CLIENT ID, LABEL, and HOSTNAME. `show client <ID>` is the overview.
 `show client <ID> services` and `show client <ID> tags` print only that view.
+
+`show enrollments` lists every issued enrollment credential that is still on
+disk: manual Enrollment Code records and zero-touch bootstrap tickets. Secrets
+are never printed. Zero-touch issuance that creates both an enrollment file and
+a bootstrap ticket appears once (ticket ID). Lifecycle states are normalized to
+`pending`, `bound`, `completed`, `expired`, or `revoked`. Completed and expired
+records remain visible until existing retention/cleanup removes them
+(`cleanup_expired_bootstrap_tickets` currently retains ticket metadata for
+audit). Use the non-secret enrollment ID with `revoke enrollment <ID>`.
 
 ## set
 
@@ -134,7 +144,7 @@ Client-local pending changes. `apply` does not release server ports.
 
 ```text
 revoke client <ID>
-revoke enrollment <ticket-id>
+revoke enrollment <ID>
 release service <ID> <service-id>
 release client <ID>
 restore backup <path>

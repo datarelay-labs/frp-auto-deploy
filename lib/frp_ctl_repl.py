@@ -3,6 +3,10 @@
 
 Uses the stdlib readline module only. Never writes a history file.
 Never runs eval, bash -c, or the command dispatcher from Tab.
+
+Tab shows ambiguous next-token candidates on the first press. Repeated Tab
+on the same line does not reprint the same list. Unique matches complete
+inline. The input buffer is never cleared or rewritten by Tab.
 """
 from __future__ import annotations
 
@@ -26,19 +30,18 @@ def _load_grammar():
     return grammar
 
 
-def _no_display_matches(_substitution, _matches, _longest):
-    return
-
-
 class LineEditor:
     def __init__(self, payload):
         self.grammar = _load_grammar()
         self.payload = payload
         self.role = payload.get("role") or "unknown"
         self.names = payload.get("names") or []
+        self.clients = payload.get("clients") or []
         self.services = payload.get("services") or {}
         self.local_services = payload.get("local_services") or []
         self._matches = []
+        self._last_display_key = None
+        self.prompt = "frpctl> "
 
     def completer(self, text, state):
         if state == 0:
@@ -54,11 +57,12 @@ class LineEditor:
             )
             # Unique -> replace current word (append space). Longer common
             # prefix -> extend only. Fully ambiguous -> return candidates so
-            # readline can bell, but display hook prints nothing.
+            # readline can display them via the display hook.
             if not cands:
                 self._matches = []
             elif len(cands) == 1:
                 self._matches = [cands[0] + " "]
+                self._last_display_key = None
             else:
                 shared = cands[0]
                 for item in cands[1:]:
@@ -67,6 +71,7 @@ class LineEditor:
                 prefix = text or ""
                 if shared and shared != prefix and len(shared) > len(prefix):
                     self._matches = [shared]
+                    self._last_display_key = None
                 else:
                     self._matches = list(cands)
         try:
@@ -74,28 +79,68 @@ class LineEditor:
         except IndexError:
             return None
 
+    def display_matches(self, _substitution, matches, _longest):
+        """Print candidates above the prompt; leave the buffer intact."""
+        if readline is None:
+            return
+        cleaned = []
+        for item in matches or []:
+            text = str(item).rstrip()
+            if text:
+                cleaned.append(text)
+        if len(cleaned) <= 1:
+            return
+        line = readline.get_line_buffer() or ""
+        key = (line, tuple(cleaned))
+        if key == self._last_display_key:
+            # Same line / same candidates: do not spam the list again.
+            return
+        self._last_display_key = key
+        body = self.grammar.format_tab_candidates(
+            line,
+            cleaned,
+            self.role,
+            names=self.names,
+            clients=self.clients,
+        )
+        if not body:
+            return
+        sys.stdout.write("\n")
+        sys.stdout.write(body)
+        if not body.endswith("\n"):
+            sys.stdout.write("\n")
+        sys.stdout.write("\n")
+        # Python's input()+readline often does not redisplay the prompt after a
+        # custom completion display hook. Reprint prompt + exact buffer so the
+        # operator can keep editing without flicker or buffer loss.
+        sys.stdout.write(self.prompt)
+        sys.stdout.write(line)
+        sys.stdout.flush()
+
     def bind(self):
         if readline is None:
             return False
         try:
-            readline.parse_and_bind("set show-all-if-ambiguous off")
-            readline.parse_and_bind("set show-all-if-unmodified off")
+            # First Tab shows all ambiguous matches (custom display hook).
+            readline.parse_and_bind("set show-all-if-ambiguous on")
+            readline.parse_and_bind("set show-all-if-unmodified on")
             readline.parse_and_bind("set page-completions off")
             readline.parse_and_bind("set completion-query-items 999999")
-            readline.parse_and_bind("set bell-style audible")
+            readline.parse_and_bind("set bell-style none")
+            readline.parse_and_bind("set horizontal-scroll-mode off")
             readline.parse_and_bind("tab: complete")
             readline.set_completer(self.completer)
             readline.set_completer_delims(" \t")
             hook = getattr(readline, "set_completion_display_matches_hook", None)
             if hook is not None:
-                hook(_no_display_matches)
+                hook(self.display_matches)
         except Exception:
             try:
                 readline.set_completer(self.completer)
                 readline.set_completer_delims(" \t")
                 hook = getattr(readline, "set_completion_display_matches_hook", None)
                 if hook is not None:
-                    hook(_no_display_matches)
+                    hook(self.display_matches)
             except Exception:
                 return False
         try:
@@ -123,13 +168,15 @@ def run_repl(frpctl_bin, payload):
     hist = []
     while True:
         try:
-            line = input("frpctl> ")
+            line = input(editor.prompt)
         except EOFError:
             print()
             return 0
         except KeyboardInterrupt:
             print()
             continue
+        # Any submitted line resets Tab duplicate-suppression state.
+        editor._last_display_key = None
         stripped = line.strip()
         if not stripped:
             continue

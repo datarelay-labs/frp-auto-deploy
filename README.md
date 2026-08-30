@@ -387,7 +387,7 @@ sudo frpctl
 ```
 
 That starts the persistent CLI. Type `?` for context help, or `help` for the
-full syntax. Press Tab to complete the current word (no candidate list).
+full syntax. Press Tab to complete a unique match or list next-token candidates.
 `↑` / `↓` walk this session only (nothing is saved to disk). `menu` opens the
 guided numbered menu. The canonical client selector is CLIENT ID.
 

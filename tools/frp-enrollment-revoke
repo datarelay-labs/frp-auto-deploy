@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Revoke an unused or bound bootstrap enrollment."""
+"""Revoke an unused or bound enrollment (manual or zero-touch)."""
 import argparse
 import fcntl
 import importlib.util
@@ -36,13 +36,44 @@ def atomic_write(path, data):
             os.unlink(tmp)
 
 
+def utc_now_iso():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+
+
+def refuse_state(record, kind):
+    if record.get('completed_at'):
+        raise SystemExit('ERROR: completed enrollment %s cannot be revoked' % kind)
+    if record.get('used_at'):
+        raise SystemExit('ERROR: completed enrollment %s cannot be revoked' % kind)
+    if record.get('revoked_at'):
+        raise SystemExit('ERROR: enrollment %s is already revoked' % kind)
+    if int(record.get('expires_at') or 0) < int(time.time()):
+        raise SystemExit('ERROR: expired enrollment %s cannot be revoked' % kind)
+
+
+def find_bootstrap_by_enrollment(bootstrap_dir, enrollment_id):
+    eid = enrollment_id.lower()
+    if not bootstrap_dir.is_dir():
+        return None, None
+    for path in bootstrap_dir.glob('*.json'):
+        try:
+            rec = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(rec, dict) and str(rec.get('enrollment_id') or '').lower() == eid:
+            return path, rec
+    return None, None
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(description='Revoke an unused or bound enrollment ticket')
-    parser.add_argument('id', help='ticket ID shown by frp-enrollments')
+    parser = argparse.ArgumentParser(
+        description='Revoke an unused or bound enrollment (manual or zero-touch)'
+    )
+    parser.add_argument('id', help='enrollment ID shown by frp-enrollments / show enrollments')
     args = parser.parse_args(argv)
-    ticket_id = args.id.strip().lower()
-    if len(ticket_id) != 16 or any(c not in '0123456789abcdef' for c in ticket_id):
-        parser.error('ticket ID must be 16 hexadecimal characters')
+    target_id = args.id.strip().lower()
+    if len(target_id) != 16 or any(c not in '0123456789abcdef' for c in target_id):
+        parser.error('enrollment ID must be 16 hexadecimal characters')
 
     cfg = json.loads(CONFIG.read_text(encoding='utf-8'))
     bootstrap = remap(
@@ -50,34 +81,47 @@ def main(argv=None):
         or str(Path(cfg['enrollments_dir']).parent / 'bootstrap')
     )
     enrollments = remap(cfg['enrollments_dir'])
-    path = bootstrap / (ticket_id + '.json')
     registry = remap(cfg.get('registry_file') or str(bootstrap.parent / 'registry.json'))
     lock_path = registry.parent / 'registry.lock'
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    revoked_id = target_id
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        if not path.is_file():
-            raise SystemExit('ERROR: enrollment ticket not found')
-        record = json.loads(path.read_text(encoding='utf-8'))
-        if record.get('completed_at'):
-            raise SystemExit('ERROR: completed enrollment tickets cannot be revoked')
-        if record.get('revoked_at'):
-            raise SystemExit('ERROR: enrollment ticket is already revoked')
-        if int(record.get('expires_at') or 0) < int(time.time()):
-            raise SystemExit('ERROR: expired enrollment tickets cannot be revoked')
-        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
-        record['revoked_at'] = now
-        atomic_write(path, record)
-        enrollment_id = str(record.get('enrollment_id') or '')
-        enroll_path = enrollments / (enrollment_id + '.json')
-        if enroll_path.is_file():
-            enroll = json.loads(enroll_path.read_text(encoding='utf-8'))
-            enroll['revoked_at'] = now
-            atomic_write(enroll_path, enroll)
+        ticket_path = bootstrap / (target_id + '.json')
+        enroll_path = enrollments / (target_id + '.json')
+        now = utc_now_iso()
+
+        if ticket_path.is_file():
+            record = json.loads(ticket_path.read_text(encoding='utf-8'))
+            refuse_state(record, 'tickets')
+            record['revoked_at'] = now
+            atomic_write(ticket_path, record)
+            enrollment_id = str(record.get('enrollment_id') or '')
+            paired = enrollments / (enrollment_id + '.json') if enrollment_id else None
+            if paired is not None and paired.is_file():
+                enroll = json.loads(paired.read_text(encoding='utf-8'))
+                enroll['revoked_at'] = now
+                atomic_write(paired, enroll)
+            revoked_id = target_id
+        elif enroll_path.is_file():
+            record = json.loads(enroll_path.read_text(encoding='utf-8'))
+            refuse_state(record, 'codes')
+            # If this enrollment is paired with a bootstrap ticket, revoke that
+            # ticket as the canonical zero-touch credential too.
+            paired_path, paired_rec = find_bootstrap_by_enrollment(bootstrap, target_id)
+            if paired_path is not None:
+                refuse_state(paired_rec, 'tickets')
+                paired_rec['revoked_at'] = now
+                atomic_write(paired_path, paired_rec)
+                revoked_id = str(paired_rec.get('id') or target_id)
+            record['revoked_at'] = now
+            atomic_write(enroll_path, record)
+        else:
+            raise SystemExit('ERROR: enrollment not found')
     finally:
         os.close(lock_fd)
-    print('Revoked enrollment %s' % ticket_id)
+    print('Revoked enrollment %s' % revoked_id)
     try:
         here = Path(__file__).resolve()
         for path in (
@@ -88,7 +132,7 @@ def main(argv=None):
                 spec = importlib.util.spec_from_file_location('frp_audit', str(path))
                 audit = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(audit)
-                audit.try_emit('enrollment.revoked', details={'ticket_id': ticket_id})
+                audit.try_emit('enrollment.revoked', details={'enrollment_id': revoked_id})
                 break
     except Exception:
         pass

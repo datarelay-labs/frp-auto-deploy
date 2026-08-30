@@ -29,12 +29,12 @@ PY
 )"
 ID="${TICKET#bt1.}"; ID="${ID%%.*}"; SECRET="${TICKET##*.}"
 python3 "$ROOT/tools/frp-enrollments" >"$WORK/list.out"
-grep -q 'LABEL.*CREATED.*EXPIRES.*STATE' "$WORK/list.out"
-grep -q "$ID.*pending-a.*unused" "$WORK/list.out"
+grep -q 'ID.*TYPE.*LABEL.*CREATED.*EXPIRES.*STATE' "$WORK/list.out"
+grep -qE "${ID}[[:space:]]+zero-touch[[:space:]]+pending-a.*pending" "$WORK/list.out"
 ! grep -Fq "$SECRET" "$WORK/list.out"
 python3 "$ROOT/tools/frp-enrollment-revoke" "$ID" >"$WORK/revoke.out"
 python3 "$ROOT/tools/frp-enrollments" >"$WORK/revoked.out"
-grep -q "$ID.*revoked" "$WORK/revoked.out"
+grep -qE "${ID}[[:space:]]+zero-touch.*revoked" "$WORK/revoked.out"
 ! grep -Fq "$SECRET" "$WORK/revoked.out"
 python3 - "$TREE/var/lib/frp-auto-deploy/bootstrap/$ID.json" <<'PY'
 import json,sys

@@ -29,8 +29,8 @@ PASSes. Do not destroy the production OCI instance merely to test restore.
 
 ## Pending enrollment
 
-1. Create ticket → list shows unused (no raw secret)
-2. Revoke unused/bound
+1. Create ticket → list shows pending (no raw secret)
+2. Revoke pending/bound
 3. Confirm expired and completed states
 
 ## Bulk enrollment

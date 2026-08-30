@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""List pending bootstrap enrollments without exposing ticket secrets."""
+"""List issued enrollment credentials without exposing secrets.
+
+Shows both manual Enrollment Code records (enrollments_dir) and zero-touch
+bootstrap tickets (bootstrap_dir). Paired zero-touch enrollment+ticket rows
+are deduplicated to a single logical enrollment (the bootstrap ticket ID).
+"""
 import argparse
 import json
 import os
@@ -17,51 +22,130 @@ def remap(path):
     return path
 
 
-def state_of(record, now):
+def load_json_dir(directory):
+    records = []
+    if not directory.is_dir():
+        return records
+    for path in directory.glob('*.json'):
+        try:
+            rec = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(rec, dict):
+            records.append(rec)
+    return records
+
+
+def normalize_state(record, now):
+    """Map authoritative record fields to a single operator-facing state."""
     if record.get('revoked_at'):
         return 'revoked'
     if record.get('completed_at'):
         return 'completed'
-    if int(record.get('expires_at') or 0) < now:
+    # Manual enrollment records mark successful use with used_at.
+    if record.get('used_at'):
+        return 'completed'
+    expires = int(record.get('expires_at') or 0)
+    if expires and expires < now:
         return 'expired'
     if record.get('bound_machine_id'):
         return 'bound'
-    return 'unused'
+    return 'pending'
+
+
+def fmt_created(record):
+    created = str(record.get('created_at') or '').strip()
+    if created:
+        return created.replace('+00:00', 'Z')
+    return '-'
+
+
+def fmt_expires(record):
+    iso = str(record.get('expires_at_iso') or '').strip()
+    if iso:
+        return iso.replace('+00:00', 'Z')
+    expires = int(record.get('expires_at') or 0)
+    if expires:
+        return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(expires))
+    return '-'
+
+
+def collect_rows(enrollments_dir, bootstrap_dir, now):
+    """Build deduplicated listing rows.
+
+    Zero-touch issuance writes both an enrollment record and a bootstrap
+    ticket. The ticket ID is the canonical operator-facing ID (revoke uses it).
+    The paired enrollment record is omitted to avoid duplicate rows.
+    """
+    bootstrap = load_json_dir(bootstrap_dir)
+    paired_enrollment_ids = set()
+    rows = []
+    for rec in bootstrap:
+        eid = str(rec.get('enrollment_id') or '').strip().lower()
+        if eid:
+            paired_enrollment_ids.add(eid)
+        rid = str(rec.get('id') or '').strip().lower() or '-'
+        rows.append(
+            {
+                'id': rid,
+                'type': 'zero-touch',
+                'label': str(rec.get('label') or '-').replace('\n', ' ')[:24] or '-',
+                'created': fmt_created(rec),
+                'expires': fmt_expires(rec),
+                'state': normalize_state(rec, now),
+                'sort_created': str(rec.get('created_at') or ''),
+            }
+        )
+    for rec in load_json_dir(enrollments_dir):
+        rid = str(rec.get('id') or '').strip().lower()
+        if not rid:
+            continue
+        if rid in paired_enrollment_ids:
+            continue
+        rows.append(
+            {
+                'id': rid,
+                'type': 'manual',
+                'label': str(rec.get('label') or '-').replace('\n', ' ')[:24] or '-',
+                'created': fmt_created(rec),
+                'expires': fmt_expires(rec),
+                'state': normalize_state(rec, now),
+                'sort_created': str(rec.get('created_at') or ''),
+            }
+        )
+    rows.sort(key=lambda row: (row['sort_created'], row['id']))
+    return rows
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description='List bootstrap enrollment lifecycle state (never displays secrets)'
+        description='List issued enrollment credentials (never displays secrets)'
     )
     parser.parse_args(argv)
     cfg = json.loads(CONFIG.read_text(encoding='utf-8'))
+    enrollments = remap(cfg['enrollments_dir'])
     bootstrap = remap(
         cfg.get('bootstrap_dir')
         or str(Path(cfg['enrollments_dir']).parent / 'bootstrap')
     )
-    records = []
-    for path in bootstrap.glob('*.json') if bootstrap.is_dir() else []:
-        try:
-            rec = json.loads(path.read_text(encoding='utf-8'))
-            if isinstance(rec, dict):
-                records.append(rec)
-        except (OSError, json.JSONDecodeError):
-            continue
-    records.sort(key=lambda rec: (str(rec.get('created_at') or ''), str(rec.get('id') or '')))
-    print(f'{"ID":<16} {"LABEL":<24} {"CREATED":<20} {"EXPIRES":<20} STATE')
-    print('-' * 91)
     now = int(time.time())
-    for rec in records:
-        label = str(rec.get('label') or '-').replace('\n', ' ')[:24]
-        created = str(rec.get('created_at') or '-')
-        expires = int(rec.get('expires_at') or 0)
-        expires_text = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(expires))
+    rows = collect_rows(enrollments, bootstrap, now)
+    print(
+        f'{"ID":<16} {"TYPE":<11} {"LABEL":<12} '
+        f'{"CREATED":<21} {"EXPIRES":<21} STATE'
+    )
+    print('-' * 96)
+    for row in rows:
         print(
-            f'{str(rec.get("id") or "-"):<16} {label:<24} '
-            f'{created:<20} {expires_text:<20} {state_of(rec, now)}'
+            f'{row["id"]:<16} {row["type"]:<11} {row["label"]:<12} '
+            f'{row["created"]:<21} {row["expires"]:<21} {row["state"]}'
         )
-    if not records:
+    if not rows:
         print('(none)')
+    else:
+        print()
+        print('Use the enrollment ID with:')
+        print('  revoke enrollment <ID>')
     return 0
 
 

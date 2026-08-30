@@ -475,7 +475,7 @@ def _verb_help(verb, role):
         "revoke": (
             "Revoke\n======\n\nUsage:\n"
             "  revoke client <ID>\n"
-            "  revoke enrollment <ticket-id>\n\n"
+            "  revoke enrollment <id>\n\n"
             "revoke client removes management identity and keeps port reservations.\n"
         ),
         "release": (
@@ -539,7 +539,7 @@ def context_help(tokens, role, names=None, clients=None):
                     [
                         ("clients", "Registered client table"),
                         ("client", "One client (overview, services, or tags)"),
-                        ("enrollments", "Pending enrollments"),
+                        ("enrollments", "Issued enrollment credentials"),
                         ("audit", "Recent audit events"),
                         ("upstream", "FRP upstream check"),
                     ]
@@ -586,12 +586,17 @@ def context_help(tokens, role, names=None, clients=None):
                     "  tag     Key/value metadata\n"
                 )
             if len(tokens) >= 4 and tokens[3] == "tag":
+                cid = tokens[2] if len(tokens) > 2 else "<ID>"
                 return (
                     "Usage:\n"
                     "  set client <ID> tag <key> <value>\n\n"
+                    "Purpose:\n"
+                    "  Add or replace one client metadata tag.\n\n"
                     "Example:\n"
-                    "  set client %s tag env oci\n"
-                    % (tokens[2] if len(tokens) > 2 else "<ID>")
+                    "  set client %s tag env production\n\n"
+                    "Remove:\n"
+                    "  unset client %s tag env\n"
+                    % (cid, cid)
                 )
         if tokens[1] == "service":
             return _fmt_available(
@@ -1003,7 +1008,7 @@ def _match_revoke(tokens, role, names=None):
     if len(tokens) == 1:
         return incomplete(
             "Missing resource.",
-            ["revoke client <ID>", "revoke enrollment <ticket-id>"],
+            ["revoke client <ID>", "revoke enrollment <ID>"],
             ["client", "enrollment"],
         )
     if tokens[1] == "client":
@@ -1016,7 +1021,7 @@ def _match_revoke(tokens, role, names=None):
         return {"status": "ok", "action": "revoke_client", "client": tokens[2], "passthrough": tokens[3:]}
     if tokens[1] == "enrollment":
         if len(tokens) < 3:
-            return incomplete("Missing enrollment id.", ["revoke enrollment <ticket-id>"])
+            return incomplete("Missing enrollment id.", ["revoke enrollment <ID>"])
         return {"status": "ok", "action": "revoke_enrollment", "id": tokens[2]}
     # Compatibility: `revoke <client>` without the resource word.
     return {
@@ -1120,6 +1125,155 @@ def completion_candidates(line, role, names, services, local_services, trailing=
     if verb in LEGACY_COMMANDS:
         return _legacy_completion(tokens, trailing, role, names, services)
     return _canonical_completion(tokens, trailing, role, names, services, local_services)
+
+
+def _tab_desc_map(line, role, names=None, clients=None):
+    """Token -> short description for Tab candidate display (never secrets)."""
+    names = names or []
+    clients = clients or []
+    try:
+        tokens = tokenize(line)
+    except ParseError:
+        return {}, "plain"
+    trailing = bool(line) and line[-1:] in " \t"
+    filled = tokens if trailing else tokens[:-1]
+    client, server = _role_parts(role)
+    verb_map = {
+        "show": "View status and configuration",
+        "set": "Change configuration",
+        "unset": "Remove configuration values",
+        "create": "Create enrollment or backup",
+        "revoke": "Revoke management access",
+        "release": "Return reserved public ports",
+        "update": "Update project or FRP",
+        "restore": "Restore backup",
+        "doctor": "Run health checks",
+        "help": "Detailed help",
+        "menu": "Guided menu",
+        "history": "Session command history",
+        "exit": "Leave frpctl",
+        "clear": "Clear the screen",
+        "status": "Host status shortcut",
+        "version": "Installed versions shortcut",
+        "add": "Add a local service",
+        "enable": "Enable a local service",
+        "disable": "Disable a local service",
+        "apply": "Apply pending local changes",
+        "discard": "Discard pending local changes",
+        "quit": "Leave frpctl",
+        "q": "Leave frpctl",
+    }
+    if not filled:
+        return verb_map, "verbs"
+    verb = filled[0]
+    if verb == "show" and len(filled) == 1:
+        rows = {
+            "status": "Host status",
+            "version": "Installed versions",
+            "clients": "Registered client table",
+            "client": "One client (overview, services, or tags)",
+            "enrollments": "Issued enrollment credentials",
+            "audit": "Recent audit events",
+            "upstream": "FRP upstream check",
+            "services": "Local services",
+            "info": "Local connection info",
+        }
+        return rows, "named"
+    if verb == "set" and len(filled) == 1:
+        rows = {}
+        if server:
+            rows["client"] = "Configure registered client metadata"
+            rows["installer-url"] = "Configure client installer URL"
+        if client:
+            rows["service"] = "Configure a local service"
+        return rows, "named"
+    if verb == "set" and len(filled) >= 2 and filled[1] == "client":
+        if len(filled) == 2:
+            return {}, "clients"
+        if len(filled) == 3:
+            return {
+                "label": "Administrator display label",
+                "note": "Administrator description",
+                "tag": "Key/value metadata",
+            }, "named"
+    if verb == "unset" and len(filled) == 1:
+        return {"client": "Remove client metadata"}, "named"
+    if verb == "unset" and len(filled) >= 2 and filled[1] == "client":
+        if len(filled) == 2:
+            return {}, "clients"
+        if len(filled) == 3:
+            return {
+                "label": "Administrator display label",
+                "note": "Administrator description",
+                "tag": "Key/value metadata",
+            }, "named"
+    if verb == "create" and len(filled) == 1:
+        return {
+            "enrollment": "Create one enrollment",
+            "enrollments": "Create many enrollments",
+            "backup": "Create a backup archive",
+        }, "named"
+    if verb == "revoke" and len(filled) == 1:
+        return {
+            "client": "Revoke management identity",
+            "enrollment": "Revoke a pending enrollment",
+        }, "named"
+    if verb == "release" and len(filled) == 1:
+        return {
+            "client": "Release all reserved ports for a client",
+            "service": "Release one service reservation",
+        }, "named"
+    if verb == "update" and len(filled) == 1:
+        rows = {"project": "Update project management tools", "--check": "Check only"}
+        if server:
+            rows["frp"] = "Update the FRP binary"
+        return rows, "named"
+    if verb == "show" and len(filled) >= 2 and filled[1] == "client" and len(filled) == 2:
+        return {}, "clients"
+    if verb == "revoke" and len(filled) >= 2 and filled[1] == "client" and len(filled) == 2:
+        return {}, "clients"
+    if verb == "release" and len(filled) >= 2 and filled[1] == "client" and len(filled) == 2:
+        return {}, "clients"
+    return {}, "plain"
+
+
+def format_tab_candidates(line, matches, role, names=None, clients=None):
+    """Format ambiguous Tab matches for operator display. Never prints secrets."""
+    matches = [m.rstrip() for m in (matches or []) if m is not None and str(m).strip()]
+    if not matches:
+        return ""
+    descs, style = _tab_desc_map(line, role, names=names, clients=clients)
+    if style == "clients":
+        by_id = {}
+        for item in clients or []:
+            if isinstance(item, dict) and item.get("id"):
+                by_id[str(item["id"])] = item
+        lines = ["%-10s %-10s %s" % ("CLIENT ID", "LABEL", "HOSTNAME")]
+        for mid in matches:
+            item = by_id.get(mid) or {}
+            lines.append(
+                "%-10s %-10s %s"
+                % (mid, item.get("label") or "-", item.get("hostname") or "-")
+            )
+        return "\n".join(lines)
+    if style in ("named", "verbs") and any(descs.get(m) for m in matches):
+        width = max(len(m) for m in matches)
+        lines = []
+        for mid in matches:
+            desc = descs.get(mid) or ""
+            if desc:
+                lines.append("%s  %s" % (mid.ljust(width), desc))
+            else:
+                lines.append(mid)
+        return "\n".join(lines)
+    # Compact multi-column layout for plain token lists.
+    col_w = max((len(m) for m in matches), default=8) + 2
+    cols = max(1, min(4, 80 // col_w))
+    lines = []
+    for i in range(0, len(matches), cols):
+        chunk = matches[i : i + cols]
+        lines.append("".join(m.ljust(col_w) for m in chunk).rstrip())
+    return "\n".join(lines)
 
 
 def _current_prefix(tokens, trailing):

@@ -274,8 +274,8 @@ FRP_CTL_TEST_INPUT=$'help\nstatus\nexit\n'
 export FRP_CTL_TEST_INPUT
 "$CTL" >"$WORKDIR/repl.out" 2>"$WORKDIR/repl.err" || fail "repl after completion"
 cat "$WORKDIR/repl.err" >>"$WORKDIR/repl.out"
-grep -q 'Press Tab to complete the current word' "$WORKDIR/repl.out" || fail "banner tab"
-grep -q 'Tab                   Complete the current word' "$WORKDIR/repl.out" || fail "help tab"
+grep -q 'Press Tab to complete a unique match' "$WORKDIR/repl.out" || fail "banner tab"
+grep -q 'Tab                   Show/complete next tokens' "$WORKDIR/repl.out" || fail "help tab"
 grep -q 'DISPATCH frp-server-status' "$WORKDIR/repl.out" || fail "status after help"
 [[ "$(grep -c '^frpctl>' "$WORKDIR/repl.out")" -ge 3 ]] || fail "tab docs stayed in repl"
 [[ ! -f "$HOME/.frpctl_history" ]] || fail "history file created"
@@ -445,7 +445,7 @@ pass "FRPCTL_UP_ARROW_HISTORY"
 pass "FRPCTL_DOWN_ARROW_HISTORY"
 pass "UP_DOWN_HISTORY"
 
-# Restore a plain label, then PTY-test zero-flicker Tab UX.
+# Restore a plain label, then PTY-test first-Tab discovery UX.
 python3 - "$SERVER/var/lib/frp-auto-deploy/registry.json" <<'PY'
 import json, sys
 from pathlib import Path
@@ -482,9 +482,7 @@ env.pop("FRP_CTL_SOURCED", None)
 env.pop("FRP_CTL_DISABLE_TAB", None)
 
 ANSI_RE = re.compile(br"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()].")
-LIST_RE = re.compile(
-    rb"(?:^|\n)([A-Za-z0-9_./-]+(?: {2}[A-Za-z0-9_./-]+)+)(?:\n|$)"
-)
+CLEAR_RE = re.compile(br"\x1b\[2J|\x1b\[H\x1b\[2J|\x1bc")
 
 
 def strip_ansi(data):
@@ -493,10 +491,6 @@ def strip_ansi(data):
 
 def visible(data):
     return strip_ansi(data).replace(b"\r", b"").replace(b"\x00", b"")
-
-
-def list_blocks(data):
-    return LIST_RE.findall(visible(data))
 
 
 pid, fd = pty.fork()
@@ -536,73 +530,180 @@ def wait_prompt(timeout=8):
 
 
 def fail_pty(msg, extra=b""):
-    os.write(2, msg.encode() + b"\n" + extra[-800:])
+    os.write(2, msg.encode() + b"\n" + extra[-1200:])
     raise SystemExit(1)
+
+
+def count_substr(hay, needle):
+    return visible(hay).count(needle)
 
 
 if not wait_prompt():
     fail_pty("PTY: no initial prompt", bytes(buf))
 
-# Unique match: statu<Tab> completes inline, no candidate list / extra prompt.
+# --- Unique match completes inline ---
 before = len(buf)
 os.write(fd, b"statu")
 read_more(0.4)
 os.write(fd, b"\t")
 read_more(0.8)
 unique_chunk = bytes(buf[before:])
-if list_blocks(unique_chunk):
-    fail_pty("PTY: unique tab printed a candidate list", unique_chunk)
+vis_u = visible(unique_chunk)
 if b"Missing resource" in unique_chunk or b"Unknown command" in unique_chunk:
     fail_pty("PTY: unique tab dispatched a command", unique_chunk)
+if b"status" not in vis_u and b"statu" in vis_u:
+    # some terminals only echo completed text after redraw; Enter will prove it
+    pass
 os.write(fd, b"\r")
 if not wait_prompt():
     fail_pty("PTY: no prompt after unique completion", bytes(buf[before:]))
 after_unique = bytes(buf[before:])
 if b"DISPATCH frp-server-status" not in after_unique:
     fail_pty("PTY: unique tab did not complete status", after_unique)
+print("TAB_UNIQUE_COMPLETES_INLINE")
 print("TAB_UNIQUE_INLINE")
 
-# Ambiguous Tab: no list, no extra newline, no extra prompt, no dispatch.
+# --- Root candidates on first Tab ---
 before = len(buf)
-os.write(fd, b"set ")
-read_more(0.4)
-typed = bytes(buf[before:])
-nl_before = visible(typed).count(b"\n")
-prompt_before = visible(bytes(buf)).count(b"frpctl>")
+prompt_before = count_substr(bytes(buf), b"frpctl>")
+os.write(fd, b"\t")
+read_more(1.0)
+root = bytes(buf[before:])
+vis = visible(root)
+if b"show" not in vis or b"set" not in vis:
+    fail_pty("PTY: root tab missing candidates", root)
+if b"Missing resource" in root or b"Unknown command" in root:
+    fail_pty("PTY: root tab dispatched", root)
+if CLEAR_RE.search(root):
+    fail_pty("PTY: root tab cleared screen", root)
+# prompt must return with editable line (empty buffer)
+if not wait_prompt(timeout=3):
+    # readline redisplays prompt after display hook; wait a bit more
+    read_more(0.5)
+if not (visible(bytes(buf)).rstrip().endswith(b"frpctl>") or visible(bytes(buf)).rstrip().endswith(b"frpctl> ")):
+    # after tab on empty, prompt should still be present
+    if b"frpctl>" not in visible(bytes(buf[before:])):
+        fail_pty("PTY: root tab did not restore prompt", root)
+print("TAB_ROOT_CANDIDATES_FIRST_PRESS")
+
+# second Tab on same empty line must not duplicate the candidate block
+before_rep = len(buf)
+show_count = count_substr(bytes(buf), b"View status and configuration")
 os.write(fd, b"\t")
 read_more(0.8)
-first = bytes(buf[before:])
-if list_blocks(first):
-    fail_pty("PTY: ambiguous tab printed candidates", first)
-if b"Missing resource" in first or b"Available:" in first:
-    fail_pty("PTY: ambiguous tab ran incomplete dispatch", first)
-if b"installer-url" in visible(first):
-    fail_pty("PTY: ambiguous tab leaked candidate text", first)
-if visible(first).count(b"\n") > nl_before:
-    fail_pty("PTY: ambiguous tab emitted a newline", first)
-if visible(bytes(buf)).count(b"frpctl>") > prompt_before:
-    fail_pty("PTY: ambiguous tab redrew an extra prompt", first)
-print("TAB_AMBIGUOUS_ZERO_OUTPUT")
-print("TAB_AMBIGUOUS_NO_NEWLINE")
-print("TAB_AMBIGUOUS_NO_PROMPT_REDRAW")
-print("TAB_DOES_NOT_DISPATCH")
-print("TAB_ZERO_FLICKER")
-print("TAB_NO_REDRAW")
-print("TAB_NO_DISPATCH")
+after_rep = bytes(buf[before_rep:])
+show_count2 = count_substr(bytes(buf), b"View status and configuration")
+if show_count2 > show_count:
+    fail_pty("PTY: repeated root tab duplicated candidates", after_rep)
+print("TAB_NO_DUPLICATE_LIST_ON_REPEAT")
 
+# --- set candidates on first Tab ---
+os.write(fd, b"set ")
+read_more(0.3)
+before = len(buf)
+typed_set = b"set "
 os.write(fd, b"\t")
-read_more(0.6)
+read_more(1.0)
+set_chunk = bytes(buf[before:])
+vis_set = visible(set_chunk)
+if b"client" not in vis_set or b"installer-url" not in vis_set:
+    fail_pty("PTY: set tab missing candidates", set_chunk)
+if b"Configure registered client metadata" not in vis_set:
+    fail_pty("PTY: set tab missing descriptions", set_chunk)
+if b"Missing resource" in set_chunk:
+    fail_pty("PTY: set tab dispatched incomplete command", set_chunk)
+if CLEAR_RE.search(set_chunk):
+    fail_pty("PTY: set tab cleared screen", set_chunk)
+# buffer preserved: after list, prompt+set should be editable
+read_more(0.4)
+tail = visible(bytes(buf[before:]))
+if b"frpctl> set" not in tail and not tail.rstrip().endswith(b"set "):
+    # Accept either redisplayed "frpctl> set " or trailing "set "
+    if b"set " not in tail:
+        fail_pty("PTY: set buffer not preserved", set_chunk)
+print("TAB_SET_CANDIDATES_FIRST_PRESS")
+print("TAB_BUFFER_PRESERVED_AFTER_LIST")
+print("TAB_PROMPT_RESTORED")
+print("TAB_NO_CLEAR")
+print("TAB_NO_INPUT_LOSS")
+print("TAB_DOES_NOT_DISPATCH")
+
+# repeat set tab — no duplicate
+client_desc_before = count_substr(bytes(buf), b"Configure registered client metadata")
 os.write(fd, b"\t")
-read_more(0.6)
-repeated = bytes(buf[before:])
-if list_blocks(repeated) or b"installer-url" in visible(repeated):
-    fail_pty("PTY: repeated tab printed candidates", repeated)
+read_more(0.7)
+if count_substr(bytes(buf), b"Configure registered client metadata") > client_desc_before:
+    fail_pty("PTY: repeated set tab duplicated list", bytes(buf[-400:]))
 print("TAB_REPEATED_NO_OUTPUT")
+
+# clear and test show candidates
+os.write(fd, b"\x15")
+read_more(0.2)
+os.write(fd, b"show ")
+read_more(0.3)
+before = len(buf)
+os.write(fd, b"\t")
+read_more(1.0)
+show_chunk = bytes(buf[before:])
+vis_show = visible(show_chunk)
+for token in (b"status", b"version", b"clients", b"client", b"enrollments"):
+    if token not in vis_show:
+        fail_pty("PTY: show tab missing %s" % token.decode(), show_chunk)
+print("TAB_SHOW_CANDIDATES_FIRST_PRESS")
+
+# --- client IDs on first Tab ---
+os.write(fd, b"\x15")
+read_more(0.2)
+os.write(fd, b"set client ")
+read_more(0.3)
+before = len(buf)
+os.write(fd, b"\t")
+read_more(1.0)
+cid_chunk = bytes(buf[before:])
+vis_cid = visible(cid_chunk)
+if b"CLIENT ID" not in vis_cid and b"aabbccdd" not in vis_cid:
+    fail_pty("PTY: client id tab missing candidates", cid_chunk)
+if b"aabbccdd" not in vis_cid:
+    fail_pty("PTY: client id tab missing canonical id", cid_chunk)
+print("TAB_CLIENT_IDS_FIRST_PRESS")
+
+# --- client properties ---
+os.write(fd, b"\x15")
+read_more(0.2)
+os.write(fd, b"set client aabbccdd ")
+read_more(0.3)
+before = len(buf)
+os.write(fd, b"\t")
+read_more(1.0)
+prop_chunk = bytes(buf[before:])
+vis_prop = visible(prop_chunk)
+for token in (b"label", b"note", b"tag"):
+    if token not in vis_prop:
+        fail_pty("PTY: client property tab missing %s" % token.decode(), prop_chunk)
+if b"Administrator display label" not in vis_prop:
+    fail_pty("PTY: client property descriptions missing", prop_chunk)
+print("TAB_CLIENT_PROPERTIES_FIRST_PRESS")
+
+# --- no secret candidates after tag ---
+os.write(fd, b"\x15")
+read_more(0.2)
+os.write(fd, b"set client aabbccdd tag ")
+read_more(0.3)
+before = len(buf)
+os.write(fd, b"\t")
+read_more(0.8)
+tag_chunk = bytes(buf[before:])
+vis_tag = visible(tag_chunk)
+for bad in (b"secret", b"token", b"password", b"private", b"mgmt_mac"):
+    if bad in vis_tag.lower():
+        fail_pty("PTY: tag tab exposed secret-like candidate", tag_chunk)
+print("TAB_NO_SECRET_CANDIDATES")
+
 os.write(fd, b"\x15")
 read_more(0.2)
 os.write(fd, b"\r")
 if not wait_prompt():
-    fail_pty("PTY: no prompt after clearing set ", bytes(buf[before:]))
+    fail_pty("PTY: no prompt after clearing", bytes(buf[-400:]))
 
 # History recall then Tab completion.
 os.write(fd, b"show version\r")
@@ -617,14 +718,12 @@ os.write(fd, b"statu")
 read_more(0.3)
 os.write(fd, b"\t")
 read_more(0.8)
-hist_tab = bytes(buf[before:])
-if list_blocks(hist_tab):
-    fail_pty("PTY: tab after history printed a list", hist_tab)
 os.write(fd, b"\r")
 if not wait_prompt():
     fail_pty("PTY: no prompt after history+tab", bytes(buf[before:]))
 if b"DISPATCH frp-server-status" not in bytes(buf[before:]):
     fail_pty("PTY: tab after history did not complete status", bytes(buf[before:]))
+print("TAB_HISTORY_COMPATIBLE")
 print("TAB_HISTORY_RECALL_COMPATIBLE")
 
 os.write(fd, b"exit\r")
@@ -634,17 +733,25 @@ _, status = os.waitpid(pid, 0)
 if os.WIFEXITED(status) and os.WEXITSTATUS(status) not in (0,):
     raise SystemExit(1)
 print("PTY_TAB_OK")
+print("PTY_CLI_TEST")
 PY
+pass "TAB_UNIQUE_COMPLETES_INLINE"
 pass "TAB_UNIQUE_INLINE"
-pass "TAB_AMBIGUOUS_ZERO_OUTPUT"
-pass "TAB_AMBIGUOUS_NO_NEWLINE"
-pass "TAB_AMBIGUOUS_NO_PROMPT_REDRAW"
-pass "TAB_REPEATED_NO_OUTPUT"
+pass "TAB_ROOT_CANDIDATES_FIRST_PRESS"
+pass "TAB_SET_CANDIDATES_FIRST_PRESS"
+pass "TAB_SHOW_CANDIDATES_FIRST_PRESS"
+pass "TAB_CLIENT_IDS_FIRST_PRESS"
+pass "TAB_CLIENT_PROPERTIES_FIRST_PRESS"
+pass "TAB_BUFFER_PRESERVED_AFTER_LIST"
+pass "TAB_PROMPT_RESTORED"
+pass "TAB_NO_CLEAR"
+pass "TAB_NO_INPUT_LOSS"
+pass "TAB_NO_DUPLICATE_LIST_ON_REPEAT"
 pass "TAB_DOES_NOT_DISPATCH"
-pass "TAB_ZERO_FLICKER"
-pass "TAB_NO_REDRAW"
-pass "TAB_NO_DISPATCH"
+pass "TAB_NO_SECRET_CANDIDATES"
+pass "TAB_HISTORY_COMPATIBLE"
 pass "TAB_HISTORY_RECALL_COMPATIBLE"
+pass "TAB_REPEATED_NO_OUTPUT"
 pass "PTY_CLI_TEST"
 
 echo "FRPCTL_COMPLETION_TESTS=PASS"

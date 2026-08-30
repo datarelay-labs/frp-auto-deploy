@@ -35,6 +35,7 @@ python3 tests/test-mgmt-identity.py
 ./tests/test-passive-online.sh
 ./tests/test-io-hardening.sh
 ./tests/test-pending-enrollments.sh
+./tests/test-show-enrollments.sh
 ./tests/test-enroll-bulk.sh
 ./tests/test-zero-service-client.sh
 ./tests/test-management-commands.sh
