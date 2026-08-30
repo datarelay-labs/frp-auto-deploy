@@ -182,7 +182,7 @@ def _set_resources(role):
 def _create_resources(role):
     _, server = _role_parts(role)
     if server:
-        return ["enrollment", "enrollments", "backup"]
+        return ["zero-touch", "enrollment", "enrollments", "backup"]
     return []
 
 
@@ -337,6 +337,7 @@ def _root_help(role):
     if server:
         lines.extend(
             [
+                "  create zero-touch",
                 "  create enrollment [--ssh --ssh-user USER --label NAME]",
                 "  create enrollments --count N",
                 "  create backup",
@@ -452,10 +453,18 @@ def _create_help(role):
         "Create\n"
         "======\n\n"
         "Usage:\n"
-        "  create enrollment [--one-line] [--ssh --ssh-user USER --label NAME]\n"
+        "  create zero-touch\n"
+        "  create enrollment\n"
         "  create enrollments --count N\n"
-        "  create enrollments --csv clients.csv\n"
-        "  create backup [path]\n"
+        "  create enrollments --csv FILE\n"
+        "  create backup [path]\n\n"
+        "Recommended:\n"
+        "  create zero-touch\n\n"
+        "Descriptions:\n\n"
+        "zero-touch\n"
+        "  Generate a one-line Zero-touch client installation command.\n\n"
+        "enrollment\n"
+        "  Generate a Manual Enrollment Code.\n"
     )
 
 
@@ -622,11 +631,42 @@ def context_help(tokens, role, names=None, clients=None):
             "  tag     Key/value metadata\n"
         )
     if verb == "create":
+        if len(tokens) >= 2 and tokens[1] == "zero-touch":
+            return (
+                "Zero-touch enrollment\n"
+                "=====================\n\n"
+                "Usage:\n"
+                "  create zero-touch\n\n"
+                "Starts a guided workflow to generate a one-line Zero-touch\n"
+                "client installation command (SSH, services, or management-only).\n\n"
+                "Recommended for everyday client onboarding.\n"
+            )
+        if len(tokens) >= 2 and tokens[1] == "enrollment":
+            return (
+                "Manual Enrollment Code\n"
+                "======================\n\n"
+                "Usage:\n"
+                "  create enrollment\n"
+                "  create enrollment [--one-line] [--ssh --ssh-user USER --label NAME]\n\n"
+                "Generate a Manual Enrollment Code for interactive client install.\n"
+                "For everyday onboarding prefer: create zero-touch\n"
+            )
+        if len(tokens) >= 2 and tokens[1] == "enrollments":
+            return (
+                "Bulk enrollment\n"
+                "===============\n\n"
+                "Usage:\n"
+                "  create enrollments --count N\n"
+                "  create enrollments --csv FILE\n"
+            )
+        if len(tokens) >= 2 and tokens[1] == "backup":
+            return "Usage:\n  create backup [path]\n"
         return _fmt_available(
             [
-                ("enrollment", "Create one enrollment"),
-                ("enrollments", "Create many enrollments"),
-                ("backup", "Create a backup archive"),
+                ("zero-touch", "Zero-touch enrollment (recommended)"),
+                ("enrollment", "Manual Enrollment Code"),
+                ("enrollments", "Bulk enrollment"),
+                ("backup", "Server backup"),
             ]
         )
     if verb == "update":
@@ -995,6 +1035,14 @@ def _match_create(tokens, role, names=None):
     if len(tokens) == 1:
         return incomplete("Missing resource.", ["create <resource>"], avail)
     resource = tokens[1]
+    if resource == "zero-touch":
+        if len(tokens) > 2:
+            return incomplete(
+                "Unexpected arguments.",
+                ["create zero-touch"],
+                tip="create zero-touch ?",
+            )
+        return {"status": "ok", "action": "create_zero_touch"}
     if resource == "enrollment":
         return {"status": "ok", "action": "create_enrollment", "passthrough": tokens[2:]}
     if resource == "enrollments":
@@ -1142,7 +1190,7 @@ def _tab_desc_map(line, role, names=None, clients=None):
         "show": "View status and configuration",
         "set": "Change configuration",
         "unset": "Remove configuration values",
-        "create": "Create enrollment or backup",
+        "create": "Create zero-touch enrollment or backup",
         "revoke": "Revoke management access",
         "release": "Return reserved public ports",
         "update": "Update project or FRP",
@@ -1209,9 +1257,10 @@ def _tab_desc_map(line, role, names=None, clients=None):
             }, "named"
     if verb == "create" and len(filled) == 1:
         return {
-            "enrollment": "Create one enrollment",
-            "enrollments": "Create many enrollments",
-            "backup": "Create a backup archive",
+            "zero-touch": "Zero-touch enrollment (recommended)",
+            "enrollment": "Manual Enrollment Code",
+            "enrollments": "Bulk enrollment",
+            "backup": "Server backup",
         }, "named"
     if verb == "revoke" and len(filled) == 1:
         return {
@@ -1257,9 +1306,13 @@ def format_tab_candidates(line, matches, role, names=None, clients=None):
             )
         return "\n".join(lines)
     if style in ("named", "verbs") and any(descs.get(m) for m in matches):
-        width = max(len(m) for m in matches)
+        # Prefer grammar insertion order over readline alphabetical sort.
+        seen = set(matches)
+        ordered = [k for k in descs if k in seen]
+        ordered.extend(m for m in matches if m not in descs)
+        width = max(len(m) for m in ordered) if ordered else 8
         lines = []
-        for mid in matches:
+        for mid in ordered:
             desc = descs.get(mid) or ""
             if desc:
                 lines.append("%s  %s" % (mid.ljust(width), desc))

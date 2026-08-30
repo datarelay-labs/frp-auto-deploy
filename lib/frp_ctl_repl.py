@@ -96,6 +96,18 @@ class LineEditor:
             # Same line / same candidates: do not spam the list again.
             return
         self._last_display_key = key
+        # Readline may alphabetize matches; restore grammar order for display.
+        preferred = self.grammar.completion_candidates(
+            line,
+            self.role,
+            self.names,
+            self.services,
+            self.local_services,
+            trailing=bool(line) and line[-1:] in " \t",
+        )
+        if preferred:
+            rank = {name: idx for idx, name in enumerate(preferred)}
+            cleaned.sort(key=lambda item: (rank.get(item, 10**6), item.lower()))
         body = self.grammar.format_tab_candidates(
             line,
             cleaned,

@@ -119,6 +119,7 @@ Does not change identity, hostname, machine-id, ports, or enrollment.
 ## create / add
 
 ```text
+create zero-touch
 create enrollment [--one-line] [--ssh --ssh-user USER --label NAME]
 create enrollments --count N
 create enrollments --csv clients.csv
@@ -126,6 +127,7 @@ create backup [path]
 add service [--preset ssh|http|https|custom] ...
 ```
 
+`create zero-touch` is the recommended everyday client onboarding path.
 Enrollment Code and bootstrap ticket secrets are never completed or shown by
 `show` / `?` / Tab.
 

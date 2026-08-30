@@ -52,6 +52,7 @@ bash ./tests/test-installed-client-update.sh
 ./tests/test-install-lifecycle.sh
 ./tests/test-frpctl.sh
 ./tests/test-frpctl-completion.sh
+./tests/test-create-zero-touch.sh
 ./tests/test-frpctl-doctor.sh
 ./tests/test-port-architecture.sh
 ./tests/test-ca-bootstrap.sh

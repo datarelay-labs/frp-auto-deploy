@@ -437,7 +437,7 @@ Canonical grammar:
   set client ID label|note VALUE
   set client ID tag KEY VALUE
   unset client ID label|note|tag [KEY]
-  create enrollment | create backup
+  create zero-touch | create enrollment | create backup
   revoke client ID | release client ID | release service ID SID
   update project [--check] | update frp [--check]
   doctor | help | menu | history | exit
@@ -593,6 +593,292 @@ frpctl_client_menu() {
   done
 }
 
+frpctl_zt_prompt_client_identification() {
+  local name="" note=""
+  echo
+  echo "Client identification"
+  echo "====================="
+  echo
+  while true; do
+    name="$(frpctl_read "Client name: " "")" || return 1
+    name="${name#"${name%%[![:space:]]*}"}"
+    name="${name%"${name##*[![:space:]]}"}"
+    if [[ -n "$name" ]]; then
+      break
+    fi
+    echo "ERROR: Client name is required." >&2
+  done
+  note="$(frpctl_read "Description [optional]: " "")" || return 1
+  note="${note#"${note%%[![:space:]]*}"}"
+  note="${note%"${note##*[![:space:]]}"}"
+  _FRP_ZT_CLIENT_NAME="$name"
+  _FRP_ZT_NOTE="$note"
+  return 0
+}
+
+frpctl_zt_prompt_ssh() {
+  local user="" port=""
+  echo
+  echo "SSH"
+  echo "==="
+  echo
+  while true; do
+    user="$(frpctl_read "SSH user: " "")" || return 1
+    user="${user#"${user%%[![:space:]]*}"}"
+    user="${user%"${user##*[![:space:]]}"}"
+    if [[ -n "$user" ]]; then
+      break
+    fi
+    echo "ERROR: SSH user is required." >&2
+  done
+  port="$(frpctl_read "SSH port [22]: " "22")" || return 1
+  port="${port#"${port%%[![:space:]]*}"}"
+  port="${port%"${port##*[![:space:]]}"}"
+  if [[ ! "$port" =~ ^[0-9]+$ ]] || ((port < 1 || port > 65535)); then
+    echo "ERROR: invalid SSH port; must be an integer 1-65535" >&2
+    return 1
+  fi
+  _FRP_ZT_SSH_USER="$user"
+  _FRP_ZT_SSH_PORT="$port"
+  return 0
+}
+
+frpctl_zt_invoke_create_client() {
+  # Usage: frpctl_zt_invoke_create_client [extra frp-create-client args...]
+  local -a args=("$@")
+  if [[ -n "${_FRP_ZT_CLIENT_NAME:-}" ]]; then
+    args+=(--client-name "$_FRP_ZT_CLIENT_NAME")
+  fi
+  if [[ -n "${_FRP_ZT_NOTE:-}" ]]; then
+    args+=(--note "$_FRP_ZT_NOTE")
+  fi
+  frpctl_run frp-create-client "${args[@]}"
+}
+
+frpctl_zt_run_ssh() {
+  _FRP_ZT_CLIENT_NAME=""
+  _FRP_ZT_NOTE=""
+  _FRP_ZT_SSH_USER=""
+  _FRP_ZT_SSH_PORT=""
+  frpctl_zt_prompt_client_identification || return 1
+  frpctl_zt_prompt_ssh || return 1
+  frpctl_zt_invoke_create_client \
+    --one-line \
+    --ssh \
+    --ssh-user "$_FRP_ZT_SSH_USER" \
+    --ssh-port "$_FRP_ZT_SSH_PORT"
+}
+
+frpctl_zt_run_management() {
+  _FRP_ZT_CLIENT_NAME=""
+  _FRP_ZT_NOTE=""
+  frpctl_zt_prompt_client_identification || return 1
+  frpctl_zt_invoke_create_client --one-line
+}
+
+frpctl_zt_service_payload() {
+  # args: preset id name host port [ssh_user]
+  python3 - "$@" <<'PY'
+import json, sys
+preset = sys.argv[1]
+sid = sys.argv[2]
+name = sys.argv[3]
+host = sys.argv[4]
+port = int(sys.argv[5])
+payload = {
+    "id": sid,
+    "name": name,
+    "protocol": "tcp",
+    "local_ip": host,
+    "local_port": port,
+    "preset": preset,
+    "enabled": True,
+}
+if preset == "ssh":
+    if len(sys.argv) <= 6 or not str(sys.argv[6]).strip():
+        raise SystemExit("ERROR: ssh_user is required for ssh services")
+    payload["ssh_user"] = str(sys.argv[6]).strip()
+print(json.dumps(payload))
+PY
+}
+
+frpctl_zt_prompt_service_fields() {
+  # Sets _FRP_ZT_SVC_JSON for one service. Args: preset default_id default_name default_host default_port
+  local preset="$1" default_id="$2" default_name="$3" default_host="$4" default_port="$5"
+  local sid host port user name
+  if [[ -n "$default_id" ]]; then
+    sid="$(frpctl_read "Service ID [${default_id}]: " "$default_id")" || return 1
+  else
+    sid="$(frpctl_read "Service ID: " "")" || return 1
+  fi
+  sid="${sid#"${sid%%[![:space:]]*}"}"
+  sid="${sid%"${sid##*[![:space:]]}"}"
+  if [[ -z "$sid" ]]; then
+    echo "ERROR: Service ID is required." >&2
+    return 1
+  fi
+  host="$(frpctl_read "Target host [${default_host}]: " "$default_host")" || return 1
+  host="${host#"${host%%[![:space:]]*}"}"
+  host="${host%"${host##*[![:space:]]}"}"
+  if [[ -z "$host" ]]; then
+    echo "ERROR: Target host is required." >&2
+    return 1
+  fi
+  if [[ -n "$default_port" ]]; then
+    port="$(frpctl_read "Target port [${default_port}]: " "$default_port")" || return 1
+  else
+    port="$(frpctl_read "Target port: " "")" || return 1
+  fi
+  port="${port#"${port%%[![:space:]]*}"}"
+  port="${port%"${port##*[![:space:]]}"}"
+  if [[ ! "$port" =~ ^[0-9]+$ ]] || ((port < 1 || port > 65535)); then
+    echo "ERROR: invalid target port; must be an integer 1-65535" >&2
+    return 1
+  fi
+  name="$default_name"
+  if [[ "$preset" == "custom" ]]; then
+    name="$(frpctl_read "Display name [${sid}]: " "$sid")" || return 1
+    name="${name#"${name%%[![:space:]]*}"}"
+    name="${name%"${name##*[![:space:]]}"}"
+    [[ -n "$name" ]] || name="$sid"
+  fi
+  if [[ "$preset" == "ssh" ]]; then
+    while true; do
+      user="$(frpctl_read "SSH user: " "")" || return 1
+      user="${user#"${user%%[![:space:]]*}"}"
+      user="${user%"${user##*[![:space:]]}"}"
+      if [[ -n "$user" ]]; then
+        break
+      fi
+      echo "ERROR: SSH user is required." >&2
+    done
+    _FRP_ZT_SVC_JSON="$(frpctl_zt_service_payload "$preset" "$sid" "$name" "$host" "$port" "$user")" || return 1
+  else
+    _FRP_ZT_SVC_JSON="$(frpctl_zt_service_payload "$preset" "$sid" "$name" "$host" "$port")" || return 1
+  fi
+  return 0
+}
+
+frpctl_zt_write_services_file() {
+  # argv[1]=path, remaining=JSON object strings
+  python3 - "$@" <<'PY'
+import json, sys
+path = sys.argv[1]
+items = []
+for raw in sys.argv[2:]:
+    items.append(json.loads(raw))
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(items, fh)
+    fh.write("\n")
+PY
+}
+
+frpctl_zt_run_services() {
+  local choice services_file="" rc=0
+  local -a svc_jsons=()
+  _FRP_ZT_CLIENT_NAME=""
+  _FRP_ZT_NOTE=""
+  _FRP_ZT_SVC_JSON=""
+
+  frpctl_zt_prompt_client_identification || return 1
+
+  while true; do
+    echo
+    echo "Configure services"
+    echo "=================="
+    echo
+    echo "1) Add SSH"
+    echo "2) Add HTTP"
+    echo "3) Add HTTPS"
+    echo "4) Add Custom TCP"
+    echo "5) Finish"
+    echo "6) Cancel"
+    echo
+    choice="$(frpctl_read "Select: " "")" || return 1
+    case "$choice" in
+      1)
+        frpctl_zt_prompt_service_fields ssh ssh SSH 127.0.0.1 22 || continue
+        svc_jsons+=("$_FRP_ZT_SVC_JSON")
+        echo "Added SSH service."
+        ;;
+      2)
+        frpctl_zt_prompt_service_fields http http HTTP 127.0.0.1 80 || continue
+        svc_jsons+=("$_FRP_ZT_SVC_JSON")
+        echo "Added HTTP service."
+        ;;
+      3)
+        frpctl_zt_prompt_service_fields https https HTTPS 127.0.0.1 443 || continue
+        svc_jsons+=("$_FRP_ZT_SVC_JSON")
+        echo "Added HTTPS service."
+        ;;
+      4)
+        frpctl_zt_prompt_service_fields custom "" "Custom TCP" 127.0.0.1 "" || continue
+        svc_jsons+=("$_FRP_ZT_SVC_JSON")
+        echo "Added Custom TCP service."
+        ;;
+      5)
+        if [[ ${#svc_jsons[@]} -eq 0 ]]; then
+          echo "ERROR: add at least one service, or choose Cancel." >&2
+          continue
+        fi
+        break
+        ;;
+      6|"")
+        echo "Cancelled."
+        return 0
+        ;;
+      *)
+        echo "ERROR: select 1-6" >&2
+        ;;
+    esac
+  done
+
+  services_file="$(mktemp)" || return 1
+  chmod 600 "$services_file" || {
+    rm -f "$services_file"
+    return 1
+  }
+  if ! frpctl_zt_write_services_file "$services_file" "${svc_jsons[@]}"; then
+    rm -f "$services_file"
+    return 1
+  fi
+  if [[ "${FRP_CTL_DRY_RUN:-}" == "1" ]]; then
+    printf 'SERVICES_JSON '
+    tr -d '\n' <"$services_file"
+    printf '\n'
+  fi
+  frpctl_zt_invoke_create_client --one-line --services-file "$services_file"
+  rc=$?
+  rm -f "$services_file"
+  return "$rc"
+}
+
+frpctl_guided_zero_touch() {
+  local choice
+  echo
+  echo "Zero-touch enrollment"
+  echo "====================="
+  echo
+  echo "How do you want to configure this client?"
+  echo
+  echo "1) SSH only"
+  echo "2) Configure services"
+  echo "3) Management only"
+  echo "4) Back"
+  echo
+  choice="$(frpctl_read "Select: " "")" || return 1
+  case "$choice" in
+    1) frpctl_zt_run_ssh ;;
+    2) frpctl_zt_run_services ;;
+    3) frpctl_zt_run_management ;;
+    4|"") return 0 ;;
+    *)
+      echo "ERROR: select 1-4" >&2
+      return 1
+      ;;
+  esac
+}
+
 frpctl_guided_enroll() {
   local choice
   echo
@@ -606,7 +892,7 @@ frpctl_guided_enroll() {
   choice="$(frpctl_read "Select: " "")" || return 1
   case "$choice" in
     1)
-      frpctl_run frp-create-client --one-line --ssh
+      frpctl_zt_run_ssh
       ;;
     2)
       frpctl_run frp-create-client
@@ -1192,11 +1478,12 @@ for sid in sorted(services):
 PY
 }
 
-# Print matching completion candidates, one per line, sorted uniquely.
+# Print matching completion candidates, one per line.
+# Preserve grammar order (e.g. zero-touch before enrollment). Deduplicate only.
 frpctl_completion_candidates() {
   local line="$1" extra
   extra="$(python3 -c 'import json,sys; print(json.dumps({"line":sys.argv[1]}))' "$line")"
-  frpctl_grammar_call complete "$extra" | sort -u
+  frpctl_grammar_call complete "$extra" | awk 'NF && !seen[$0]++'
 }
 
 frpctl_common_prefix() {
@@ -1484,6 +1771,7 @@ frpctl_dispatch_canonical() {
       ;;
     apply) frpctl_require_client || return 1; frpctl_invoke frp-client apply-pending ;;
     discard) frpctl_require_client || return 1; frpctl_invoke frp-client discard-pending ;;
+    create_zero_touch) frpctl_require_server || return 1; frpctl_guided_zero_touch ;;
     create_enrollment) frpctl_require_server || return 1; frpctl_invoke frp-create-client $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
     create_enrollments) frpctl_require_server || return 1; frpctl_invoke frp-enroll-bulk $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
     create_backup) frpctl_require_server || return 1; frpctl_run frp-backup $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
