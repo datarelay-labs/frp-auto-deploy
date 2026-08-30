@@ -1,7 +1,7 @@
 # FrpCrypto.ps1 — ECDSA P-256, canonical JSON, PBKDF2 token wrap, HMAC helpers.
 # Prefer Add-Type C# helpers. No external NuGet. Compatible with Windows PowerShell 5.1 and PowerShell 7.
 
-if ($script:FrpCryptoLoaded) { return }
+if ((Test-Path variable:script:FrpCryptoLoaded) -and $script:FrpCryptoLoaded) { return }
 $script:FrpCryptoLoaded = $true
 
 $script:FrpCryptoTypeReady = $false

@@ -1,6 +1,6 @@
 # FrpBootstrap.ps1 — zero-touch redeem → enroll → decrypt → config → download → start.
 
-if ($script:FrpBootstrapLoaded) { return }
+if ((Test-Path variable:script:FrpBootstrapLoaded) -and $script:FrpBootstrapLoaded) { return }
 $script:FrpBootstrapLoaded = $true
 
 # When this file lives in windows/lib, package root is windows/

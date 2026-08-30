@@ -1,6 +1,6 @@
 # FrpProcess.ps1 — start/stop/status for project-managed frpc.
 
-if ($script:FrpProcessLoaded) { return }
+if ((Test-Path variable:script:FrpProcessLoaded) -and $script:FrpProcessLoaded) { return }
 $script:FrpProcessLoaded = $true
 
 function Read-FrpPidFile {

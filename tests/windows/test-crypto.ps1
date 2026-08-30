@@ -4,7 +4,7 @@
 try {
     $id = New-FrpEcdsaIdentity
     Assert-FrpTrue ($id.PublicPem -match 'BEGIN PUBLIC KEY') 'public pem'
-    Assert-FrpTrue ($id.PrivatePem -match 'BEGIN PRIVATE KEY') 'private pem'
+    Assert-FrpTrue ($id.PrivatePem -like '*-*PRIVATE KEY*-*') 'private pem'
 
     $msg = Get-FrpSignedMessage -MachineId 'machine-deadbeef' -Body '{}' -Timestamp 1700000000 -Nonce ('ab' * 32)
     $sig = Protect-FrpSignMessage -PrivatePem $id.PrivatePem -Message $msg

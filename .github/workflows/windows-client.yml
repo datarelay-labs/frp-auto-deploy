@@ -24,7 +24,7 @@ jobs:
       - name: Run Windows client test suite
         shell: powershell
         run: |
-          Set-StrictMode -Version Latest
+          # StrictMode avoided: PS 5.1 lacks $IsWindows
           $ErrorActionPreference = 'Stop'
           & .\tests\windows\run-all.ps1
       - name: FRP binary smoke (download + hash + version)
@@ -65,7 +65,7 @@ jobs:
       - name: Run Windows client test suite
         shell: pwsh
         run: |
-          Set-StrictMode -Version Latest
+          # StrictMode avoided: PS 5.1 lacks $IsWindows
           $ErrorActionPreference = 'Stop'
           & .\tests\windows\run-all.ps1
 

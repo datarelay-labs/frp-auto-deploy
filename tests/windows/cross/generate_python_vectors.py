@@ -55,7 +55,9 @@ def main():
         'signed_message': message,
         'python_signature_b64': sig,
         'python_public_pem': pub_pem,
-        'python_private_pem': key_path.read_text(encoding='utf-8'),
+        # Intentionally omit private PEM from the written fixture so secret-scan
+        # and the public repo never track key material. Keys are regenerated
+        # each test run and deleted below.
         'derive_mac_key': mac,
         'enrollment_hmac': enroll_sig,
         'canonical_signed_object': MGMT.canonical_json(canonical_obj),

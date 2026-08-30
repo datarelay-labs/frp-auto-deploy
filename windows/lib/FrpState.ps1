@@ -1,6 +1,6 @@
 # FrpState.ps1 — directories, client-id, identity storage, client-state.json.
 
-if ($script:FrpStateLoaded) { return }
+if ((Test-Path variable:script:FrpStateLoaded) -and $script:FrpStateLoaded) { return }
 $script:FrpStateLoaded = $true
 
 function Initialize-FrpDirectories {

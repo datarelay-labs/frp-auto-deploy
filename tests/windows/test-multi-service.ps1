@@ -12,7 +12,7 @@ try {
     Assert-FrpEqual 2 @($svcs).Count 'two services'
     $list = Get-FrpEnrollServiceList -Services $svcs
     $presets = @($list | ForEach-Object { $_.preset })
-    Assert-FrpTrue ($presets -contains 'custom') 'rdp->custom'
+    Assert-FrpTrue ($presets -contains 'rdp') 'rdp first-class'
     Assert-FrpTrue ($presets -contains 'http') 'http kept'
 
     $merged = Merge-FrpAllocatedPorts -LocalServices $svcs -AllocatedList @(

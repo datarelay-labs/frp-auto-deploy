@@ -1,6 +1,6 @@
 # FrpConfig.ps1 — render frpc.toml matching Linux client semantics.
 
-if ($script:FrpConfigLoaded) { return }
+if ((Test-Path variable:script:FrpConfigLoaded) -and $script:FrpConfigLoaded) { return }
 $script:FrpConfigLoaded = $true
 
 function Escape-FrpTomlString {

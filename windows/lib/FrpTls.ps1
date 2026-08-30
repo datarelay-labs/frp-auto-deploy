@@ -1,7 +1,7 @@
 # FrpTls.ps1 — CA pin bootstrap + pinned HTTPS JSON client.
 # One-shot insecure fetch ONLY for /ca.crt bytes; never leave a global TLS bypass.
 
-if ($script:FrpTlsLoaded) { return }
+if ((Test-Path variable:script:FrpTlsLoaded) -and $script:FrpTlsLoaded) { return }
 $script:FrpTlsLoaded = $true
 
 function Get-FrpAllocatorOrigin {
