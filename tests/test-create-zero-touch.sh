@@ -129,17 +129,20 @@ grep -q 'DISPATCH frp-create-client --one-line --ssh --ssh-user aella --ssh-port
   "$WORKDIR/zt-ssh.out" || fail "ssh only dispatch"
 pass "ZERO_TOUCH_SSH_GUIDED"
 
-# --- Guided: management only ---
-run_repl "$SERVER" "$WORKDIR/zt-mgmt.out" \
-  "create zero-touch" 3 mgmt-only "inventory" exit \
-  || fail "zero-touch management guided"
-grep -q 'DISPATCH frp-create-client --one-line --client-name mgmt-only --note inventory' \
-  "$WORKDIR/zt-mgmt.out" || fail "management only dispatch"
-if grep -qE 'DISPATCH frp-create-client .*--ssh|DISPATCH frp-create-client .*--services-file' \
-  "$WORKDIR/zt-mgmt.out"; then
-  fail "management only used service flags"
+# --- Guided menu intentionally hides management-only ---
+run_repl "$SERVER" "$WORKDIR/zt-no-mgmt.out" \
+  "create zero-touch" 3 exit \
+  || fail "zero-touch back option"
+grep -q '1) SSH only' "$WORKDIR/zt-no-mgmt.out" || fail "ssh only option missing"
+grep -q '2) Configure services' "$WORKDIR/zt-no-mgmt.out" || fail "configure services option missing"
+grep -q '3) Back' "$WORKDIR/zt-no-mgmt.out" || fail "back option missing"
+if grep -q 'Management only' "$WORKDIR/zt-no-mgmt.out"; then
+  fail "management only must not appear in guided menu"
 fi
-pass "ZERO_TOUCH_MANAGEMENT_ONLY_GUIDED"
+if grep -q 'DISPATCH frp-create-client --one-line' "$WORKDIR/zt-no-mgmt.out"; then
+  fail "Back unexpectedly dispatched zero-touch enrollment"
+fi
+pass "ZERO_TOUCH_MANAGEMENT_ONLY_HIDDEN"
 
 # --- Guided: multi-service SSH+HTTP ---
 run_repl "$SERVER" "$WORKDIR/zt-multi-http.out" \
@@ -254,7 +257,7 @@ pass "LEGACY_ONE_LINE_COMPAT"
 
 # --- History must not store secret-looking lines; create zero-touch itself is fine ---
 run_repl "$SERVER" "$WORKDIR/zt-hist.out" \
-  "create zero-touch" 4 \
+  "create zero-touch" 3 \
   "FRP_BOOTSTRAP_TICKET=abc.def" \
   history \
   exit || fail "history secret filter"
