@@ -234,6 +234,7 @@ bundles. Checksum verification is not the same as signature verification.
 | MITM after CA pin | TLS verification with pinned CA |
 | Stolen Enrollment Code | Usable until expiry / first-machine bind |
 | Stolen Bootstrap Ticket | Same; one-line command is sensitive |
+| Windows Zero-touch command | Downloads `bootstrap-client.ps1`, verifies SHA256 against `SHA256SUMS`, then `-File` (no `irm|iex`); ticket still short-lived/one-time |
 | Replayed management request | Rejected (nonce/timestamp) |
 | Compromised client local root | **Outside** the protection boundary |
 | Compromised server root | **Outside** the protection boundary |

@@ -769,6 +769,7 @@ curl -fsSL \
   external NAT configuration
 - No automatic SSH account, password, or SSH key management
 - Windows client automation is not included
++ Windows Client (experimental on `feature/windows-client`): see [docs/WINDOWS_CLIENT.md](docs/WINDOWS_CLIENT.md)
 - Some real-VM / SELinux / ARM64 / older OpenSSL combinations remain separately
   classified in the validation matrix
 - Project bootstrap scripts are checksummed, not cryptographically signed

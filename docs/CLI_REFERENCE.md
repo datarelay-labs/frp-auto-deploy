@@ -124,10 +124,13 @@ create enrollment [--one-line] [--ssh --ssh-user USER --label NAME]
 create enrollments --count N
 create enrollments --csv clients.csv
 create backup [path]
-add service [--preset ssh|http|https|custom] ...
+add service [--preset ssh|http|https|rdp|custom] ...
 ```
 
 `create zero-touch` is the recommended everyday client onboarding path.
+It prompts for client platform (Linux or Windows), then service shortcuts
+(SSH only / RDP only / Configure services). Non-interactive issuance supports
+`--platform linux|windows` and `--rdp` on `frp-create-client`.
 Enrollment Code and bootstrap ticket secrets are never completed or shown by
 `show` / `?` / Tab.
 
