@@ -119,20 +119,22 @@ ctx_en="$(frpctl_grammar_call match '{"tokens":["create","enrollment","?"],"role
 echo "$ctx_en" | grep -q 'Manual Enrollment Code' || fail "create enrollment ? heading"
 pass "CREATE_ZERO_TOUCH_CONTEXT_HELP"
 
-# --- Guided: SSH only ---
+# --- Guided: platform menu + Linux SSH only ---
 run_repl "$SERVER" "$WORKDIR/zt-ssh.out" \
-  "create zero-touch" 1 office-ssh "Seoul office" aella 22 exit \
+  "create zero-touch" 1 1 office-ssh "Seoul office" aella 22 exit \
   || fail "zero-touch ssh guided"
 grep -q 'Zero-touch enrollment' "$WORKDIR/zt-ssh.out" || fail "zero-touch heading"
+grep -q '1) Linux' "$WORKDIR/zt-ssh.out" || fail "linux platform option"
+grep -q '2) Windows' "$WORKDIR/zt-ssh.out" || fail "windows platform option"
 grep -q '1) SSH only' "$WORKDIR/zt-ssh.out" || fail "ssh only option"
-grep -q 'DISPATCH frp-create-client --one-line --ssh --ssh-user aella --ssh-port 22 --client-name office-ssh --note Seoul office' \
+grep -q 'DISPATCH frp-create-client --platform linux --one-line --ssh --ssh-user aella --ssh-port 22 --client-name office-ssh --note Seoul office' \
   "$WORKDIR/zt-ssh.out" || fail "ssh only dispatch"
 pass "ZERO_TOUCH_SSH_GUIDED"
 
 # --- Guided menu intentionally hides management-only ---
 run_repl "$SERVER" "$WORKDIR/zt-no-mgmt.out" \
-  "create zero-touch" 3 exit \
-  || fail "zero-touch back option"
+  "create zero-touch" 1 3 exit \
+  || fail "zero-touch linux back option"
 grep -q '1) SSH only' "$WORKDIR/zt-no-mgmt.out" || fail "ssh only option missing"
 grep -q '2) Configure services' "$WORKDIR/zt-no-mgmt.out" || fail "configure services option missing"
 grep -q '3) Back' "$WORKDIR/zt-no-mgmt.out" || fail "back option missing"
@@ -144,16 +146,26 @@ if grep -q 'DISPATCH frp-create-client --one-line' "$WORKDIR/zt-no-mgmt.out"; th
 fi
 pass "ZERO_TOUCH_MANAGEMENT_ONLY_HIDDEN"
 
+# --- Guided: Windows RDP only ---
+run_repl "$SERVER" "$WORKDIR/zt-win-rdp.out" \
+  "create zero-touch" 2 1 win-rdp "Windows laptop" 3389 exit \
+  || fail "zero-touch windows rdp guided"
+grep -q 'Windows Zero-touch enrollment' "$WORKDIR/zt-win-rdp.out" || fail "windows heading"
+grep -q '1) RDP only' "$WORKDIR/zt-win-rdp.out" || fail "rdp only option"
+grep -q 'DISPATCH frp-create-client --platform windows --one-line --rdp --rdp-port 3389 --client-name win-rdp --note Windows laptop' \
+  "$WORKDIR/zt-win-rdp.out" || fail "windows rdp dispatch"
+pass "ZERO_TOUCH_WINDOWS_RDP_GUIDED"
+
 # --- Guided: multi-service SSH+HTTP ---
 run_repl "$SERVER" "$WORKDIR/zt-multi-http.out" \
-  "create zero-touch" 2 multi-http "" \
+  "create zero-touch" 1 2 multi-http "" \
   1 "" "" "" aella \
   2 "" "" "" \
-  5 \
+  6 \
   exit \
   || fail "zero-touch multi ssh+http"
 grep -q 'SERVICES_JSON ' "$WORKDIR/zt-multi-http.out" || fail "multi-http missing SERVICES_JSON"
-grep -q 'DISPATCH frp-create-client --one-line --services-file ' "$WORKDIR/zt-multi-http.out" \
+grep -q 'DISPATCH frp-create-client --platform linux --one-line --services-file ' "$WORKDIR/zt-multi-http.out" \
   || fail "multi-http missing services-file dispatch"
 grep -qF -- '--client-name multi-http' "$WORKDIR/zt-multi-http.out" || fail "multi-http client-name"
 python3 - "$WORKDIR/zt-multi-http.out" <<'PY' || fail "multi-http services content"
@@ -180,10 +192,10 @@ pass "ZERO_TOUCH_MULTI_SERVICE_SSH_HTTP"
 
 # --- Guided: multi-service SSH+HTTPS ---
 run_repl "$SERVER" "$WORKDIR/zt-multi-https.out" \
-  "create zero-touch" 2 multi-https "" \
+  "create zero-touch" 1 2 multi-https "" \
   1 "" "" "" aella \
   3 "" "" "" \
-  5 \
+  6 \
   exit \
   || fail "zero-touch multi ssh+https"
 python3 - "$WORKDIR/zt-multi-https.out" <<'PY' || fail "multi-https services content"
@@ -201,10 +213,10 @@ pass "ZERO_TOUCH_MULTI_SERVICE_SSH_HTTPS"
 
 # --- Remote LAN target hosts ---
 run_repl "$SERVER" "$WORKDIR/zt-lan.out" \
-  "create zero-touch" 2 lan-client "lan note" \
+  "create zero-touch" 1 2 lan-client "lan note" \
   1 ssh 10.10.10.20 22 ops \
   2 web 10.10.10.30 80 \
-  5 \
+  6 \
   exit \
   || fail "zero-touch remote lan"
 python3 - "$WORKDIR/zt-lan.out" <<'PY' || fail "lan target services"

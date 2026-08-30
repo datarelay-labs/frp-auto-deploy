@@ -1,0 +1,95 @@
+name: windows-client
+on:
+  push:
+    paths:
+      - 'windows/**'
+      - 'tests/windows/**'
+      - 'docs/WINDOWS_CLIENT.md'
+      - 'docs/WINDOWS_CLIENT_DESIGN.md'
+      - 'scripts/build-bundles.py'
+      - 'tools/frp-create-client'
+      - 'server/frp-port-allocator.py'
+      - 'lib/frp_mgmt_auth.py'
+      - '.github/workflows/windows-client.yml'
+  pull_request:
+    paths:
+      - 'windows/**'
+      - 'tests/windows/**'
+      - 'docs/WINDOWS_CLIENT.md'
+      - 'docs/WINDOWS_CLIENT_DESIGN.md'
+      - 'scripts/build-bundles.py'
+      - 'tools/frp-create-client'
+      - 'server/frp-port-allocator.py'
+      - 'lib/frp_mgmt_auth.py'
+      - '.github/workflows/windows-client.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  windows-pwsh:
+    name: Windows ${{ matrix.shell }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shell:
+          - powershell
+          - pwsh
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build Windows bootstrap artifact
+        shell: bash
+        run: |
+          python3 scripts/build-bundles.py
+          test -f dist/bootstrap-client.ps1
+      - name: Run Windows client test suite
+        shell: ${{ matrix.shell }}
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          & .\tests\windows\run-all.ps1
+      - name: Optional local FRP binary smoke (download + hash + version)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . .\windows\lib\FrpPaths.ps1
+          . .\windows\lib\FrpCrypto.ps1
+          . .\windows\lib\FrpState.ps1
+          . .\windows\lib\FrpBootstrap.ps1
+          $root = Join-Path $env:TEMP ('frp-frpc-smoke-' + [guid]::NewGuid().ToString('N'))
+          $env:FRP_WINDOWS_ROOT = $root
+          try {
+            Initialize-FrpDirectories | Out-Null
+            Install-FrpWindowsBinary | Out-Null
+            $frpc = Get-FrpFrpcPath
+            if (-not (Test-Path -LiteralPath $frpc)) { throw 'frpc.exe missing' }
+            & $frpc -v
+          } finally {
+            Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item Env:FRP_WINDOWS_ROOT -ErrorAction SilentlyContinue
+          }
+
+  linux-pwsh-cross:
+    name: Linux pwsh cross-language
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install PowerShell
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v pwsh >/dev/null 2>&1; then
+            curl -fsSL -o /tmp/packages-microsoft-prod.deb \
+              https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb
+            sudo dpkg -i /tmp/packages-microsoft-prod.deb
+            sudo apt-get update -qq
+            sudo apt-get install -y powershell
+          fi
+          pwsh -NoProfile -Command '$PSVersionTable.PSVersion'
+      - name: Run Windows suite under Linux pwsh
+        run: pwsh -NoProfile -File tests/windows/run-all.ps1

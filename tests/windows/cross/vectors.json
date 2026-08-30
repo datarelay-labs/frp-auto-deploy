@@ -1,0 +1,17 @@
+{
+  "secret": "secret-deadbeef0123456789abcdef",
+  "token": "frp-token-deadbeef-do-not-use",
+  "token_ciphertext_python": "U2FsdGVkX1+MqEjGbDR1Yu9IkF1Dcuu5A76mPqL9HeevAlD284uO9/gr/f/ZHS+Y",
+  "machine_id": "machine-id-deadbeef01",
+  "body": "{\"machine_id\":\"machine-id-deadbeef01\",\"hostname\":\"win-test\",\"services\":[]}",
+  "ts": 1700000000,
+  "nonce": "abababababababababababababababababababababababababababababababab",
+  "signed_message": "{\"alg\":\"ecdsa-p256-sha256\",\"body_sha256\":\"a7d5672dea95591994acf1b669afef0bd5860c317bc1f53e1a354ebb97066fb4\",\"machine_id\":\"machine-id-deadbeef01\",\"nonce\":\"abababababababababababababababababababababababababababababababab\",\"op\":\"enroll\",\"schema\":1,\"ts\":1700000000}",
+  "python_signature_b64": "MEUCIQCxcevjkZd1aa4fi+aAhy0POE2bxrrPFmATYp3J4LYQrwIgequ3awcvnpI8sTUQ4t7mdTxJIiAz+aYVvFTx/4NxasY=",
+  "python_public_pem": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEDBpyXc3r7NkcjP3gUF0Iq7RQYFZB\nuY+bvjMeAZ4Pgp9vawsqvkIBCxiA//0mv1r7RS9viidmmc0jhwJur/ZawQ==\n-----END PUBLIC KEY-----\n",
+  "python_private_pem": "-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIL06LMKn2O1pCBhYggVvKfsxm024NhWYo6z2CvOZ3vbZoAoGCCqGSM49\nAwEHoUQDQgAEDBpyXc3r7NkcjP3gUF0Iq7RQYFZBuY+bvjMeAZ4Pgp9vawsqvkIB\nCxiA//0mv1r7RS9viidmmc0jhwJur/ZawQ==\n-----END EC PRIVATE KEY-----\n",
+  "derive_mac_key": "4f66a22052c03747d7cf6e9f34c26820315582794697149b31c06aba553de0d0",
+  "enrollment_hmac": "d7ca2f500b777cc3512bcd1fc07bea90e281c3c92197d44cd9924cadda095bb5",
+  "canonical_signed_object": "{\"alg\":\"ecdsa-p256-sha256\",\"body_sha256\":\"a7d5672dea95591994acf1b669afef0bd5860c317bc1f53e1a354ebb97066fb4\",\"machine_id\":\"machine-id-deadbeef01\",\"nonce\":\"abababababababababababababababababababababababababababababababab\",\"op\":\"enroll\",\"schema\":1,\"ts\":1700000000}",
+  "canonical_sample": "{\"a\":2,\"b\":1,\"n\":null,\"t\":true,\"z\":[\"x\",\"y\"]}"
+}
