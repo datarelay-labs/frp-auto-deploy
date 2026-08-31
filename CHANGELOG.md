@@ -36,6 +36,10 @@ from 2.1.0, newly generated Zero-touch / enrollment installer commands use the
   `revoked`) retained for `enrollment_retention_days` (default 30), then
   pair-aware automatic cleanup; `purge enrollment` / `purge enrollments
   --older-than` for manual housekeeping; audit log retention unchanged
+- Clock-skew tolerant authentication: server-issued enrollment challenges,
+  `GET /time` sync, stored `management_time_offset_sec`, and server-relative
+  management timestamps (±300 s replay window unchanged; client OS clock not
+  modified)
 - Windows TLS: enforce hostname/IP SAN verification on the pinned-.NET path (no `-or $true` bypass)
 - Windows zero-service tickets stay management-only (no automatic RDP)
 - `release` clears port reservations but keeps the management client record; `revoke` remains identity-only

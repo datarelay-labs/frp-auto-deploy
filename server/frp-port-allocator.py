@@ -103,6 +103,24 @@ def _load_enrollment_lifecycle():
 ELC = _load_enrollment_lifecycle()
 
 
+def _load_enroll_challenge():
+    candidates = [
+        Path(__file__).resolve().parent / 'frp_enroll_challenge.py',
+        Path(__file__).resolve().parent.parent / 'lib' / 'frp_enroll_challenge.py',
+        Path('/usr/local/lib/frp-auto-deploy/frp_enroll_challenge.py'),
+    ]
+    for path in candidates:
+        if path.is_file():
+            spec = importlib.util.spec_from_file_location('frp_enroll_challenge', path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+    return None
+
+
+ENROLL_CHALLENGE = _load_enroll_challenge()
+
+
 def unsupported_registry_message(state=None):
     version = None
     if isinstance(state, dict) and 'schema_version' in state:
@@ -702,6 +720,25 @@ class Allocator:
         ensure_secret_dir(self.bootstrap_dir, 0o700)
         self.token_file = self.cfg['token_file']
         self.nonce_file = Path(self.registry_file).resolve().parent / 'mgmt-nonces.json'
+        self.enroll_challenges = (
+            ENROLL_CHALLENGE.EnrollChallengeStore() if ENROLL_CHALLENGE else None
+        )
+
+    def issue_enroll_challenge(self, enrollment_id):
+        if self.enroll_challenges is None:
+            return None, 'enrollment challenge support is unavailable'
+        record, _path = self.load_enrollment(enrollment_id)
+        if not record:
+            return None, 'unknown enrollment id'
+        now = int(time.time())
+        if record.get('revoked_at'):
+            return None, 'enrollment code revoked'
+        if now > int(record.get('expires_at', 0)):
+            return None, 'enrollment code expired'
+        try:
+            return self.enroll_challenges.issue(enrollment_id, now), None
+        except ValueError as exc:
+            return None, str(exc)
 
     def registry_lock(self):
         return FileLock(registry_lock_path(self.registry_file))
@@ -1131,12 +1168,38 @@ class Allocator:
             return nonce_error, None, None
         return None, now, nonce
 
-    def verify_request(self, enrollment_id, timestamp, signature, body):
+    def verify_request(self, enrollment_id, timestamp, signature, body, headers=None):
+        headers = headers or {}
         record, path = self.load_enrollment(enrollment_id)
         if not record:
             return None, None, 'unknown enrollment id'
 
         now = int(time.time())
+        if record.get('revoked_at'):
+            return None, None, 'enrollment code revoked'
+        if now > int(record.get('expires_at', 0)):
+            return None, None, 'enrollment code expired'
+
+        secret = record.get('secret', '')
+        challenge_id = str(headers.get('X-Enrollment-Challenge-ID') or '').strip().lower()
+        challenge_nonce = str(headers.get('X-Enrollment-Challenge-Nonce') or '').strip().lower()
+
+        if challenge_id:
+            if self.enroll_challenges is None:
+                return None, None, 'enrollment challenge support is unavailable'
+            err = self.enroll_challenges.consume(
+                challenge_id, enrollment_id, challenge_nonce, now
+            )
+            if err:
+                return None, None, err
+            message = ENROLL_CHALLENGE.enrollment_challenge_message(
+                challenge_id, challenge_nonce, body
+            )
+            expected = hmac_hex(secret, message)
+            if not hmac.compare_digest(expected, signature or ''):
+                return None, None, 'invalid signature'
+            return record, path, None
+
         try:
             ts = int(timestamp)
         except Exception:
@@ -1144,12 +1207,7 @@ class Allocator:
 
         if abs(now - ts) > MAX_CLOCK_SKEW:
             return None, None, 'request timestamp outside allowed window'
-        if record.get('revoked_at'):
-            return None, None, 'enrollment code revoked'
-        if now > int(record.get('expires_at', 0)):
-            return None, None, 'enrollment code expired'
 
-        secret = record.get('secret', '')
         expected = hmac_hex(secret, timestamp + '\n' + body.decode())
         if not hmac.compare_digest(expected, signature or ''):
             return None, None, 'invalid signature'
@@ -1164,7 +1222,7 @@ class Allocator:
         enroll_path = None
         if not identity_auth:
             record, enroll_path, error = self.verify_request(
-                enrollment_id, timestamp, signature, body
+                enrollment_id, timestamp, signature, body, headers=headers
             )
             if error:
                 return 403, api_error(error, classify_auth_error(error))
@@ -1371,6 +1429,7 @@ class Allocator:
             'frp_server_port': cfg_frp_control_public_port(self.cfg),
             'frp_transport': cfg_frp_transport(self.cfg),
             'services': allocated,
+            'server_time': int(time.time()),
         }
         if identity_auth:
             mac_secret = response_mac_key
@@ -1441,6 +1500,9 @@ def make_handler(allocator):
                 if path == '/healthz':
                     self.send_json(200, {'status': 'ok'})
                     return
+                if path == '/time':
+                    self.send_json(200, {'server_time': int(time.time())})
+                    return
                 if path == '/ca.crt':
                     ca_path = allocator.cfg.get('tls_ca_cert')
                     if not ca_path or not Path(ca_path).is_file():
@@ -1462,6 +1524,21 @@ def make_handler(allocator):
         def do_POST(self):
             def _handle():
                 path = self._request_path()
+                if path == '/enroll/challenge':
+                    enrollment_id = str(
+                        self.headers.get('X-Enrollment-ID') or ''
+                    ).strip()
+                    payload, error = allocator.issue_enroll_challenge(
+                        enrollment_id
+                    )
+                    if error:
+                        self.send_json(
+                            403,
+                            api_error(error, classify_auth_error(error)),
+                        )
+                        return
+                    self.send_json(200, payload)
+                    return
                 try:
                     length = int(self.headers.get('Content-Length', '0'))
                     if length <= 0 or length > 65536:

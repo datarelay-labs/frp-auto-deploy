@@ -732,6 +732,7 @@ PY
   fi
   render_access_info "$tmp_access" "$server" "$enabled_list"
   frp_copy_state "$candidate" "$tmp_state"
+  frp_apply_meta_clock_offset "$tmp_state" "$meta"
   frp_state_has_secrets "$tmp_state" || {
     echo "ERROR: refusing to write client-state containing secrets" >&2
     rm -rf "$work"

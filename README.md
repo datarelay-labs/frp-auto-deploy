@@ -656,6 +656,9 @@ The management plane is designed to fail closed.
 - First client trust uses a supplied **CA SHA256 fingerprint** and X.509 parsing
 - Later management requests use the stored CA
 - Clients receive a persistent ECDSA management identity after enrollment
+- Remote client OS clocks do not need to match the FRP server exactly; enrollment
+  uses server-issued challenges and management uses a stored server-relative offset
+  (the installer never changes system time)
 - FRP data/control authentication still uses the FRP token
 - Zero-touch bootstrap tickets are short-lived and sensitive
 - `show enrollments`, Tab completion, help, status, and audit views do not expose
