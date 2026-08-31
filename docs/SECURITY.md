@@ -157,6 +157,42 @@ Apply uses a new timestamp/nonce/signature and reuses existing public ports.
 
 `frpctl doctor` is read-only and does not consume a nonce.
 
+### Server-relative client time (clock-skew tolerance)
+
+Remote clients do **not** need a perfectly synchronized OS clock for enrollment
+or signed management. FRP Auto Deploy does **not** modify the client system
+clock.
+
+Enrollment (new clients):
+
+1. Client requests a short-lived, single-use challenge over the trusted HTTPS
+   allocator channel (`POST /enroll/challenge`).
+2. Client signs `challenge_id`, `nonce`, and enrollment payload with the
+   enrollment secret (no client wall-clock timestamp in the signed message).
+3. Server validates challenge state server-side (TTL, single-use, enrollment
+   binding) and returns `server_time` on success.
+4. Legacy v2.1.x clients may still use the timestamp-based enrollment HMAC;
+   they remain supported on new servers but still require a synchronized clock.
+
+Management (post-enrollment):
+
+1. Client stores `management_time_offset_sec` in `/etc/frp/client-state.json`
+   (derived from authenticated `server_time` responses).
+2. Signed requests use `local_time + offset` as the management timestamp, so
+   the server still enforces the same ±300 second replay window.
+3. On a clock-skew rejection, the client may call `GET /time` once, refresh
+   the offset, and retry the request at most once.
+4. Successful management responses include `server_time` for gradual offset
+   refresh when the OS clock is corrected later.
+
+Security properties unchanged:
+
+- `MAX_CLOCK_SKEW` is **not** widened
+- Enrollment credential TTL remains server-time based
+- Challenge TTL is short (about 120 seconds) and single-use
+- TLS certificate validation still uses the client OS clock (extreme multi-year
+  skew may fail TLS before application auth)
+
 ## 9. Revoke vs release
 
 | Action | Management identity | Port reservations | Client record |

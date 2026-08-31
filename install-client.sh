@@ -543,6 +543,7 @@ EOF2
   frp_write_client_state "$(frp_client_state_path)" "$ALLOCATOR_URL" "$FRP_SERVER" \
     "$FRP_SERVER_PORT" "$HOSTNAME_VALUE" "$MACHINE_ID" "$HOST_ID" "$SERVICES_FILE" \
     "${FRP_TRANSPORT:-tcp}"
+  frp_apply_meta_clock_offset "$(frp_client_state_path)" "$ENROLL_META_FILE"
   frp_state_has_secrets "$(frp_client_state_path)" || {
     echo "ERROR: client-state.json must not contain secrets" >&2
     exit 1

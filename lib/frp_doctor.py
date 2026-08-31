@@ -1124,7 +1124,7 @@ def check_host_facts(report, facts):
             'clock_sync', WARN,
             'system clock does not appear synchronized',
             clock.get('detail') or '',
-            'management requests tolerate at most %s seconds of clock skew; synchronize time before signed operations' % MAX_CLOCK_SKEW,
+            'management requests use server-relative time when a stored offset exists; large local clock drift may still affect TLS certificate validation',
             'host',
         )
     elif cstatus == 'synchronized':

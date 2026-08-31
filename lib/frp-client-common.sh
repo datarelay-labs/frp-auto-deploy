@@ -362,6 +362,151 @@ frp_mgmt_auth_py() {
   return 1
 }
 
+frp_clock_sync_py() {
+  local cand libdir here
+  libdir="$(frp_client_lib_dir)"
+  for cand in \
+    "${libdir}/frp_clock_sync.py" \
+    "${FRP_CLIENT_LIB:-}/frp_clock_sync.py"
+  do
+    if [[ -f "$cand" ]]; then
+      printf '%s' "$cand"
+      return 0
+    fi
+  done
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  for cand in \
+    "$here/frp_clock_sync.py" \
+    "$here/../lib/frp_clock_sync.py" \
+    /usr/local/lib/frp-auto-deploy/frp_clock_sync.py
+  do
+    if [[ -f "$cand" ]]; then
+      printf '%s' "$cand"
+      return 0
+    fi
+  done
+  return 1
+}
+
+frp_management_timestamp() {
+  local py state offset=""
+  if py="$(frp_clock_sync_py)"; then
+    state="$(frp_client_state_path)"
+    if [[ -f "$state" ]]; then
+      offset="$(python3 "$py" load-offset "$state" 2>/dev/null || true)"
+    fi
+    if [[ -n "$offset" ]]; then
+      python3 "$py" timestamp "$offset"
+      return 0
+    fi
+    python3 "$py" timestamp
+    return 0
+  fi
+  date +%s
+}
+
+frp_fetch_server_time() {
+  local origin="$1" tmp curl_err http_code
+  origin="$(frp_allocator_origin_url "$origin")" || return 1
+  tmp="$(mktemp)"
+  curl_err="$(mktemp)"
+  http_code="$(frp_allocator_curl -sS -o "$tmp" -w '%{http_code}' "${origin}/time" 2>"$curl_err" || true)"
+  if [[ "$http_code" != "200" ]]; then
+    frp_explain_allocator_curl_error "$curl_err"
+    rm -f "$curl_err" "$tmp"
+    return 1
+  fi
+  rm -f "$curl_err"
+  cat "$tmp"
+  rm -f "$tmp"
+}
+
+frp_sync_management_offset() {
+  local origin="$1" state="${2:-$(frp_client_state_path)}"
+  local py response server_time local_now offset
+  py="$(frp_clock_sync_py)" || return 1
+  response="$(frp_fetch_server_time "$origin")" || return 1
+  server_time="$(python3 -c 'import json,sys; print(int(json.loads(sys.argv[1])["server_time"]))' "$response")" || return 1
+  local_now="$(date +%s)"
+  offset=$((server_time - local_now))
+  python3 "$py" merge-offset "$state" "$offset" --force >/dev/null 2>&1 || true
+  printf '%s' "$offset"
+}
+
+frp_maybe_warn_clock_skew() {
+  local offset="$1" py
+  py="$(frp_clock_sync_py)" || return 0
+  [[ -n "$offset" ]] || return 0
+  python3 "$py" warn "$offset" 2>/dev/null || true
+}
+
+frp_apply_meta_clock_offset() {
+  local state_path="$1" meta_path="$2"
+  [[ -f "$state_path" && -f "$meta_path" ]] || return 0
+  python3 - "$state_path" "$meta_path" <<'PY'
+import json, sys
+from pathlib import Path
+state_path, meta_path = Path(sys.argv[1]), Path(sys.argv[2])
+try:
+    meta = json.loads(meta_path.read_text(encoding='utf-8'))
+    state = json.loads(state_path.read_text(encoding='utf-8'))
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(0)
+offset = meta.get('management_time_offset_sec')
+if offset is None:
+    server_time = meta.get('server_time')
+    if server_time is not None:
+        import time
+        offset = int(server_time) - int(time.time())
+if offset is None:
+    raise SystemExit(0)
+try:
+    offset = int(offset)
+except (TypeError, ValueError):
+    raise SystemExit(0)
+if abs(offset) > 86400 * 366:
+    raise SystemExit(0)
+state['management_time_offset_sec'] = offset
+state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+PY
+}
+
+frp_enroll_fetch_challenge() {
+  local enroll_id="$1" allocator_url="$2"
+  local origin tmp curl_err http_code response
+  origin="$(frp_allocator_origin_url "$allocator_url")" || return 1
+  tmp="$(mktemp)"
+  curl_err="$(mktemp)"
+  http_code="$(frp_allocator_curl -sS -X POST \
+    -H "X-Enrollment-ID: ${enroll_id}" \
+    -o "$tmp" -w '%{http_code}' \
+    "${origin}/enroll/challenge" 2>"$curl_err" || true)"
+  if [[ "$http_code" == "404" ]]; then
+    rm -f "$curl_err" "$tmp"
+    return 2
+  fi
+  if [[ "$http_code" != "200" ]]; then
+    if [[ -s "$tmp" ]]; then
+      response="$(cat "$tmp")"
+      python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print("ERROR: allocator rejected enrollment challenge:", d.get("error") or "failed")' "$response" >&2 2>/dev/null \
+        || echo "ERROR: allocator rejected enrollment challenge" >&2
+    else
+      frp_explain_allocator_curl_error "$curl_err"
+    fi
+    rm -f "$curl_err" "$tmp"
+    return 1
+  fi
+  rm -f "$curl_err"
+  cat "$tmp"
+  rm -f "$tmp"
+}
+
+frp_is_clock_skew_error() {
+  local message="$1" py
+  py="$(frp_clock_sync_py)" || return 1
+  [[ "$(python3 "$py" is-clock-skew-error "$message" 2>/dev/null || echo no)" == yes ]]
+}
+
 frp_identity_status() {
   local key pub mac macval
   key="$(frp_client_identity_key_path)"
@@ -2219,9 +2364,13 @@ if op_id:
 print(json.dumps(payload, separators=(',', ':')))
 PY
 )"
-  timestamp="$(date +%s)"
+  timestamp="$(frp_management_timestamp)"
   py="$(frp_mgmt_auth_py)" || return 1
   curl_err="$(mktemp)"
+  local clock_retry=0
+  local origin_url
+  origin_url="$(frp_allocator_origin_url "$allocator_url")" || origin_url=""
+  while true; do
   if [[ "$auth_mode" == identity ]]; then
     key_path="$(frp_client_identity_key_path)"
     if [[ "$(frp_identity_status)" != enrolled ]]; then
@@ -2261,18 +2410,30 @@ PY
       rm -f "$curl_err"
       return 1
     fi
-    rm -f "$curl_err"
     local mac
     mac="$(frp_identity_load_mac)" || return 1
     if MGMT_MAC_KEY="$mac" RESPONSE="$response" ALLOCATED_FILE="$allocated_file" META_FILE="$meta_file" python3 - <<'PY'
 import hashlib,hmac,json,os,sys
 from pathlib import Path
+
+def fail(msg, code=1):
+    print(msg, file=sys.stderr)
+    raise SystemExit(code)
+
+raw=os.environ.get('RESPONSE','').strip()
+if not raw:
+    fail('ERROR: allocator returned an empty response')
+try:
+    d=json.loads(raw)
+except json.JSONDecodeError:
+    fail('ERROR: allocator returned malformed JSON')
 secret=os.environ['MGMT_MAC_KEY']
-d=json.loads(os.environ['RESPONSE'])
 if isinstance(d, dict) and d.get('error'):
     err=str(d.get('error') or '')
     print(f'ERROR: allocator rejected the change: {err}', file=sys.stderr)
     lowered=err.lower()
+    if 'timestamp outside allowed window' in lowered or 'invalid timestamp' in lowered:
+        raise SystemExit(3)
     if 'revoked' in lowered or 'does not have a management identity' in lowered or 'unknown client identity' in lowered:
         raise SystemExit(2)
     raise SystemExit(1)
@@ -2292,24 +2453,81 @@ transport=str(d.get('frp_transport') or 'tcp').strip().lower() or 'tcp'
 if transport not in ('tcp', 'wss'):
     raise SystemExit('ERROR: allocator returned an unsupported FRP transport')
 Path(os.environ['ALLOCATED_FILE']).write_text(json.dumps(services)+'\n', encoding='utf-8')
+server_time=d.get('server_time')
+offset=None
+if server_time is not None:
+    import time
+    offset=int(server_time)-int(time.time())
 meta={
     'frp_server': str(d['frp_server']),
     'frp_server_port': str(d['frp_server_port']),
     'frp_transport': transport,
     'token_ciphertext': '',
+    'server_time': server_time,
+    'management_time_offset_sec': offset,
 }
 Path(os.environ['META_FILE']).write_text(json.dumps(meta)+'\n', encoding='utf-8')
 PY
     then
-      return 0
+      rm -f "$curl_err"
+      break
     else
       verify_rc=$?
+      if [[ "$verify_rc" -eq 3 && "$clock_retry" -eq 0 && -n "$origin_url" ]]; then
+        frp_sync_management_offset "$origin_url" >/dev/null || true
+        timestamp="$(frp_management_timestamp)"
+        clock_retry=1
+        curl_err="$(mktemp)"
+        continue
+      fi
+      rm -f "$curl_err"
       if [[ "$verify_rc" -eq 2 ]]; then
         return 2
       fi
       return 1
     fi
   fi
+  break
+  done
+  if [[ "$auth_mode" == identity ]]; then
+    return 0
+  fi
+
+  local challenge_json challenge_id challenge_nonce challenge_server_time use_legacy=0
+  challenge_json="$(frp_enroll_fetch_challenge "$enroll_id" "$allocator_url")" || {
+    local ch_rc=$?
+    if [[ "$ch_rc" -eq 2 ]]; then
+      use_legacy=1
+    else
+      rm -f "$curl_err"
+      return 1
+    fi
+  }
+  if [[ "$use_legacy" -eq 0 ]]; then
+    read -r challenge_id challenge_nonce challenge_server_time <<<"$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d["challenge_id"], d["nonce"], d["server_time"])' "$challenge_json")"
+    local offset=$((challenge_server_time - $(date +%s)))
+    frp_maybe_warn_clock_skew "$offset"
+    signature="$(ENROLL_SECRET="$enroll_secret" CHALLENGE_ID="$challenge_id" CHALLENGE_NONCE="$challenge_nonce" BODY="$request" python3 - <<'PY'
+import hashlib,hmac,os
+secret=os.environ['ENROLL_SECRET'].encode()
+message=(os.environ['CHALLENGE_ID']+'\n'+os.environ['CHALLENGE_NONCE']+'\n'+os.environ['BODY']).encode()
+print(hmac.new(secret,message,hashlib.sha256).hexdigest())
+PY
+)"
+    if ! response="$(frp_allocator_curl \
+      -X POST \
+      -H 'Content-Type: application/json' \
+      -H "X-Enrollment-ID: ${enroll_id}" \
+      -H "X-Enrollment-Challenge-ID: ${challenge_id}" \
+      -H "X-Enrollment-Challenge-Nonce: ${challenge_nonce}" \
+      -H "X-Signature: ${signature}" \
+      --data "$request" \
+      "$allocator_url" 2>"$curl_err")"; then
+      frp_explain_allocator_curl_error "$curl_err"
+      rm -f "$curl_err"
+      return 1
+    fi
+  else
   signature="$(ENROLL_SECRET="$enroll_secret" TS="$timestamp" BODY="$request" python3 - <<'PY'
 import hashlib,hmac,os
 secret=os.environ['ENROLL_SECRET'].encode()
@@ -2329,39 +2547,57 @@ PY
     rm -f "$curl_err"
     return 1
   fi
+  fi
   rm -f "$curl_err"
   ENROLL_SECRET="$enroll_secret" RESPONSE="$response" ALLOCATED_FILE="$allocated_file" META_FILE="$meta_file" python3 - <<'PY'
-import hashlib,hmac,json,os
+import hashlib,hmac,json,os,sys,time
 from pathlib import Path
+
+def fail(msg):
+    print(msg, file=sys.stderr)
+    raise SystemExit(1)
+
+raw=os.environ.get('RESPONSE','').strip()
+if not raw:
+    fail('ERROR: allocator returned an empty response')
+try:
+    d=json.loads(raw)
+except json.JSONDecodeError:
+    fail('ERROR: allocator returned malformed JSON')
 secret=os.environ['ENROLL_SECRET']
-d=json.loads(os.environ['RESPONSE'])
 if isinstance(d, dict) and d.get('error'):
-    raise SystemExit(f"ERROR: allocator rejected enrollment: {d.get('error')}")
+    fail(f"ERROR: allocator rejected enrollment: {d.get('error')}")
 received=d.pop('response_hmac',None)
 canonical=json.dumps(d,sort_keys=True,separators=(',',':'),ensure_ascii=False)
 expected=hmac.new(secret.encode(),canonical.encode(),hashlib.sha256).hexdigest()
 if not received or not hmac.compare_digest(received,expected):
-    raise SystemExit('ERROR: allocator response HMAC verification failed')
+    fail('ERROR: allocator response HMAC verification failed')
 if 'ssh_port' in d or 'https_port' in d:
-    raise SystemExit('ERROR: allocator returned a legacy SSH/HTTPS response')
+    fail('ERROR: allocator returned a legacy SSH/HTTPS response')
 if 'mgmt_mac_key' in d:
-    raise SystemExit('ERROR: allocator returned unexpected secret material')
+    fail('ERROR: allocator returned unexpected secret material')
 services=d.get('services')
 if not isinstance(services, list):
-    raise SystemExit('ERROR: allocator response is missing services')
+    fail('ERROR: allocator response is missing services')
 transport=str(d.get('frp_transport') or 'tcp').strip().lower() or 'tcp'
 if transport not in ('tcp', 'wss'):
-    raise SystemExit('ERROR: allocator returned an unsupported FRP transport')
+    fail('ERROR: allocator returned an unsupported FRP transport')
 Path(os.environ['ALLOCATED_FILE']).write_text(json.dumps(services)+'\n', encoding='utf-8')
 token=str(d.get('token_ciphertext') or '')
 if not token:
-    raise SystemExit('ERROR: allocator response is missing token_ciphertext')
+    fail('ERROR: allocator response is missing token_ciphertext')
+server_time=d.get('server_time')
+offset=None
+if server_time is not None:
+    offset=int(server_time)-int(time.time())
 meta={
     'frp_server': str(d['frp_server']),
     'frp_server_port': str(d['frp_server_port']),
     'frp_transport': transport,
     'token_ciphertext': token,
     'mgmt_status': str(d.get('mgmt_status') or ''),
+    'server_time': server_time,
+    'management_time_offset_sec': offset,
 }
 Path(os.environ['META_FILE']).write_text(json.dumps(meta)+'\n', encoding='utf-8')
 PY
@@ -2550,7 +2786,7 @@ import json, sys
 from pathlib import Path
 cand = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
 cur = json.loads(Path(sys.argv[2]).read_text(encoding='utf-8'))
-for key in ('allocator_url', 'frp_server', 'frp_server_port', 'frp_transport', 'hostname', 'machine_id', 'host_id', 'schema_version'):
+for key in ('allocator_url', 'frp_server', 'frp_server_port', 'frp_transport', 'hostname', 'machine_id', 'host_id', 'schema_version', 'management_time_offset_sec'):
     if key in cur and key not in cand:
         cand[key] = cur[key]
     elif key in cur:
@@ -3140,6 +3376,7 @@ frp_client_install_management_files() {
   install -m 0644 "${source}/lib/frp-client-common.sh" "${libdir}/frp-client-common.sh"
   install -m 0644 "${source}/lib/frp-common.sh" "${libdir}/frp-common.sh"
   install -m 0644 "${source}/lib/frp_mgmt_auth.py" "${libdir}/frp_mgmt_auth.py"
+  install -m 0644 "${source}/lib/frp_clock_sync.py" "${libdir}/frp_clock_sync.py"
   install -m 0644 "${source}/lib/frp-doctor-common.sh" "${libdir}/frp-doctor-common.sh"
   install -m 0644 "${source}/lib/frp_doctor.py" "${libdir}/frp_doctor.py"
   install -m 0644 "${source}/lib/frp_ctl_grammar.py" "${libdir}/frp_ctl_grammar.py"
@@ -3156,6 +3393,7 @@ frp_client_upgrade_destinations() {
     "usr/local/lib/frp-auto-deploy/frp-client-common.sh:0644:lib/frp-client-common.sh" \
     "usr/local/lib/frp-auto-deploy/frp-common.sh:0644:lib/frp-common.sh" \
     "usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py:0644:lib/frp_mgmt_auth.py" \
+    "usr/local/lib/frp-auto-deploy/frp_clock_sync.py:0644:lib/frp_clock_sync.py" \
     "usr/local/lib/frp-auto-deploy/frp-doctor-common.sh:0644:lib/frp-doctor-common.sh" \
     "usr/local/lib/frp-auto-deploy/frp_doctor.py:0644:lib/frp_doctor.py" \
     "usr/local/lib/frp-auto-deploy/frp_ctl_grammar.py:0644:lib/frp_ctl_grammar.py" \

@@ -14,7 +14,7 @@ bash -n tools/frp-server-status tools/frp-project-update tools/frp-update tools/
 echo "=== Python compile ==="
 python3 -m py_compile server/frp-port-allocator.py server/migrate_token.py scripts/build-bundles.py lib/frp_mgmt_auth.py lib/frp_pki.py lib/frp_frontend.py lib/frp_doctor.py lib/frp_install_txn.py lib/frp_client_registry.py lib/frp_audit.py lib/frp_project_files.py lib/frp_control_locks.py lib/frp_ctl_grammar.py lib/frp_ctl_repl.py lib/frp_enrollment_lifecycle.py
 python3 -m py_compile tools/frp-create-client tools/frp-enrollments tools/frp-enrollment-revoke tools/frp-enroll-bulk tools/frp-clients tools/frp-client-info tools/frp-client-set tools/frp-release-client tools/frp-release-service tools/frp-revoke-client tools/frp-set-client-installer-url tools/frp-backup tools/frp-restore
-python3 -m py_compile tests/test-allocator.py tests/test-enrollment-security.py tests/test-mgmt-identity.py tests/test-pki-https.py tests/test-bootstrap-ticket.py tests/test-frontend-proxy.py tests/test-client-registry.py
+python3 -m py_compile tests/test-allocator.py tests/test-enrollment-security.py tests/test-mgmt-identity.py tests/test-pki-https.py tests/test-bootstrap-ticket.py tests/test-frontend-proxy.py tests/test-client-registry.py tests/test-clock-skew-auth.py lib/frp_enroll_challenge.py lib/frp_clock_sync.py
 
 echo "=== tests ==="
 ./tests/test-server-migration.sh
@@ -22,6 +22,7 @@ echo "=== tests ==="
 python3 tests/test-allocator.py
 python3 tests/test-bootstrap-ticket.py
 python3 tests/test-enrollment-security.py
+python3 tests/test-clock-skew-auth.py
 python3 tests/test-mgmt-identity.py
 ./tests/test-client-config.sh
 ./tests/test-client-allocator-url.sh
