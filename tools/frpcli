@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Friendly alias for the canonical frpctl command.
+set -euo pipefail
+_FRPCLI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "${_FRPCLI_DIR}/frpctl" "$@"

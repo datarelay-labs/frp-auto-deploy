@@ -24,6 +24,7 @@ try {
     # Tools source still documents the message
     $client = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'windows\tools\FrpClient.ps1') -Raw
     Assert-FrpTrue ($client -match 'SERVER RESERVATIONS PRESERVED') 'uninstall message in tool'
+    Assert-FrpTrue ($client -match 'administrator releases them') 'port release wording'
 
     Write-FrpTestPass 'test-uninstall'
 } finally {

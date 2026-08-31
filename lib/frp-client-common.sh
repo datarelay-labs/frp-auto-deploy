@@ -3002,8 +3002,18 @@ frp_client_verify_config() {
   fi
 }
 
+frp_client_is_paused() {
+  local marker py
+  marker="$(frp_client_path /etc/frp/remote-access-paused.json)"
+  [[ -f "$marker" ]]
+}
+
 frp_client_restart() {
   frp_client_hook_log restart
+  if frp_client_is_paused; then
+    frp_client_hook_log restart-skipped-paused
+    return 0
+  fi
   if [[ "${FRP_CLIENT_HOOK_RESTART_FAIL:-}" == "1" ]]; then
     FRP_CLIENT_HOOK_RESTART_FAIL=0
     echo "ERROR: simulated systemctl restart failure" >&2
@@ -3144,8 +3154,21 @@ frp_client_install_management_files() {
   install -m 0644 "${source}/lib/frp_doctor.py" "${libdir}/frp_doctor.py"
   install -m 0644 "${source}/lib/frp_ctl_grammar.py" "${libdir}/frp_ctl_grammar.py"
   install -m 0644 "${source}/lib/frp_ctl_repl.py" "${libdir}/frp_ctl_repl.py"
+  [[ -f "${source}/lib/frp_client_lifecycle.py" ]] || {
+    echo "ERROR: missing ${source}/lib/frp_client_lifecycle.py" >&2
+    return 1
+  }
+  [[ -f "${source}/lib/frp-client-lifecycle.sh" ]] || {
+    echo "ERROR: missing ${source}/lib/frp-client-lifecycle.sh" >&2
+    return 1
+  }
+  install -m 0644 "${source}/lib/frp_client_lifecycle.py" "${libdir}/frp_client_lifecycle.py"
+  install -m 0644 "${source}/lib/frp-client-lifecycle.sh" "${libdir}/frp-client-lifecycle.sh"
   install -m 0755 "${source}/tools/frp-client" "${bindir}/frp-client"
   install -m 0755 "${source}/tools/frpctl" "${bindir}/frpctl"
+  if [[ -f "${source}/tools/frpcli" ]]; then
+    install -m 0755 "${source}/tools/frpcli" "${bindir}/frpcli"
+  fi
   frp_client_upgrade_source_version "$source"
   frp_client_write_version_file
 }
@@ -3160,8 +3183,11 @@ frp_client_upgrade_destinations() {
     "usr/local/lib/frp-auto-deploy/frp_doctor.py:0644:lib/frp_doctor.py" \
     "usr/local/lib/frp-auto-deploy/frp_ctl_grammar.py:0644:lib/frp_ctl_grammar.py" \
     "usr/local/lib/frp-auto-deploy/frp_ctl_repl.py:0644:lib/frp_ctl_repl.py" \
+    "usr/local/lib/frp-auto-deploy/frp_client_lifecycle.py:0644:lib/frp_client_lifecycle.py" \
+    "usr/local/lib/frp-auto-deploy/frp-client-lifecycle.sh:0644:lib/frp-client-lifecycle.sh" \
     "usr/local/bin/frp-client:0755:tools/frp-client" \
-    "usr/local/bin/frpctl:0755:tools/frpctl"
+    "usr/local/bin/frpctl:0755:tools/frpctl" \
+    "usr/local/bin/frpcli:0755:tools/frpcli"
 }
 
 frp_client_upgrade_validate_existing() {
@@ -3204,6 +3230,8 @@ frp_client_upgrade_validate_staged() {
   python3 -m py_compile "${staged}/usr/local/lib/frp-auto-deploy/frp_doctor.py" || return 1
   python3 -m py_compile "${staged}/usr/local/lib/frp-auto-deploy/frp_ctl_grammar.py" || return 1
   python3 -m py_compile "${staged}/usr/local/lib/frp-auto-deploy/frp_ctl_repl.py" || return 1
+  python3 -m py_compile "${staged}/usr/local/lib/frp-auto-deploy/frp_client_lifecycle.py" || return 1
+  bash -n "${staged}/usr/local/lib/frp-auto-deploy/frp-client-lifecycle.sh" || return 1
   rm -rf "${staged}/usr/local/lib/frp-auto-deploy/__pycache__" \
     "${staged}/usr/local/lib/frp-auto-deploy/"*.pyc 2>/dev/null || true
   [[ -x "${staged}/usr/local/bin/frp-client" ]] || {

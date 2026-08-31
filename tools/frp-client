@@ -148,7 +148,7 @@ frp_client_status() {
   local path
   path="$(frp_client_state_path)"
   frp_load_client_state "$path"
-  python3 - "$path" "$(frp_client_installed_frp_version)" "${FRP_CLIENT_TEST_ROOT:-}" "${FRP_SKIP_SYSTEMD:-}" "$(frp_identity_label)" "$(frp_client_installed_project_version)" "$(frp_client_installed_release_channel)" "$(frp_client_installed_source_ref)" "$(frp_client_installed_bundle_sha256)" <<'PY'
+  python3 - "$path" "$(frp_client_installed_frp_version)" "${FRP_CLIENT_TEST_ROOT:-}" "${FRP_SKIP_SYSTEMD:-}" "$(frp_identity_label)" "$(frp_client_installed_project_version)" "$(frp_client_installed_release_channel)" "$(frp_client_installed_source_ref)" "$(frp_client_installed_bundle_sha256)" "$(frp_client_path /etc/frp/remote-access-paused.json)" <<'PY'
 import json, subprocess, sys
 from pathlib import Path
 data = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
@@ -159,6 +159,8 @@ project_version = sys.argv[6]
 release_channel = sys.argv[7]
 source_ref = sys.argv[8]
 bundle_sha256 = sys.argv[9]
+pause_marker = sys.argv[10]
+paused = Path(pause_marker).is_file() if pause_marker else False
 services = data.get('services') or {}
 enabled = sum(1 for s in services.values() if s.get('enabled', True) is not False)
 disabled = len(services) - enabled
@@ -185,7 +187,12 @@ print(f"Allocator       : {allocator}")
 print(f"Management identity : {sys.argv[5]}")
 print(f"FRP version     : {tested}")
 print(f"Bundle SHA256   : {bundle_sha256}")
-print(f"frpc            : {active}")
+if paused:
+    print('Remote access : PAUSED')
+    print('frpc          : stopped')
+else:
+    print('Remote access : ACTIVE')
+    print(f"frpc            : {active}")
 print()
 print(f"Services        : {enabled} enabled / {disabled} disabled")
 print()

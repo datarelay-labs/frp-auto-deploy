@@ -83,10 +83,13 @@ frp_u_rm_file "$(frp_u_path /etc/systemd/system/frpc.service)"
 frp_u_rm_file "$(frp_u_path /usr/local/bin/frpc)"
 frp_u_rm_file "$(frp_u_path /usr/local/bin/frp-client)"
 frp_u_rm_file "$(frp_u_path /usr/local/bin/frpctl)"
+frp_u_rm_file "$(frp_u_path /usr/local/bin/frpcli)"
 
 libdir="$(frp_u_path /usr/local/lib/frp-auto-deploy)"
 if [[ -d "$libdir" && ! -L "$libdir" ]]; then
   frp_u_rm_file "${libdir}/frp-client-common.sh"
+  frp_u_rm_file "${libdir}/frp-client-lifecycle.sh"
+  frp_u_rm_file "${libdir}/frp_client_lifecycle.py"
   if [[ ! -f "$(frp_u_path /etc/frp-auto-deploy/config.json)" ]]; then
     frp_u_rm_file "${libdir}/frp_mgmt_auth.py"
     frp_u_rm_file "${libdir}/frp-common.sh"
@@ -110,7 +113,7 @@ fi
 if [[ -d "$etc_frp" ]]; then
   for f in client-state.json frpc.toml access-info.txt client-id \
     client-identity.key client-identity.pub client-identity.mac \
-    apply-pending.json; do
+    apply-pending.json remote-access-paused.json; do
     frp_u_rm_file "${etc_frp}/${f}"
   done
   frp_u_safe_rm_rf "${etc_frp}/backups"

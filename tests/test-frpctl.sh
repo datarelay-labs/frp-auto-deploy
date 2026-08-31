@@ -218,8 +218,8 @@ run_repl "$CLIENT" "$WORKDIR/client-menu.out" menu exit || fail "client menu rep
 unset FRP_CTL_TEST_MENU
 grep -q 'Role            : Client' "$WORKDIR/client-menu.out" || fail "client role"
 grep -q 'Project version : 1.4.0' "$WORKDIR/client-menu.out" || fail "client menu version"
-grep -q '4) Manage services' "$WORKDIR/client-menu.out" || fail "client menu manage"
-grep -q '5) Update project' "$WORKDIR/client-menu.out" || fail "client menu update"
+grep -q '4) Remote access control' "$WORKDIR/client-menu.out" || fail "client menu remote"
+grep -q '5) Update / repair' "$WORKDIR/client-menu.out" || fail "client menu update"
 [[ "$(prompt_count "$WORKDIR/client-menu.out")" -ge 2 ]] || fail "menu returns to prompt"
 pass "FRPCTL_CLIENT_DETECTION"
 pass "FRPCTL_REPL_MENU_RETURNS_TO_PROMPT"
