@@ -269,7 +269,7 @@ assert 'proxy_ssl_server_name on' in conf
 assert 'proxy_ssl_name 203.0.113.10;' not in conf
 assert 'ssl_certificate /etc/frp-auto-deploy/pki/server.crt' in conf
 assert 'listen 443 ssl;' in conf
-assert 'ca\\.crt|healthz|enroll|bootstrap/redeem' in conf
+assert 'ca\\.crt|healthz|enroll|enroll/challenge|bootstrap/redeem|time' in conf
 assert 'return 404;' in conf
 # Catch-all must not proxy arbitrary paths to a localhost backend.
 idx = conf.find('location / {')
