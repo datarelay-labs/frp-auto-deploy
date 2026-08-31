@@ -172,6 +172,7 @@ def empty_registry():
         'schema_version': REGISTRY_SCHEMA_VERSION,
         'reserved': [],
         'clients': {},
+        'groups': {},
     }
 
 

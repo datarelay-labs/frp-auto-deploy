@@ -3,6 +3,7 @@ import argparse
 import importlib.util
 import json
 import os
+import sys
 from pathlib import Path
 
 ROOT = os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
@@ -36,6 +37,12 @@ parser.add_argument(
     default=[],
     metavar='KEY=VALUE',
     help='show clients with this tag; multiple --tag filters use AND semantics',
+)
+parser.add_argument(
+    '--group',
+    default=None,
+    metavar='GROUP',
+    help='show clients that belong to this GROUP ID or unique group name',
 )
 args = parser.parse_args()
 tag_filters = []
@@ -95,6 +102,24 @@ if tag_filters:
         (mid, client)
         for mid, client in clients
         if CREG.client_matches_tags(client, tag_filters)
+    ]
+if args.group:
+    try:
+        gid, _group = CREG.resolve_group(state, args.group)
+    except CREG.GroupLookupError as exc:
+        if exc.matches:
+            sys.stderr.write('ERROR: multiple groups matched.\n\n')
+            sys.stderr.write(CREG.format_group_candidate_table(exc.matches))
+            sys.stderr.write('\nUse an immutable GROUP ID.\n')
+        elif str(exc) == 'group not found':
+            sys.stderr.write('ERROR: group not found: %s\n' % CREG.sanitize_display(args.group, 128))
+        else:
+            sys.stderr.write('ERROR: %s\n' % exc)
+        raise SystemExit(1)
+    clients = [
+        (mid, client)
+        for mid, client in clients
+        if CREG.client_matches_group(client, gid)
     ]
 listener_snapshot = CREG.passive_listening_ports()
 

@@ -1004,6 +1004,40 @@ def validate_registry(state, cfg=None):
         reserved = []
     if not isinstance(reserved, list):
         return FAIL, 'registry reserved list is invalid', issues
+    groups = state.get('groups')
+    if groups is None:
+        groups = {}
+    if not isinstance(groups, dict):
+        return FAIL, 'registry groups must be an object', issues
+    group_names = {}
+    for gid, group in groups.items():
+        gid_text = str(gid or '').strip()
+        if not re.fullmatch(r'grp_[0-9a-f]{8}', gid_text):
+            issues.append('invalid group id %s' % redact(gid_text or '(empty)'))
+            continue
+        if not isinstance(group, dict):
+            issues.append('group record %s is not an object' % gid_text)
+            continue
+        name = str(group.get('name') or '').strip()
+        if not name:
+            issues.append('group %s missing name' % gid_text)
+        else:
+            if name.lower() in ('all', 'ungrouped'):
+                issues.append('group %s uses reserved system name %s' % (gid_text, name))
+            if name in group_names:
+                issues.append('duplicate group name %s' % redact(name))
+            else:
+                group_names[name] = gid_text
+        gtype = group.get('type')
+        if gtype is not None and str(gtype).strip() and str(gtype).strip() != 'manual':
+            issues.append('unsupported group type %s on %s' % (redact(gtype), gid_text))
+        description = group.get('description')
+        if description is not None and not isinstance(description, str):
+            issues.append('group %s description must be a string' % gid_text)
+        elif isinstance(description, str) and any(
+            ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in description
+        ):
+            issues.append('group %s description contains control characters' % gid_text)
     port_start = port_end = None
     protected = set()
     if cfg:
@@ -1038,6 +1072,32 @@ def validate_registry(state, cfg=None):
         if status == 'revoked':
             revoked += 1
             infos.append('revoked client %s is a valid lifecycle state' % (client.get('hostname') or mid[:12]))
+        group_ids = client.get('group_ids')
+        if group_ids is not None:
+            if not isinstance(group_ids, list):
+                issues.append('client %s group_ids must be a list' % redact(str(mid)[:12]))
+            else:
+                seen_gids = set()
+                for item in group_ids:
+                    gid_text = str(item or '').strip()
+                    if not re.fullmatch(r'grp_[0-9a-f]{8}', gid_text):
+                        issues.append(
+                            'client %s has invalid group id %s'
+                            % (redact(str(mid)[:12]), redact(gid_text or '(empty)'))
+                        )
+                        continue
+                    if gid_text in seen_gids:
+                        issues.append(
+                            'client %s has duplicate group id %s'
+                            % (redact(str(mid)[:12]), gid_text)
+                        )
+                        continue
+                    seen_gids.add(gid_text)
+                    if gid_text not in groups:
+                        issues.append(
+                            'client %s references nonexistent group %s'
+                            % (redact(str(mid)[:12]), gid_text)
+                        )
         services = client.get('services') or {}
         if not isinstance(services, dict):
             issues.append('client services must be a map')
@@ -1070,7 +1130,11 @@ def validate_registry(state, cfg=None):
     if outside:
         extra.append('reservations outside current range: %s' % ','.join(str(p) for p in outside[:8]))
         return WARN, extra[0], extra
-    msg = 'valid schema v2 (%s clients, %s reserved ports)' % (len(clients), len(seen_ports))
+    msg = 'valid schema v2 (%s clients, %s groups, %s reserved ports)' % (
+        len(clients),
+        len(groups),
+        len(seen_ports),
+    )
     if revoked:
         msg += ', %s revoked' % revoked
     if disabled:

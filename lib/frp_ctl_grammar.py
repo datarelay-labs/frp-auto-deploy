@@ -153,7 +153,7 @@ def canonical_verbs(role):
         "update",
     ]
     if server:
-        verbs.extend(["set", "unset", "create", "revoke", "release", "restore"])
+        verbs.extend(["set", "unset", "create", "revoke", "release", "restore", "add", "remove"])
     if client:
         verbs.extend(["add", "enable", "disable", "apply", "discard", "set"])
     return sorted(set(verbs))
@@ -163,7 +163,7 @@ def _show_resources(role):
     client, server = _role_parts(role)
     items = ["status", "version"]
     if server:
-        items.extend(["clients", "client", "enrollments", "audit", "upstream"])
+        items.extend(["clients", "client", "groups", "group", "enrollments", "audit", "upstream"])
     if client:
         items.extend(["services", "info"])
     return items
@@ -173,7 +173,7 @@ def _set_resources(role):
     client, server = _role_parts(role)
     items = []
     if server:
-        items.extend(["client", "installer-url"])
+        items.extend(["client", "group", "installer-url"])
     if client:
         items.append("service")
     return items
@@ -182,7 +182,14 @@ def _set_resources(role):
 def _create_resources(role):
     _, server = _role_parts(role)
     if server:
-        return ["zero-touch", "enrollment", "enrollments", "backup"]
+        return ["zero-touch", "enrollment", "enrollments", "backup", "group"]
+    return []
+
+
+def _remove_resources(role):
+    _, server = _role_parts(role)
+    if server:
+        return ["client", "group"]
     return []
 
 
@@ -263,7 +270,7 @@ def help_text(tokens, role):
         return _create_help(role)
     if verb == "update":
         return _update_help(role)
-    if verb in ("revoke", "release", "restore", "add", "enable", "disable"):
+    if verb in ("revoke", "release", "restore", "add", "remove", "enable", "disable"):
         return _verb_help(verb, role)
     if verb == "doctor":
         return (
@@ -297,9 +304,14 @@ def _root_help(role):
         lines.extend(
             [
                 "  show clients",
+                "  show clients --group <GROUP>",
                 "  show client <ID>",
                 "  show client <ID> services",
                 "  show client <ID> tags",
+                "  show client <ID> groups",
+                "  show groups",
+                "  show group <GROUP>",
+                "  show group <GROUP> clients",
                 "  show enrollments",
                 "  show audit",
                 "  show upstream",
@@ -314,9 +326,14 @@ def _root_help(role):
                 "  set client <ID> label <value>",
                 "  set client <ID> note <value>",
                 "  set client <ID> tag <key> <value>",
+                "  set group <GROUP> name <new-name>",
+                "  set group <GROUP> description <value>",
                 "  unset client <ID> label",
                 "  unset client <ID> note",
                 "  unset client <ID> tag <key>",
+                "  add client <ID> group <GROUP>",
+                "  remove client <ID> group <GROUP>",
+                "  remove group <GROUP>",
             ]
         )
     if client:
@@ -340,6 +357,7 @@ def _root_help(role):
                 "  create zero-touch",
                 "  create enrollment [--ssh --ssh-user USER --label NAME]",
                 "  create enrollments --count N",
+                "  create group <name>",
                 "  create backup",
                 "  revoke enrollment <id>",
                 "  revoke client <ID>",
@@ -390,12 +408,45 @@ def _show_help(rest, role):
             "Usage:\n"
             "  show client <ID>\n"
             "  show client <ID> services\n"
-            "  show client <ID> tags\n\n"
+            "  show client <ID> tags\n"
+            "  show client <ID> groups\n\n"
             "CLIENT ID is the immutable selector. A unique label or hostname\n"
             "is also accepted as a shortcut for show only.\n\n"
             "Examples:\n"
             "  show client 24cd7856\n"
             "  show client 24cd7856 services\n"
+            "  show client 24cd7856 groups\n"
+        )
+    if topic == "group":
+        return (
+            "Show group information\n"
+            "======================\n\n"
+            "Usage:\n"
+            "  show group <GROUP>\n"
+            "  show group <GROUP> clients\n\n"
+            "GROUP ID is the immutable selector. A unique group name is also\n"
+            "accepted when unambiguous.\n\n"
+            "Examples:\n"
+            "  show group grp_81ac7291\n"
+            "  show group customer-acme clients\n"
+        )
+    if topic == "groups":
+        return (
+            "Show groups\n"
+            "===========\n\n"
+            "Usage:\n"
+            "  show groups\n\n"
+            "Lists manual groups with client counts.\n"
+        )
+    if topic == "clients":
+        return (
+            "Show clients\n"
+            "============\n\n"
+            "Usage:\n"
+            "  show clients\n"
+            "  show clients --tag KEY=VALUE\n"
+            "  show clients --group <GROUP>\n\n"
+            "Filters are read-only and may be combined.\n"
         )
     return "Usage:\n  show %s\n" % topic
 
@@ -416,6 +467,18 @@ def _set_help(rest, role):
             "  set client 24cd7856 tag env oci\n\n"
             "To remove a setting:\n"
             "  unset client <ID> ...\n"
+        )
+    if rest and rest[0] == "group":
+        return (
+            "Set group configuration\n"
+            "=======================\n\n"
+            "Usage:\n"
+            "  set group <GROUP> name <new-name>\n"
+            "  set group <GROUP> description <value>\n\n"
+            "GROUP ID is immutable. Renaming keeps membership.\n\n"
+            "Examples:\n"
+            "  set group customer-acme name acme-korea\n"
+            "  set group grp_81ac7291 description \"ACME customer systems\"\n"
         )
     if rest and rest[0] == "service":
         return (
@@ -458,6 +521,7 @@ def _create_help(role):
         "  create enrollment\n"
         "  create enrollments --count N\n"
         "  create enrollments --csv FILE\n"
+        "  create group <name> [--description VALUE]\n"
         "  create backup [path]\n\n"
         "Recommended:\n"
         "  create zero-touch\n\n"
@@ -465,7 +529,9 @@ def _create_help(role):
         "zero-touch\n"
         "  Generate a one-line Zero-touch client installation command.\n\n"
         "enrollment\n"
-        "  Generate a Manual Enrollment Code.\n"
+        "  Generate a Manual Enrollment Code.\n\n"
+        "group\n"
+        "  Create a manual client group (immutable GROUP ID).\n"
     )
 
 
@@ -498,10 +564,20 @@ def _verb_help(verb, role):
         ),
         "restore": "Restore\n=======\n\nUsage:\n  restore backup <path>\n",
         "add": (
-            "Add service\n===========\n\nUsage:\n"
+            "Add\n===\n\nUsage:\n"
+            "  add client <ID> group <GROUP>\n"
             "  add service [--preset ssh|http|https|custom] [--id ID] [--name NAME]\n"
             "              [--target-host HOST] [--target-port PORT] [--ssh-user USER]\n\n"
-            "Pending until apply. Does not release server-side reservations.\n"
+            "Server: add a client to a manual group (idempotent).\n"
+            "Client: add a local service (pending until apply).\n"
+        ),
+        "remove": (
+            "Remove\n======\n\nUsage:\n"
+            "  remove client <ID> group <GROUP>\n"
+            "  remove group <GROUP>\n\n"
+            "remove client ... group drops membership only.\n"
+            "remove group deletes the group object and clears membership references.\n"
+            "It never changes CLIENT ID, management identity, services, or ports.\n"
         ),
         "enable": "Enable service\n==============\n\nUsage:\n  enable service <service-id>\n",
         "disable": (
@@ -550,7 +626,9 @@ def context_help(tokens, role, names=None, clients=None):
                 rows.extend(
                     [
                         ("clients", "Registered client table"),
-                        ("client", "One client (overview, services, or tags)"),
+                        ("client", "One client (overview, services, tags, or groups)"),
+                        ("groups", "Manual group inventory"),
+                        ("group", "One group (overview or clients)"),
                         ("enrollments", "Issued enrollment credentials"),
                         ("audit", "Recent audit events"),
                         ("upstream", "FRP upstream check"),
@@ -566,8 +644,13 @@ def context_help(tokens, role, names=None, clients=None):
                 [
                     ("services", "Published services only"),
                     ("tags", "Administrator tags only"),
+                    ("groups", "Manual group membership"),
                 ]
             )
+        if tokens[1] == "group":
+            if len(tokens) == 2:
+                return "Usage:\n  show group <GROUP>\n  show group <GROUP> clients\n"
+            return _fmt_available([("clients", "Clients in this group")])
         return "Usage:\n  show %s\n" % tokens[1]
     if verb == "set":
         if len(tokens) == 1:
@@ -576,6 +659,7 @@ def context_help(tokens, role, names=None, clients=None):
                 rows.extend(
                     [
                         ("client", "Configure registered client metadata"),
+                        ("group", "Rename group or set description"),
                         ("installer-url", "Configure client installer URL"),
                     ]
                 )
@@ -621,6 +705,12 @@ def context_help(tokens, role, names=None, clients=None):
             )
         if tokens[1] == "installer-url":
             return "Usage:\n  set installer-url <url>\n"
+        if tokens[1] == "group":
+            return (
+                "Available settings:\n\n"
+                "  name          Rename group (GROUP ID unchanged)\n"
+                "  description  Administrator description\n"
+            )
         return _fmt_available([(item, "") for item in _set_resources(role)])
     if verb == "unset":
         if len(tokens) <= 2:
@@ -664,12 +754,36 @@ def context_help(tokens, role, names=None, clients=None):
             )
         if len(tokens) >= 2 and tokens[1] == "backup":
             return "Usage:\n  create backup [path]\n"
+        if len(tokens) >= 2 and tokens[1] == "group":
+            return (
+                "Create manual group\n"
+                "===================\n\n"
+                "Usage:\n"
+                "  create group <name>\n"
+                "  create group <name> --description <value>\n\n"
+                "Creates an immutable GROUP ID. Names all/ungrouped are reserved.\n"
+            )
         return _fmt_available(
             [
                 ("zero-touch", "Zero-touch enrollment (recommended)"),
                 ("enrollment", "Manual Enrollment Code"),
                 ("enrollments", "Bulk enrollment"),
+                ("group", "Manual client group"),
                 ("backup", "Server backup"),
+            ]
+        )
+    if verb == "add":
+        rows = []
+        if server:
+            rows.append(("client", "Add a client to a manual group"))
+        if client:
+            rows.append(("service", "Add a local service"))
+        return _fmt_available(rows or [("(none)", "No add resources on this host")])
+    if verb == "remove":
+        return _fmt_available(
+            [
+                ("client", "Remove a client from a group"),
+                ("group", "Delete a group and membership refs"),
             ]
         )
     if verb == "update":
@@ -758,7 +872,7 @@ def _concise_root(role):
     return _fmt_available([(n, d) for n, d in rows])
 
 
-def match(tokens, role, names=None, clients=None):
+def match(tokens, role, names=None, clients=None, groups=None):
     if not tokens:
         return {"status": "empty"}
     if tokens[-1] == "?":
@@ -784,6 +898,7 @@ def match(tokens, role, names=None, clients=None):
         "update": _match_update,
         "restore": _match_restore,
         "add": _match_add,
+        "remove": _match_remove,
         "enable": _match_enable_disable,
         "disable": _match_enable_disable,
         "apply": lambda toks, role, names=None: {"status": "ok", "action": "apply"},
@@ -803,11 +918,15 @@ def match(tokens, role, names=None, clients=None):
     fn = handlers.get(verb)
     if fn is None:
         return {"status": "unknown", "command": verb}
-    if verb in ("set", "unset", "create", "revoke", "release", "restore") and not server and verb != "set":
+    if verb in ("set", "unset", "create", "revoke", "release", "restore", "remove") and not server and verb != "set":
         if verb == "set" and client:
             return fn(tokens, role, names)
         return {"status": "role", "need": "server", "command": verb}
-    if verb in ("add", "enable", "disable", "apply", "discard") and not client:
+    if verb == "add":
+        if not client and not server:
+            return {"status": "role", "need": "client", "command": verb}
+        return fn(tokens, role, names)
+    if verb in ("enable", "disable", "apply", "discard") and not client:
         return {"status": "role", "need": "client", "command": verb}
     return fn(tokens, role, names)
 
@@ -827,6 +946,40 @@ def _match_show(tokens, role, names=None):
         return {"status": "ok", "action": "show_version"}
     if resource == "clients":
         return {"status": "ok", "action": "show_clients", "passthrough": tokens[2:]}
+    if resource == "groups":
+        return {"status": "ok", "action": "show_groups"}
+    if resource == "group":
+        if len(tokens) < 3:
+            return incomplete(
+                "Missing group.",
+                ["show group <GROUP>", "show group <GROUP> clients"],
+                tip="show groups",
+            )
+        if len(tokens) == 3:
+            return {
+                "status": "ok",
+                "action": "show_group",
+                "group": tokens[2],
+                "view": "overview",
+            }
+        view = tokens[3]
+        if view != "clients":
+            return incomplete(
+                "Unknown group view.",
+                ["show group <GROUP>", "show group <GROUP> clients"],
+                ["clients"],
+            )
+        if len(tokens) > 4:
+            return {
+                "status": "error",
+                "message": "Too many arguments.",
+            }
+        return {
+            "status": "ok",
+            "action": "show_group",
+            "group": tokens[2],
+            "view": "clients",
+        }
     if resource == "enrollments":
         return {"status": "ok", "action": "show_enrollments"}
     if resource == "audit":
@@ -844,6 +997,7 @@ def _match_show(tokens, role, names=None):
                     "show client <ID>",
                     "show client <ID> services",
                     "show client <ID> tags",
+                    "show client <ID> groups",
                 ],
                 names,
                 tip="show client ?",
@@ -851,15 +1005,16 @@ def _match_show(tokens, role, names=None):
         view = tokens[3] if len(tokens) > 3 else "overview"
         if view in ("info",):
             view = "overview"
-        if view not in ("overview", "services", "tags"):
+        if view not in ("overview", "services", "tags", "groups"):
             return incomplete(
                 "Unknown client view.",
                 [
                     "show client <ID>",
                     "show client <ID> services",
                     "show client <ID> tags",
+                    "show client <ID> groups",
                 ],
-                ["services", "tags"],
+                ["services", "tags", "groups"],
             )
         return {
             "status": "ok",
@@ -955,6 +1110,54 @@ def _match_set(tokens, role, names=None):
             "client": tokens[2],
             "property": prop,
             "value": value,
+        }
+    if resource == "group":
+        if not server:
+            return {"status": "role", "need": "server", "command": "set group"}
+        if len(tokens) < 3:
+            return incomplete(
+                "Missing group.",
+                [
+                    "set group <GROUP> name <new-name>",
+                    "set group <GROUP> description <value>",
+                ],
+                tip="show groups",
+            )
+        if len(tokens) < 4:
+            return incomplete(
+                "Missing group setting.",
+                [
+                    "set group <GROUP> name <new-name>",
+                    "set group <GROUP> description <value>",
+                ],
+                ["name", "description"],
+            )
+        prop = tokens[3]
+        if prop not in ("name", "description"):
+            return incomplete(
+                "Unknown group setting.",
+                [
+                    "set group <GROUP> name <new-name>",
+                    "set group <GROUP> description <value>",
+                ],
+                ["name", "description"],
+            )
+        if len(tokens) < 5:
+            return incomplete(
+                "Missing %s value." % prop,
+                ["set group <GROUP> %s <value>" % prop],
+            )
+        if len(tokens) > 5:
+            return {
+                "status": "error",
+                "message": "Too many arguments. Quote values that contain spaces.",
+            }
+        return {
+            "status": "ok",
+            "action": "set_group",
+            "group": tokens[2],
+            "property": prop,
+            "value": tokens[4],
         }
     if resource == "service":
         if not client:
@@ -1052,6 +1255,18 @@ def _match_create(tokens, role, names=None):
         return {"status": "ok", "action": "create_enrollments", "passthrough": tokens[2:]}
     if resource == "backup":
         return {"status": "ok", "action": "create_backup", "passthrough": tokens[2:]}
+    if resource == "group":
+        if len(tokens) < 3:
+            return incomplete(
+                "Missing group name.",
+                ["create group <name>", "create group <name> --description <value>"],
+            )
+        return {
+            "status": "ok",
+            "action": "create_group",
+            "name": tokens[2],
+            "passthrough": tokens[3:],
+        }
     return incomplete("Unknown create resource.", ["create <resource>"], avail)
 
 
@@ -1144,9 +1359,135 @@ def _match_restore(tokens, role, names=None):
 
 
 def _match_add(tokens, role, names=None):
-    if len(tokens) == 1 or tokens[1] != "service":
-        return incomplete("Missing resource.", ["add service ..."], ["service"])
-    return {"status": "ok", "action": "add_service", "passthrough": tokens[2:]}
+    client, server = _role_parts(role)
+    if len(tokens) == 1:
+        avail = []
+        if server:
+            avail.append("client")
+        if client:
+            avail.append("service")
+        return incomplete("Missing resource.", ["add client <ID> group <GROUP>", "add service ..."], avail or ["service"])
+    resource = tokens[1]
+    if resource == "client":
+        if not server:
+            return {"status": "role", "need": "server", "command": "add client"}
+        if len(tokens) < 3:
+            return missing_client_help(
+                ["add client <ID> group <GROUP>"],
+                names,
+                tip="show clients",
+            )
+        if len(tokens) < 4:
+            return incomplete(
+                "Missing membership target.",
+                ["add client <ID> group <GROUP>"],
+                ["group"],
+            )
+        if tokens[3] != "group":
+            return incomplete(
+                "Unknown add client target.",
+                ["add client <ID> group <GROUP>"],
+                ["group"],
+            )
+        if len(tokens) < 5:
+            return incomplete(
+                "Missing group.",
+                ["add client <ID> group <GROUP>"],
+                tip="show groups",
+            )
+        if len(tokens) > 5:
+            return {
+                "status": "error",
+                "message": "Too many arguments.",
+            }
+        return {
+            "status": "ok",
+            "action": "add_client_group",
+            "client": tokens[2],
+            "group": tokens[4],
+        }
+    if resource == "service":
+        if not client:
+            return {"status": "role", "need": "client", "command": "add service"}
+        return {"status": "ok", "action": "add_service", "passthrough": tokens[2:]}
+    avail = []
+    if server:
+        avail.append("client")
+    if client:
+        avail.append("service")
+    return incomplete("Unknown add resource.", ["add client ...", "add service ..."], avail)
+
+
+def _match_remove(tokens, role, names=None):
+    _, server = _role_parts(role)
+    if not server:
+        return {"status": "role", "need": "server", "command": "remove"}
+    avail = _remove_resources(role)
+    if len(tokens) == 1:
+        return incomplete(
+            "Missing resource.",
+            ["remove client <ID> group <GROUP>", "remove group <GROUP>"],
+            avail,
+        )
+    resource = tokens[1]
+    if resource == "client":
+        if len(tokens) < 3:
+            return missing_client_help(
+                ["remove client <ID> group <GROUP>"],
+                names,
+                tip="show clients",
+            )
+        if len(tokens) < 4:
+            return incomplete(
+                "Missing membership target.",
+                ["remove client <ID> group <GROUP>"],
+                ["group"],
+            )
+        if tokens[3] != "group":
+            return incomplete(
+                "Unknown remove client target.",
+                ["remove client <ID> group <GROUP>"],
+                ["group"],
+            )
+        if len(tokens) < 5:
+            return incomplete(
+                "Missing group.",
+                ["remove client <ID> group <GROUP>"],
+                tip="show groups",
+            )
+        if len(tokens) > 5:
+            return {
+                "status": "error",
+                "message": "Too many arguments.",
+            }
+        return {
+            "status": "ok",
+            "action": "remove_client_group",
+            "client": tokens[2],
+            "group": tokens[4],
+        }
+    if resource == "group":
+        if len(tokens) < 3:
+            return incomplete(
+                "Missing group.",
+                ["remove group <GROUP>"],
+                tip="show groups",
+            )
+        if len(tokens) > 3:
+            return {
+                "status": "error",
+                "message": "Too many arguments.",
+            }
+        return {
+            "status": "ok",
+            "action": "remove_group",
+            "group": tokens[2],
+        }
+    return incomplete(
+        "Unknown remove resource.",
+        ["remove client <ID> group <GROUP>", "remove group <GROUP>"],
+        avail,
+    )
 
 
 def _match_enable_disable(tokens, role, names=None):
@@ -1158,7 +1499,7 @@ def _match_enable_disable(tokens, role, names=None):
     return {"status": "ok", "action": "%s_service" % verb, "service": tokens[2]}
 
 
-def completion_candidates(line, role, names, services, local_services, trailing=None):
+def completion_candidates(line, role, names, services, local_services, trailing=None, groups=None):
     try:
         tokens = tokenize(line)
     except ParseError:
@@ -1175,7 +1516,9 @@ def completion_candidates(line, role, names, services, local_services, trailing=
     verb = tokens[0]
     if verb in LEGACY_COMMANDS:
         return _legacy_completion(tokens, trailing, role, names, services)
-    return _canonical_completion(tokens, trailing, role, names, services, local_services)
+    return _canonical_completion(
+        tokens, trailing, role, names, services, local_services, groups=groups
+    )
 
 
 def _tab_desc_map(line, role, names=None, clients=None):
@@ -1206,7 +1549,8 @@ def _tab_desc_map(line, role, names=None, clients=None):
         "clear": "Clear the screen",
         "status": "Host status shortcut",
         "version": "Installed versions shortcut",
-        "add": "Add a local service",
+        "add": "Add a client to a group or a local service",
+        "remove": "Remove group membership or delete a group",
         "enable": "Enable a local service",
         "disable": "Disable a local service",
         "apply": "Apply pending local changes",
@@ -1222,7 +1566,9 @@ def _tab_desc_map(line, role, names=None, clients=None):
             "status": "Host status",
             "version": "Installed versions",
             "clients": "Registered client table",
-            "client": "One client (overview, services, or tags)",
+            "client": "One client (overview, services, tags, or groups)",
+            "groups": "Manual group inventory",
+            "group": "One group (overview or clients)",
             "enrollments": "Issued enrollment credentials",
             "audit": "Recent audit events",
             "upstream": "FRP upstream check",
@@ -1234,6 +1580,7 @@ def _tab_desc_map(line, role, names=None, clients=None):
         rows = {}
         if server:
             rows["client"] = "Configure registered client metadata"
+            rows["group"] = "Rename group or set description"
             rows["installer-url"] = "Configure client installer URL"
         if client:
             rows["service"] = "Configure a local service"
@@ -1263,7 +1610,20 @@ def _tab_desc_map(line, role, names=None, clients=None):
             "zero-touch": "Zero-touch enrollment (recommended)",
             "enrollment": "Manual Enrollment Code",
             "enrollments": "Bulk enrollment",
+            "group": "Manual client group",
             "backup": "Server backup",
+        }, "named"
+    if verb == "add" and len(filled) == 1:
+        rows = {}
+        if server:
+            rows["client"] = "Add a client to a manual group"
+        if client:
+            rows["service"] = "Add a local service"
+        return rows, "named"
+    if verb == "remove" and len(filled) == 1:
+        return {
+            "client": "Remove a client from a group",
+            "group": "Delete a group and membership refs",
         }, "named"
     if verb == "revoke" and len(filled) == 1:
         return {
@@ -1342,15 +1702,16 @@ def _filter(items, prefix):
     return [item for item in items if item.startswith(prefix)]
 
 
-def _canonical_completion(tokens, trailing, role, names, services, local_services):
+def _canonical_completion(tokens, trailing, role, names, services, local_services, groups=None):
     client, server = _role_parts(role)
     prefix = _current_prefix(tokens, trailing)
     filled = tokens if trailing else tokens[:-1]
+    groups = groups or []
     if not filled:
         return _filter(canonical_verbs(role), prefix)
     verb = filled[0]
     if verb == "help":
-        topics = ["show", "set", "unset", "create", "update", "revoke", "release", "legacy"]
+        topics = ["show", "set", "unset", "create", "update", "revoke", "release", "add", "remove", "legacy"]
         if len(filled) == 1:
             return _filter(topics, prefix)
         if filled[1] == "show" and len(filled) == 2:
@@ -1365,7 +1726,12 @@ def _canonical_completion(tokens, trailing, role, names, services, local_service
             if len(filled) == 2:
                 return _filter(names, prefix)
             if len(filled) == 3:
-                return _filter(["services", "tags"], prefix)
+                return _filter(["services", "tags", "groups"], prefix)
+        if filled[1] == "group" and server:
+            if len(filled) == 2:
+                return _filter(groups, prefix)
+            if len(filled) == 3:
+                return _filter(["clients"], prefix)
         return []
     if verb == "set":
         if len(filled) == 1:
@@ -1375,6 +1741,11 @@ def _canonical_completion(tokens, trailing, role, names, services, local_service
                 return _filter(names, prefix)
             if len(filled) == 3:
                 return _filter(["label", "note", "tag"], prefix)
+        if filled[1] == "group" and server:
+            if len(filled) == 2:
+                return _filter(groups, prefix)
+            if len(filled) == 3:
+                return _filter(["name", "description"], prefix)
         if filled[1] == "service" and client:
             if len(filled) == 2:
                 return _filter(local_services, prefix)
@@ -1400,6 +1771,8 @@ def _canonical_completion(tokens, trailing, role, names, services, local_service
             )
         if filled[1] == "enrollments":
             return _filter(["--count", "--csv", "--label-prefix", "--ssh-user", "--note", "--ttl"], prefix)
+        if filled[1] == "group":
+            return _filter(["--description"], prefix)
         return []
     if verb == "revoke":
         if len(filled) == 1:
@@ -1431,15 +1804,44 @@ def _canonical_completion(tokens, trailing, role, names, services, local_service
         if len(filled) == 1:
             return _filter(["backup"], prefix)
         return []
-    if verb in ("add", "enable", "disable"):
+    if verb == "add":
         if len(filled) == 1:
-            return _filter(["service"], prefix)
-        if verb == "add" and filled[1] == "service":
+            items = []
+            if server:
+                items.append("client")
+            if client:
+                items.append("service")
+            return _filter(items, prefix)
+        if filled[1] == "client" and server:
+            if len(filled) == 2:
+                return _filter(names, prefix)
+            if len(filled) == 3:
+                return _filter(["group"], prefix)
+            if len(filled) == 4 and filled[3] == "group":
+                return _filter(groups, prefix)
+        if filled[1] == "service" and client:
             return _filter(
                 ["--preset", "--id", "--name", "--target-host", "--target-port", "--ssh-user"],
                 prefix,
             )
-        if verb in ("enable", "disable") and filled[1] == "service" and len(filled) == 2:
+        return []
+    if verb == "remove":
+        if len(filled) == 1:
+            return _filter(_remove_resources(role), prefix)
+        if filled[1] == "client" and server:
+            if len(filled) == 2:
+                return _filter(names, prefix)
+            if len(filled) == 3:
+                return _filter(["group"], prefix)
+            if len(filled) == 4 and filled[3] == "group":
+                return _filter(groups, prefix)
+        if filled[1] == "group" and server and len(filled) == 2:
+            return _filter(groups, prefix)
+        return []
+    if verb in ("enable", "disable"):
+        if len(filled) == 1:
+            return _filter(["service"], prefix)
+        if filled[1] == "service" and len(filled) == 2:
             return _filter(local_services, prefix)
         return []
     if verb == "doctor":
@@ -1473,9 +1875,11 @@ def _legacy_completion(tokens, trailing, role, names, services):
     return []
 
 
-def complete_line(line, role, names, services, local_services):
+def complete_line(line, role, names, services, local_services, groups=None):
     trailing = bool(line) and line[-1:] in " \t"
-    cands = completion_candidates(line, role, names, services, local_services, trailing=trailing)
+    cands = completion_candidates(
+        line, role, names, services, local_services, trailing=trailing, groups=groups
+    )
     if not cands:
         return line
     if len(cands) == 1:
@@ -1543,11 +1947,21 @@ def main(argv=None):
             payload = json.loads(raw)
     role = payload.get("role") or (argv[2] if len(argv) > 2 else "server")
     names = payload.get("names") or []
+    groups = payload.get("groups") or []
     services = payload.get("services") or {}
     local_services = payload.get("local_services") or []
     if cmd == "match":
         tokens = payload.get("tokens") or argv[1:]
-        json.dump(match(tokens, role, names=names, clients=payload.get("clients") or []), sys.stdout)
+        json.dump(
+            match(
+                tokens,
+                role,
+                names=names,
+                clients=payload.get("clients") or [],
+                groups=groups,
+            ),
+            sys.stdout,
+        )
         sys.stdout.write("\n")
         return 0
     if cmd == "help":
@@ -1556,12 +1970,16 @@ def main(argv=None):
         return 0
     if cmd == "complete":
         line = payload.get("line") or (argv[1] if len(argv) > 1 else "")
-        for item in completion_candidates(line, role, names, services, local_services):
+        for item in completion_candidates(
+            line, role, names, services, local_services, groups=groups
+        ):
             sys.stdout.write(item + "\n")
         return 0
     if cmd == "complete-line":
         line = payload.get("line") or (argv[1] if len(argv) > 1 else "")
-        sys.stdout.write(complete_line(line, role, names, services, local_services))
+        sys.stdout.write(
+            complete_line(line, role, names, services, local_services, groups=groups)
+        )
         return 0
     raise SystemExit("unknown grammar action")
 

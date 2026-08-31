@@ -30,6 +30,18 @@ Already enrolled 2.1.0 clients remain compatible. After a server project update
 from 2.1.0, newly generated Zero-touch / enrollment installer commands use the
 `v2.1.1` bootstrap URL when the persisted URL was an official managed ref.
 
+## Unreleased (feature/group-management)
+
+- Manual Group Management (P3.1): immutable GROUP ID (`grp_…`), mutable name,
+  multiple membership via client `group_ids`, server-owned metadata only
+- CLI: `show groups` / `show group` / `show client … groups` /
+  `create group` / `set group name|description` /
+  `add client … group` / `remove client … group` / `remove group` /
+  `show clients --group`
+- Reserved system names `all` / `ungrouped` (reservation only)
+- Doctor consistency checks for groups; audit events `group.*`
+- Old registries/backups without groups remain readable
+
 ## Unreleased (post-2.1.1 / feature/windows-client)
 
 - Windows TLS: enforce hostname/IP SAN verification on the pinned-.NET path (no `-or $true` bypass)

@@ -312,7 +312,7 @@ frpctl_grammar_payload() {
 import json, sys
 from pathlib import Path
 role, cfg_path, root, state_path = sys.argv[1:5]
-names, services, local_services, clients_meta = [], {}, [], []
+names, services, local_services, clients_meta, groups = [], {}, [], [], []
 inventory_warning = False
 server_role = role in ("server", "both", "dual")
 client_role = role in ("client", "both", "dual")
@@ -371,6 +371,14 @@ if cfg.is_file():
                     services[label] = sids
                 if host:
                     services[host] = sids
+            raw_groups = (state or {}).get("groups") or {}
+            if isinstance(raw_groups, dict):
+                for gid in raw_groups:
+                    gid = str(gid)
+                    if gid and "\n" not in gid and "\r" not in gid:
+                        groups.append(gid)
+            elif raw_groups:
+                inventory_warning = True
         elif server_role:
             inventory_warning = True
     except Exception:
@@ -391,6 +399,7 @@ if st.is_file():
 json.dump({
     "role": role,
     "names": sorted(set(names)),
+    "groups": sorted(set(groups)),
     "clients": clients_meta,
     "services": services,
     "local_services": local_services,
@@ -1862,6 +1871,18 @@ frpctl_dispatch_canonical() {
         "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("client",""))' "$result")" \
         "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("view") or "overview")' "$result")"
       ;;
+    show_groups) frpctl_require_server || return 1; frpctl_invoke frp-groups ;;
+    show_group)
+      frpctl_require_server || return 1
+      if [[ "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("view") or "overview")' "$result")" == "clients" ]]; then
+        frpctl_invoke frp-groups \
+          "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("group",""))' "$result")" \
+          --clients
+      else
+        frpctl_invoke frp-groups \
+          "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("group",""))' "$result")"
+      fi
+      ;;
     context_help)
       echo
       python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("message","").rstrip())' "$result"
@@ -1875,6 +1896,10 @@ frpctl_dispatch_canonical() {
     set_client)
       frpctl_require_server || return 1
       frpctl_set_client_from_canon "$result"
+      ;;
+    set_group)
+      frpctl_require_server || return 1
+      frpctl_set_group_from_canon "$result"
       ;;
     unset_client)
       frpctl_require_server || return 1
@@ -1895,6 +1920,23 @@ frpctl_dispatch_canonical() {
       frpctl_require_client || return 1
       frpctl_invoke frp-client add-service $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result")
       ;;
+    add_client_group)
+      frpctl_require_server || return 1
+      frpctl_invoke frp-group-set add-member \
+        "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("client",""))' "$result")" \
+        "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("group",""))' "$result")"
+      ;;
+    remove_client_group)
+      frpctl_require_server || return 1
+      frpctl_invoke frp-group-set remove-member \
+        "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("client",""))' "$result")" \
+        "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("group",""))' "$result")"
+      ;;
+    remove_group)
+      frpctl_require_server || return 1
+      frpctl_invoke frp-group-set delete \
+        "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("group",""))' "$result")"
+      ;;
     enable_service)
       frpctl_require_client || return 1
       frpctl_invoke frp-client enable-service "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("service",""))' "$result")"
@@ -1908,6 +1950,10 @@ frpctl_dispatch_canonical() {
     create_zero_touch) frpctl_require_server || return 1; frpctl_guided_zero_touch ;;
     create_enrollment) frpctl_require_server || return 1; frpctl_invoke frp-create-client $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
     create_enrollments) frpctl_require_server || return 1; frpctl_invoke frp-enroll-bulk $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
+    create_group)
+      frpctl_require_server || return 1
+      frpctl_create_group_from_canon "$result"
+      ;;
     create_backup) frpctl_require_server || return 1; frpctl_run frp-backup $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
     revoke_client) frpctl_require_server || return 1; frpctl_invoke frp-revoke-client "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("client",""))' "$result")" $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
     revoke_enrollment) frpctl_require_server || return 1; frpctl_invoke frp-enrollment-revoke "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("id",""))' "$result")" ;;
@@ -1989,6 +2035,36 @@ frpctl_unset_client_from_canon() {
     tag) frpctl_invoke frp-client-set "$client" --remove-tag "$value" ;;
     *) echo "ERROR: unknown client setting" >&2; return 1 ;;
   esac
+}
+
+frpctl_set_group_from_canon() {
+  local spec="$1" group prop value
+  group="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("group",""))' "$spec")"
+  prop="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("property",""))' "$spec")"
+  value="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("value",""))' "$spec")"
+  case "$prop" in
+    name) frpctl_invoke frp-group-set set "$group" --name "$value" ;;
+    description) frpctl_invoke frp-group-set set "$group" --description "$value" ;;
+    *) echo "ERROR: unknown group setting" >&2; return 1 ;;
+  esac
+}
+
+frpctl_create_group_from_canon() {
+  local spec="$1" name desc
+  name="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("name",""))' "$spec")"
+  desc="$(python3 -c '
+import json, sys
+passthrough = json.loads(sys.argv[1]).get("passthrough") or []
+for idx, token in enumerate(passthrough):
+    if token == "--description" and idx + 1 < len(passthrough):
+        sys.stdout.write(passthrough[idx + 1])
+        break
+' "$spec")"
+  if [[ -n "$desc" ]]; then
+    frpctl_invoke frp-group-set create "$name" --description "$desc"
+  else
+    frpctl_invoke frp-group-set create "$name"
+  fi
 }
 
 frpctl_dispatch() {
