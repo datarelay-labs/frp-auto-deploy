@@ -39,13 +39,87 @@ CONNECT_TIMEOUT = 2.0
 
 
 def _root():
-    return Path(os.environ.get('FRP_CLIENT_TEST_ROOT') or '')
+    """Return test-root Path, or None when unset (production absolute paths)."""
+    raw = os.environ.get('FRP_CLIENT_TEST_ROOT', '')
+    return Path(raw) if raw else None
 
 
 def _path(rel):
-    base = _root()
-    p = Path(rel if rel.startswith('/') else '/' + rel)
-    return base / str(p).lstrip('/') if base else Path(rel)
+    absolute = Path(rel if str(rel).startswith('/') else '/' + str(rel))
+    root = _root()
+    if root is None:
+        return absolute
+    return root / str(absolute).lstrip('/')
+
+
+def _path_has_symlink_component(path):
+    path = Path(path)
+    try:
+        cur = path if path.exists() or path.is_symlink() else path.parent
+    except OSError:
+        cur = path.parent
+    seen = 0
+    while True:
+        try:
+            if cur.is_symlink():
+                return True
+        except OSError:
+            return True
+        parent = cur.parent
+        if parent == cur:
+            break
+        cur = parent
+        seen += 1
+        if seen > 64:
+            return True
+    return False
+
+
+def _secure_write_tar_gz(out_path, bundle_dir):
+    """Write gzip tar without following symlinks; mode 0600; atomic replace."""
+    out = Path(out_path)
+    if not str(out).startswith('/'):
+        out = Path('/') / out
+    out = Path(os.path.abspath(str(out)))
+    if out.exists() or out.is_symlink():
+        if out.is_symlink():
+            raise OSError('refusing to write support bundle through a symlink: %s' % out)
+        raise OSError('support bundle output already exists: %s' % out)
+    parent = out.parent
+    if not parent.exists():
+        parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(parent, 0o700)
+        except OSError:
+            pass
+    if _path_has_symlink_component(out) or _path_has_symlink_component(parent):
+        raise OSError('refusing to write support bundle through a symlink: %s' % out)
+    fd, tmp_name = tempfile.mkstemp(prefix='.frp-support.', suffix='.tmp', dir=str(parent))
+    tmp_path = Path(tmp_name)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, 'wb') as handle:
+            with tarfile.open(fileobj=handle, mode='w:gz') as tar:
+                for item in sorted(Path(bundle_dir).iterdir()):
+                    tar.add(item, arcname=item.name)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if out.exists() or out.is_symlink():
+            raise OSError('support bundle output path became unsafe: %s' % out)
+        os.replace(str(tmp_path), str(out))
+        os.chmod(out, 0o600)
+        return str(out)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except TypeError:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+        except OSError:
+            pass
+        raise
 
 
 def pause_marker_path():
@@ -384,7 +458,25 @@ def _https_ok(url):
         return False
 
 
+
+def _validate_support_bundle_output(out_path):
+    """Fail closed before collecting if the destination is unsafe."""
+    out = Path(out_path)
+    if not str(out).startswith('/'):
+        out = Path('/') / out
+    out = Path(os.path.abspath(str(out)))
+    if out.is_symlink() or (out.exists() and out.is_symlink()):
+        raise OSError('refusing to write support bundle through a symlink: %s' % out)
+    if out.exists():
+        raise OSError('support bundle output already exists: %s' % out)
+    parent = out.parent
+    if parent.exists() and _path_has_symlink_component(parent):
+        raise OSError('refusing to write support bundle through a symlink: %s' % out)
+    return out
+
+
 def collect_support_bundle(out_path, anonymize=False):
+    _validate_support_bundle_output(out_path)
     root = _root()
     tmpdir = Path(tempfile.mkdtemp(prefix='frp-support-bundle.'))
     try:
@@ -466,13 +558,7 @@ def collect_support_bundle(out_path, anonymize=False):
             ip_out = subprocess.run(['hostname', '-I'], capture_output=True, text=True)
         write_text('network.txt', ip_out.stdout or ip_out.stderr or '')
 
-        out = Path(out_path)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        with tarfile.open(out, 'w:gz') as tar:
-            for item in sorted(bundle_dir.iterdir()):
-                tar.add(item, arcname=item.name)
-        os.chmod(out, 0o600)
-        return str(out)
+        return _secure_write_tar_gz(out_path, bundle_dir)
     finally:
         import shutil
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -558,7 +644,10 @@ def main(argv=None):
         if not out:
             stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
             out = str(_path('/tmp/frp-support-bundle-%s.tar.gz' % stamp))
-        path = collect_support_bundle(out, anonymize=anonymize)
+        try:
+            path = collect_support_bundle(out, anonymize=anonymize)
+        except OSError as exc:
+            raise SystemExit('ERROR: %s' % exc)
         print('Support bundle written to: %s' % path)
         return 0
     if cmd == 'status-snapshot':

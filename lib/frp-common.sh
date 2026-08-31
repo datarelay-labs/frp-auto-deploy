@@ -33,6 +33,8 @@ frp_normalize_release_channel() {
   ch="$(printf '%s' "${1:-stable}" | tr '[:upper:]' '[:lower:]')"
   case "$ch" in
     dev|main|development) printf 'dev' ;;
+    candidate) printf 'candidate' ;;
+    stable) printf 'stable' ;;
     *) printf 'stable' ;;
   esac
 }
@@ -51,9 +53,37 @@ frp_parse_known_release_channel() {
   ch="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
   case "$ch" in
     dev|main|development) printf 'dev' ;;
+    candidate) printf 'candidate' ;;
     stable) printf 'stable' ;;
     *) return 1 ;;
   esac
+}
+
+frp_is_exact_commit_sha() {
+  local ref="${1:-}"
+  [[ "$ref" =~ ^[0-9a-f]{40}$ ]]
+}
+
+frp_require_exact_commit_sha() {
+  local ref="${1:-}" label="${2:-FRP_SOURCE_REF}"
+  if ! frp_is_exact_commit_sha "$ref"; then
+    echo "ERROR: ${label} must be an exact 40-char lowercase commit SHA for candidate channel" >&2
+    return 1
+  fi
+  if [[ "$ref" == "main" ]]; then
+    echo "ERROR: candidate channel must not use mutable main" >&2
+    return 1
+  fi
+  printf '%s' "$ref"
+}
+
+frp_resolve_candidate_source_ref() {
+  # Explicit env wins, then expected ref, then persisted SOURCE_REF.
+  local ref="${FRP_SOURCE_REF:-${FRP_EXPECTED_SOURCE_REF:-}}"
+  if [[ -z "$ref" ]]; then
+    ref="$(frp_read_kv_file "$(frp_version_state_file)" SOURCE_REF)"
+  fi
+  frp_require_exact_commit_sha "$ref" "FRP_SOURCE_REF"
 }
 
 frp_txn_field() {
@@ -85,11 +115,15 @@ frp_resolve_project_update_identity() {
   FRP_RESOLVED_SOURCE_REF=""
   if [[ -n "${FRP_RELEASE_CHANNEL:-}" ]]; then
     if ! FRP_RESOLVED_RELEASE_CHANNEL="$(frp_parse_known_release_channel "$FRP_RELEASE_CHANNEL")"; then
-      echo "ERROR: FRP_RELEASE_CHANNEL must be dev or stable" >&2
+      echo "ERROR: FRP_RELEASE_CHANNEL must be stable, dev, or candidate" >&2
       return 1
     fi
     if [[ "$FRP_RESOLVED_RELEASE_CHANNEL" == "dev" ]]; then
       FRP_RESOLVED_SOURCE_REF="main"
+    elif [[ "$FRP_RESOLVED_RELEASE_CHANNEL" == "candidate" ]]; then
+      if ! FRP_RESOLVED_SOURCE_REF="$(frp_resolve_candidate_source_ref)"; then
+        return 1
+      fi
     else
       FRP_RESOLVED_SOURCE_REF="v${PROJECT_VERSION}"
     fi
@@ -101,16 +135,27 @@ frp_resolve_project_update_identity() {
     if [[ -z "$txn_ch" || -z "$txn_ref" ]] || \
        ! FRP_RESOLVED_RELEASE_CHANNEL="$(frp_parse_known_release_channel "$txn_ch")"; then
       echo "ERROR: pending transaction does not identify a safe release line." >&2
-      echo "Set FRP_RELEASE_CHANNEL=dev or FRP_RELEASE_CHANNEL=stable explicitly." >&2
+      echo "Set FRP_RELEASE_CHANNEL=stable, dev, or candidate (with FRP_SOURCE_REF SHA) explicitly." >&2
       return 1
     fi
-    FRP_RESOLVED_SOURCE_REF="$txn_ref"
+    if [[ "$FRP_RESOLVED_RELEASE_CHANNEL" == "candidate" ]]; then
+      if ! FRP_RESOLVED_SOURCE_REF="$(frp_require_exact_commit_sha "$txn_ref" "SOURCE_REF")"; then
+        return 1
+      fi
+    else
+      FRP_RESOLVED_SOURCE_REF="$txn_ref"
+    fi
     return 0
   fi
   persisted="$(frp_read_kv_file "$(frp_version_state_file)" RELEASE_CHANNEL)"
   persisted_ref="$(frp_read_kv_file "$(frp_version_state_file)" SOURCE_REF)"
   if [[ -n "$persisted" ]] && FRP_RESOLVED_RELEASE_CHANNEL="$(frp_parse_known_release_channel "$persisted")"; then
-    if [[ -n "$persisted_ref" ]]; then
+    if [[ "$FRP_RESOLVED_RELEASE_CHANNEL" == "candidate" ]]; then
+      if ! FRP_RESOLVED_SOURCE_REF="$(frp_require_exact_commit_sha "$persisted_ref" "SOURCE_REF")"; then
+        echo "ERROR: persisted candidate install is missing an exact commit SOURCE_REF." >&2
+        return 1
+      fi
+    elif [[ -n "$persisted_ref" ]]; then
       FRP_RESOLVED_SOURCE_REF="$persisted_ref"
     elif [[ "$FRP_RESOLVED_RELEASE_CHANNEL" == "dev" ]]; then
       FRP_RESOLVED_SOURCE_REF="main"
@@ -121,11 +166,11 @@ frp_resolve_project_update_identity() {
   fi
   if [[ -f "$(frp_txn_marker_path)" ]]; then
     echo "ERROR: pending transaction does not identify a safe release line." >&2
-    echo "Set FRP_RELEASE_CHANNEL=dev or FRP_RELEASE_CHANNEL=stable explicitly." >&2
+    echo "Set FRP_RELEASE_CHANNEL=stable, dev, or candidate (with FRP_SOURCE_REF SHA) explicitly." >&2
     return 1
   fi
   echo "ERROR: installed release channel is unknown; refusing to guess stable." >&2
-  echo "Set FRP_RELEASE_CHANNEL=dev or FRP_RELEASE_CHANNEL=stable explicitly." >&2
+  echo "Set FRP_RELEASE_CHANNEL=stable, dev, or candidate (with FRP_SOURCE_REF SHA) explicitly." >&2
   return 1
 }
 
@@ -142,7 +187,11 @@ frp_persisted_release_channel() {
 frp_release_channel() {
   local ch
   if [[ -n "${FRP_RELEASE_CHANNEL:-}" ]]; then
-    frp_normalize_release_channel "$FRP_RELEASE_CHANNEL"
+    if ! ch="$(frp_parse_known_release_channel "$FRP_RELEASE_CHANNEL")"; then
+      echo "ERROR: FRP_RELEASE_CHANNEL must be stable, dev, or candidate" >&2
+      return 1
+    fi
+    printf '%s' "$ch"
     return 0
   fi
   ch="$(frp_persisted_release_channel)"
@@ -154,11 +203,19 @@ frp_release_channel() {
 }
 
 frp_release_git_ref() {
-  if [[ "$(frp_release_channel)" == "dev" ]]; then
-    printf 'main'
-  else
-    printf 'v%s' "${PROJECT_VERSION}"
-  fi
+  local ch
+  ch="$(frp_release_channel)" || return 1
+  case "$ch" in
+    dev)
+      printf 'main'
+      ;;
+    candidate)
+      frp_resolve_candidate_source_ref || return 1
+      ;;
+    *)
+      printf 'v%s' "${PROJECT_VERSION}"
+      ;;
+  esac
 }
 
 frp_github_raw_url() {
@@ -250,7 +307,7 @@ frp_official_managed_client_installer_ref() {
   # Exact shape only:
   #   https://raw.githubusercontent.com/<owner>/<repo>/<ref>/dist/bootstrap-client.sh
   #   https://raw.githubusercontent.com/<owner>/<repo>/<ref>/dist/bootstrap-client.ps1
-  # Managed refs: main | vX.Y.Z
+  # Managed refs: main | vX.Y.Z | 40-char commit SHA (candidate)
   # Rejects look-alike hosts, wrong owner/repo, extra path segments, userinfo,
   # non-default ports, query strings, and fragments.
   local url="${1:-}"
@@ -285,7 +342,11 @@ if owner != expect_owner or repo != expect_repo:
     raise SystemExit(1)
 if dist != "dist" or name != expect_name:
     raise SystemExit(1)
-if ref != "main" and not re.fullmatch(r"v\d+\.\d+\.\d+", ref):
+if (
+    ref != "main"
+    and not re.fullmatch(r"v\d+\.\d+\.\d+", ref)
+    and not re.fullmatch(r"[0-9a-f]{40}", ref)
+):
     raise SystemExit(1)
 sys.stdout.write(ref)
 PY
@@ -398,12 +459,19 @@ expected_git_ref = "main" if channel == "dev" else "v%s" % project
 if git_ref != expected_git_ref:
     sys.stderr.write("ERROR: release metadata channel/ref disagreement\n")
     raise SystemExit(1)
-if expected_ref and git_ref != expected_ref:
-    sys.stderr.write("ERROR: release metadata source ref mismatch\n")
-    raise SystemExit(1)
-if expected_channel and channel != expected_channel:
-    sys.stderr.write("ERROR: release metadata channel mismatch\n")
-    raise SystemExit(1)
+# Candidate delivers an exact commit of a tree that still declares stable/dev
+# identity in release-manifest.json. Do not require manifest git_ref == SHA.
+if expected_channel == "candidate":
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_ref or ""):
+        sys.stderr.write("ERROR: candidate expected source ref must be an exact commit SHA\n")
+        raise SystemExit(1)
+else:
+    if expected_ref and git_ref != expected_ref:
+        sys.stderr.write("ERROR: release metadata source ref mismatch\n")
+        raise SystemExit(1)
+    if expected_channel and channel != expected_channel:
+        sys.stderr.write("ERROR: release metadata channel mismatch\n")
+        raise SystemExit(1)
 sys.stdout.write("%s\t%s\t%s\n" % (project, channel, git_ref))
 PY
 }
@@ -581,6 +649,14 @@ frp_write_version_file() {
   fi
   if [[ "$channel" == "dev" ]]; then
     source_ref="main"
+  elif [[ "$channel" == "candidate" ]]; then
+    source_ref="${FRP_SOURCE_REF:-${FRP_EXPECTED_SOURCE_REF:-}}"
+    if [[ -z "$source_ref" ]]; then
+      source_ref="$(frp_read_kv_file "$dest" SOURCE_REF)"
+    fi
+    if ! source_ref="$(frp_require_exact_commit_sha "$source_ref" "FRP_SOURCE_REF")"; then
+      return 1
+    fi
   else
     source_ref="v${PROJECT_VERSION}"
   fi

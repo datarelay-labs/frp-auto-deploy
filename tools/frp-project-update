@@ -22,7 +22,7 @@ FRP binary or asking installation questions.
 
   --check, --dry-run  verify the candidate and report update availability only
   --source DIR        use a local source tree (tests/development)
-  --channel CHANNEL   explicit release line: dev or stable
+  --channel CHANNEL   explicit release line: stable, dev, or candidate
   -h, --help          show this help
 EOF
 }
@@ -38,7 +38,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --channel)
-      [[ $# -ge 2 ]] || { echo "ERROR: --channel requires dev or stable" >&2; exit 2; }
+      [[ $# -ge 2 ]] || { echo "ERROR: --channel requires stable, dev, or candidate" >&2; exit 2; }
       FRP_RELEASE_CHANNEL="$2"
       export FRP_RELEASE_CHANNEL
       shift 2
@@ -57,6 +57,8 @@ if ! frp_resolve_project_update_identity; then
   exit 1
 fi
 export FRP_RELEASE_CHANNEL="$FRP_RESOLVED_RELEASE_CHANNEL"
+export FRP_EXPECTED_SOURCE_REF="$FRP_RESOLVED_SOURCE_REF"
+export FRP_SOURCE_REF="$FRP_RESOLVED_SOURCE_REF"
 echo "Resolved release channel : ${FRP_RESOLVED_RELEASE_CHANNEL}"
 echo "Resolved source ref      : ${FRP_RESOLVED_SOURCE_REF}"
 

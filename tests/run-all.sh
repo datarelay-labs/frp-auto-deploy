@@ -38,6 +38,8 @@ python3 tests/test-mgmt-identity.py
 ./tests/test-pending-enrollments.sh
 ./tests/test-show-enrollments.sh
 ./tests/test-enrollment-retention.sh
+./tests/test-zero-touch-retention-propagation.sh
+./tests/test-purging-tombstone-reaper.sh
 ./tests/test-cli-hardening.sh
 ./tests/test-enroll-bulk.sh
 ./tests/test-zero-service-client.sh
@@ -59,6 +61,8 @@ bash ./tests/test-bundle-source-leakage.sh
 ./tests/test-install-lifecycle.sh
 ./tests/test-frpctl.sh
 ./tests/test-client-lifecycle-diagnostics.sh
+./tests/test-client-lifecycle-production-paths.sh
+./tests/test-support-bundle-symlink-safety.sh
 ./tests/test-server-fleet-visibility.sh
 ./tests/test-frpctl-completion.sh
 ./tests/test-create-zero-touch.sh
@@ -75,6 +79,7 @@ python3 tests/test-frontend-proxy.py
 ./tests/test-frp-server-status.sh
 ./tests/test-release-docs.sh
 ./tests/test-probe-tcp-injection.sh
+./tests/test-candidate-release-channel.sh
 ./tests/test-immutable-release-channel.sh
 ./tests/test-client-installer-url-migration.sh
 ./tests/test-install-txn-rollback.sh

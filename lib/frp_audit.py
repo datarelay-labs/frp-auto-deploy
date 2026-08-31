@@ -173,15 +173,17 @@ def rotate_if_needed(max_bytes=5 * 1024 * 1024, keep=5):
     path = audit_path()
     if not path.is_file() or path.stat().st_size < max_bytes:
         return
-    for index in range(keep, 0, -1):
+    keep = max(int(keep), 1)
+    # Drop the oldest retained file (.keep), then shift .1 .. .(keep-1) up by one.
+    # Never create .keep+1 (query only reads .1 .. .keep).
+    oldest = Path(f"{path}.{keep}")
+    if oldest.exists() or oldest.is_symlink():
+        oldest.unlink()
+    for index in range(keep - 1, 0, -1):
         src = Path(f"{path}.{index}")
-        dest = Path(f"{path}.{index + 1}")
-        if index == keep and dest.exists():
-            dest.unlink()
-        if src.exists():
-            src.replace(Path(f"{path}.{index + 1}") if index < keep else dest)
-    rotated = Path(str(path) + ".1")
-    path.replace(rotated)
+        if src.exists() or src.is_symlink():
+            src.replace(Path(f"{path}.{index + 1}"))
+    path.replace(Path(f"{path}.1"))
     path.touch()
     os.chmod(path, 0o600)
 

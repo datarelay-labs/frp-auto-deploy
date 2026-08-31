@@ -142,3 +142,17 @@ digest). That digest is not a substitute for SHA256SUMS verification.
 - Server FRP binary: `frp-update` restores the previous binary on health failure.
 - Server project tools: use `frp-project-update` rollback / restore from backup.
 - Disaster recovery: `sudo frpctl restore <backup>` after a validated backup.
+
+## Pre-release candidate source (exact commit)
+
+For acceptance before the stable tag exists:
+
+```bash
+export FRP_RELEASE_CHANNEL=candidate
+export FRP_SOURCE_REF="<40-char-commit-sha>"
+```
+
+Installer, Windows installer, SHA256SUMS, and project-update URLs then use
+`/<commit-sha>/` instead of `/vPROJECT_VERSION/` or `/main/`. Candidate must
+never be confused with stable; create `vPROJECT_VERSION` only after required
+acceptance gates pass.

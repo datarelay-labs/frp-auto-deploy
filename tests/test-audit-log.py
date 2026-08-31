@@ -73,6 +73,18 @@ class AuditLogTests(unittest.TestCase):
         path = self.audit.discover_audit_path(str(tool))
         self.assertEqual(path, installed / "frp_audit.py")
 
+    def test_rotation_does_not_create_keep_plus_one(self):
+        path = self.audit.audit_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        keep = 5
+        for i in range(1, keep + 1):
+            Path(f"{path}.{i}").write_text(f"old{i}\n", encoding="utf-8")
+        path.write_text("x" * (6 * 1024 * 1024), encoding="utf-8")
+        self.audit.rotate_if_needed(max_bytes=1024, keep=keep)
+        self.assertFalse(Path(f"{path}.{keep + 1}").exists())
+        self.assertTrue(Path(f"{path}.1").is_file())
+        self.assertTrue(Path(f"{path}.{keep}").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

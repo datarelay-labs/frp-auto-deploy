@@ -4070,8 +4070,20 @@ frp_client_fetch_and_upgrade() {
     source_ref="$FRP_EXPECTED_SOURCE_REF"
   elif [[ "$channel" == "dev" ]]; then
     source_ref="main"
+  elif [[ "$channel" == "candidate" ]]; then
+    source_ref="$(frp_client_installed_source_ref)"
+    if ! frp_require_exact_commit_sha "$source_ref" "SOURCE_REF" >/dev/null; then
+      echo "ERROR: candidate client update requires persisted exact commit SOURCE_REF" >&2
+      return 1
+    fi
   else
     source_ref="v${PROJECT_VERSION}"
+  fi
+  if [[ "$channel" == "candidate" ]]; then
+    if ! frp_require_exact_commit_sha "$source_ref" "SOURCE_REF" >/dev/null; then
+      echo "ERROR: candidate channel must not use mutable main or a non-SHA ref" >&2
+      return 1
+    fi
   fi
   if ! frp_url_has_source_ref "$FRP_CLIENT_UPDATE_URL" "$source_ref" \
     || ! frp_url_has_source_ref "$FRP_CLIENT_UPDATE_METADATA_URL" "$source_ref"; then

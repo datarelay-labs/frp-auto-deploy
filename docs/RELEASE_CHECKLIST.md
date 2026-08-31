@@ -38,6 +38,34 @@ in this checklist. The following remain
 
 Do not convert Docker, LXD, or QEMU TCG into `REAL_VM=PASS`.
 
+## Pre-release candidate channel (before stable tag)
+
+Before `vPROJECT_VERSION` exists, real E2E must **not** fetch
+`raw.githubusercontent.com/.../vPROJECT_VERSION/...` (HTTP 404).
+
+Use the immutable **candidate** delivery line:
+
+```bash
+CANDIDATE_SHA="$(git rev-parse origin/integration/pre-main-e2e)"  # or the feature commit
+
+export FRP_RELEASE_CHANNEL=candidate
+export FRP_SOURCE_REF="$CANDIDATE_SHA"
+```
+
+Semantics:
+
+| Channel | SOURCE_REF | Mutability |
+| --- | --- | --- |
+| `stable` | `vPROJECT_VERSION` | immutable tag (requires acceptance first) |
+| `dev` | `main` | mutable; explicit opt-in only |
+| `candidate` | exact 40-char commit SHA | immutable commit; pre-release E2E only |
+
+- Candidate never silently follows `main`.
+- Candidate does **not** create a tag and is **not** a stable release.
+- Unknown channels fail closed.
+- After acceptance, create immutable `vPROJECT_VERSION` and use `stable` as usual.
+- Do not claim real-environment PASS from automated tests alone.
+
 ## Tag policy
 
 - [ ] `RELEASE_CANDIDATE_READY=YES` only if the automated gate PASS

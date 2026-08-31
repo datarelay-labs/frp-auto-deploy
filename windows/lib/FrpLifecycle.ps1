@@ -103,8 +103,11 @@ function Invoke-FrpClientTest {
     if (Test-FrpIsEnrolled) { Write-Host 'Local state              PASS' } else { Write-Host 'Local state              FAIL'; $failed = $true }
     if (Test-Path -LiteralPath (Get-FrpIdentityPubPath)) { Write-Host 'Management identity      PASS' } else { Write-Host 'Management identity      FAIL'; $failed = $true }
     $key = Get-FrpIdentityKeyPath
-    if (Test-Path -LiteralPath $key) {
+    $aclResult = Test-FrpIdentityKeyAcl -Path $key
+    if ($aclResult -eq 'PASS') {
         Write-Host 'Identity permissions     PASS'
+    } elseif ($aclResult -eq 'UNKNOWN') {
+        Write-Host 'Identity permissions     UNKNOWN'
     } else {
         Write-Host 'Identity permissions     FAIL'
         $failed = $true
@@ -136,10 +139,15 @@ function Show-FrpClientLogs {
         return 0
     }
     if ($Follow) {
-        Get-Content -LiteralPath $log -Wait -Tail $Lines
+        # Redact each emitted line/chunk; do not buffer the infinite stream.
+        Get-Content -LiteralPath $log -Wait -Tail $Lines | ForEach-Object {
+            Write-Output (Protect-FrpRedactText -Text ([string]$_))
+        }
         return 0
     }
-    Get-Content -LiteralPath $log -Tail $Lines
+    Get-Content -LiteralPath $log -Tail $Lines | ForEach-Object {
+        Write-Output (Protect-FrpRedactText -Text ([string]$_))
+    }
     return 0
 }
 
@@ -149,11 +157,13 @@ function Protect-FrpRedactText {
     $out = $Text
     $out = [regex]::Replace($out, '(?im)^(auth\.)?token\s*=\s*.+$', 'auth.token = "[redacted]"')
     $out = [regex]::Replace($out, '(?im)^token\s*=\s*.+$', 'token = "[redacted]"')
-    $out = [regex]::Replace($out, '(?i)(Authorization\s*[:=]\s*)\S+', '$1[redacted]')
+    $out = [regex]::Replace($out, '(?i)(Authorization\s*[:=]\s*).+$', '$1[redacted]')
+    $out = [regex]::Replace($out, '(?i)Enrollment\s+Code\s*[:=]\s*\S+', 'Enrollment Code: [redacted]')
     $out = [regex]::Replace($out, '(?i)(password|passwd|secret|private[_-]?key|enrollment[_-]?code|bootstrap[_-]?ticket|mgmt_mac_key|auth_token|server_token)\s*[:=]\s*\S+', '$1=[redacted]')
     $out = [regex]::Replace($out, 'BEGIN [A-Z ]*PRIVATE KEY[\s\S]*?END [A-Z ]*PRIVATE KEY', '[redacted private key]')
     $out = [regex]::Replace($out, 'FRP_TOKEN_TEST_[A-Za-z0-9_\-]+', '[redacted]')
     $out = [regex]::Replace($out, 'btck\.[0-9a-f]{16}\.[A-Za-z0-9]+', '[redacted]')
+    $out = [regex]::Replace($out, 'bt1\.[0-9a-f]{16}\.[0-9a-fA-F]+', '[redacted]')
     return $out
 }
 

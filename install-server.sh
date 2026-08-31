@@ -998,6 +998,16 @@ PY
     echo "ERROR: FRP control listen port must be outside the FRP service port range" >&2
     exit 1
   fi
+  # Public endpoint namespace: published service ports must not collide with
+  # control/allocator public ports (NAT may map public!=listen).
+  if (( 10#$FRP_CONTROL_PUBLIC_PORT >= 10#$FRP_PORT_START && 10#$FRP_CONTROL_PUBLIC_PORT <= 10#$FRP_PORT_END )); then
+    echo "ERROR: FRP control public port must be outside the FRP service port range" >&2
+    exit 1
+  fi
+  if (( 10#$FRP_ALLOCATOR_PUBLIC_PORT >= 10#$FRP_PORT_START && 10#$FRP_ALLOCATOR_PUBLIC_PORT <= 10#$FRP_PORT_END )); then
+    echo "ERROR: allocator public port must be outside the FRP service port range" >&2
+    exit 1
+  fi
   if frp_mode_is_single443; then
     if (( 10#$FRP_CONTROL_LISTEN_PORT == 10#$FRP_CONTROL_PUBLIC_PORT )); then
       echo "ERROR: FRP control backend port cannot be the public frontend port ${FRP_CONTROL_PUBLIC_PORT}" >&2

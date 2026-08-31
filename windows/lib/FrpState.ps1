@@ -84,6 +84,52 @@ function Restrict-FrpFileAcl {
     } catch { }
 }
 
+function Test-FrpIdentityKeyAcl {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    # Returns: PASS | FAIL | UNKNOWN
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return 'FAIL'
+    }
+    if ($env:FRP_WINDOWS_FORCE_ACL_UNKNOWN -eq '1') {
+        return 'UNKNOWN'
+    }
+    if ($env:FRP_WINDOWS_FORCE_ACL_INSECURE -eq '1') {
+        return 'FAIL'
+    }
+    if (Test-FrpIsWindowsHost) {
+        try {
+            $acl = Get-Acl -LiteralPath $Path
+            $allowed = @('NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators', 'SYSTEM', 'Administrators')
+            foreach ($rule in @($acl.Access)) {
+                if ($rule.AccessControlType -ne 'Allow') { continue }
+                $id = [string]$rule.IdentityReference
+                $ok = $false
+                foreach ($a in $allowed) {
+                    if ($id -eq $a -or $id.EndsWith('\' + $a)) { $ok = $true; break }
+                }
+                if (-not $ok) {
+                    return 'FAIL'
+                }
+            }
+            return 'PASS'
+        } catch {
+            return 'UNKNOWN'
+        }
+    }
+    # Non-Windows test hosts: require owner-only mode bits (no group/other).
+    try {
+        $mode = & stat -c '%a' -- $Path 2>$null
+        if (-not $mode) { return 'UNKNOWN' }
+        $mode = [string]$mode
+        if ($mode -match '^[0-7]+$' -and ($mode.EndsWith('00') -or $mode -eq '600' -or $mode -eq '400')) {
+            return 'PASS'
+        }
+        return 'FAIL'
+    } catch {
+        return 'UNKNOWN'
+    }
+}
+
 function Get-FrpOrCreateClientId {
     Initialize-FrpDirectories
     $path = Get-FrpClientIdPath

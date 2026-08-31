@@ -189,6 +189,59 @@ fi
 grep -qi 'outside' "$WORKDIR/range.err" || fail "range overlap message"
 pass "service range collision protection preserved"
 
+# Public control port inside service range is rejected (public namespace).
+reset_env
+if (
+  export FRP_PUBLIC_HOST=203.0.113.10
+  export FRP_CONTROL_PUBLIC_PORT=6000
+  export FRP_CONTROL_LISTEN_PORT=7000
+  export FRP_ALLOCATOR_PUBLIC_PORT=9443
+  export FRP_ALLOCATOR_LISTEN_PORT=9443
+  export FRP_PORT_START=6000
+  export FRP_PORT_END=6098
+  export FRP_SERVER_CONFIG="$WORKDIR/missing.json"
+  load_existing_server_config
+  resolve_server_settings
+) >/dev/null 2>"$WORKDIR/pub-control.err"; then
+  fail "public control in service range should fail"
+fi
+grep -qi 'control public port must be outside' "$WORKDIR/pub-control.err" || fail "public control message: $(cat "$WORKDIR/pub-control.err")"
+pass "PUBLIC_CONTROL_IN_SERVICE_RANGE_REJECTED"
+
+# Public allocator port inside service range is rejected.
+reset_env
+if (
+  export FRP_PUBLIC_HOST=203.0.113.10
+  export FRP_CONTROL_PUBLIC_PORT=7000
+  export FRP_CONTROL_LISTEN_PORT=7000
+  export FRP_ALLOCATOR_PUBLIC_PORT=6001
+  export FRP_ALLOCATOR_LISTEN_PORT=9443
+  export FRP_PORT_START=6000
+  export FRP_PORT_END=6098
+  export FRP_SERVER_CONFIG="$WORKDIR/missing.json"
+  load_existing_server_config
+  resolve_server_settings
+) >/dev/null 2>"$WORKDIR/pub-alloc.err"; then
+  fail "public allocator in service range should fail"
+fi
+grep -qi 'allocator public port must be outside' "$WORKDIR/pub-alloc.err" || fail "public allocator message: $(cat "$WORKDIR/pub-alloc.err")"
+pass "PUBLIC_ALLOCATOR_IN_SERVICE_RANGE_REJECTED"
+
+# NAT split: public 8443 -> listen 443 with service 6000-6098 is valid.
+reset_env
+export FRP_PUBLIC_HOST=203.0.113.10
+export FRP_CONTROL_PUBLIC_PORT=8443
+export FRP_CONTROL_LISTEN_PORT=443
+export FRP_ALLOCATOR_PUBLIC_PORT=8444
+export FRP_ALLOCATOR_LISTEN_PORT=6099
+export FRP_PORT_START=6000
+export FRP_PORT_END=6098
+export FRP_SERVER_CONFIG="$WORKDIR/missing.json"
+load_existing_server_config
+resolve_server_settings >/dev/null
+pass "NAT_PUBLIC_LISTEN_SPLIT_OUTSIDE_RANGE"
+
+
 # No hard-coded product requirement that FRP owns TCP/443.
 if grep -nE 'FRP must (own|use|bind).*443|require.*TCP/443|hard.?coded.*443' "$ROOT/install-server.sh"; then
   fail "installer still treats 443 as mandatory"
@@ -212,6 +265,42 @@ assert_ports "single443" 443 7000 443 6099
 [[ "${FRP_MODE_SWITCH:-0}" == "0" ]] || fail "fresh single443 should not be a mode switch"
 [[ -z "${EXISTING_SERVER_CONFIG:-}" ]] || fail "missing config was treated as existing"
 pass "single443 clean-install defaults"
+
+# single443 frontend 443 outside service 6000-6098 is valid.
+reset_env
+export FRP_DEPLOYMENT_MODE=single443
+export FRP_PUBLIC_HOST=203.0.113.10
+export FRP_CONTROL_PUBLIC_PORT=443
+export FRP_ALLOCATOR_PUBLIC_PORT=443
+export FRP_CONTROL_LISTEN_PORT=7000
+export FRP_ALLOCATOR_LISTEN_PORT=6099
+export FRP_PORT_START=6000
+export FRP_PORT_END=6098
+export FRP_SERVER_CONFIG="$WORKDIR/missing.json"
+load_existing_server_config
+resolve_server_settings >/dev/null
+pass "SINGLE443_FRONTEND_OUTSIDE_RANGE"
+
+# single443 frontend inside service range is rejected.
+reset_env
+if (
+  export FRP_DEPLOYMENT_MODE=single443
+  export FRP_PUBLIC_HOST=203.0.113.10
+  export FRP_CONTROL_PUBLIC_PORT=6000
+  export FRP_ALLOCATOR_PUBLIC_PORT=6000
+  export FRP_CONTROL_LISTEN_PORT=7000
+  export FRP_ALLOCATOR_LISTEN_PORT=6099
+  export FRP_PORT_START=6000
+  export FRP_PORT_END=6098
+  export FRP_SERVER_CONFIG="$WORKDIR/missing.json"
+  load_existing_server_config
+  resolve_server_settings
+) >/dev/null 2>"$WORKDIR/s443-range.err"; then
+  fail "single443 frontend in service range should fail"
+fi
+grep -qi 'public port must be outside' "$WORKDIR/s443-range.err" || fail "single443 frontend range message"
+pass "SINGLE443_FRONTEND_IN_SERVICE_RANGE_REJECTED"
+
 
 reset_env
 export FRP_PUBLIC_HOST=203.0.113.10

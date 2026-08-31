@@ -350,11 +350,14 @@ def cleanup_expired_bootstrap_tickets(bootstrap_dir, now=None, keep_id=None, cfg
         return
 
 
-def issue_bootstrap_ticket(enrollments_dir, bootstrap_dir, services, ttl, note='', label='', assigned_group_ids=None):
+def issue_bootstrap_ticket(enrollments_dir, bootstrap_dir, services, ttl, note='', label='', assigned_group_ids=None, cfg=None):
     """Create a hashed bootstrap ticket plus a normal enrollment record.
 
     Does not allocate a public port. Caller must have already validated
     `services` with normalize_services() and `assigned_group_ids` when present.
+
+    When ``cfg`` is provided, retention cleanup honors ``enrollment_retention_days``
+    from that authoritative server config (same policy as manual issuance / startup).
     """
     ttl = int(ttl)
     note = str(note or '')
@@ -403,18 +406,30 @@ def issue_bootstrap_ticket(enrollments_dir, bootstrap_dir, services, ttl, note='
             os.chmod(str(enrollments_dir), 0o700)
         except OSError:
             pass
-    cleanup_expired_bootstrap_tickets(bootstrap_dir, now, cfg={
+    # Paths come from call args (already remapped by CLI/allocator). Copy only
+    # retention policy from authoritative cfg so production path keys cannot
+    # override the remapped directories.
+    cleanup_cfg = {
         'enrollments_dir': str(enrollments_dir),
         'bootstrap_dir': str(bootstrap_dir),
         'registry_file': str(Path(enrollments_dir).parent / 'registry.json'),
-    })
+    }
+    if isinstance(cfg, dict):
+        if 'enrollment_retention_days' in cfg:
+            cleanup_cfg['enrollment_retention_days'] = cfg['enrollment_retention_days']
+        if cfg.get('registry_file'):
+            cand = Path(str(cfg['registry_file']))
+            if cand.parent == Path(enrollments_dir).parent:
+                cleanup_cfg['registry_file'] = str(cand)
+    # Single force cleanup; honor enrollment_retention_days from authoritative cfg.
     if ELC is not None:
         try:
-            ELC.maybe_run_retention_cleanup({
-                'enrollments_dir': str(enrollments_dir),
-                'bootstrap_dir': str(bootstrap_dir),
-                'registry_file': str(Path(enrollments_dir).parent / 'registry.json'),
-            }, force=True, audit_emit=ELC.load_audit_emit(), now=now)
+            ELC.maybe_run_retention_cleanup(
+                cleanup_cfg,
+                force=True,
+                audit_emit=ELC.load_audit_emit(),
+                now=now,
+            )
         except Exception:
             pass
     enroll_path = enrollment_file_path(enrollments_dir, enrollment_id)
@@ -861,6 +876,7 @@ class Allocator:
             note,
             label=label,
             assigned_group_ids=assigned_group_ids,
+            cfg=self.cfg,
         )
 
     def _invalid_ticket_response(self):

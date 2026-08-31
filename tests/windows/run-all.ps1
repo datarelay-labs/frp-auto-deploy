@@ -1,9 +1,27 @@
-# run-all.ps1 — Windows client test suite (pwsh 7 on Linux CI or Windows)
+# run-all.ps1 — Windows client test suite.
+# Preserves the host engine: Windows PowerShell 5.1 uses powershell.exe;
+# PowerShell 7+ / Linux CI uses pwsh. Do not hard-code pwsh.
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $failed = 0
 $passed = 0
 $skipped = 0
+
+function Get-FrpHostPowerShellExe {
+    try {
+        $procPath = (Get-Process -Id $PID -ErrorAction Stop).Path
+        if ($procPath) { return $procPath }
+    } catch { }
+    if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        return 'powershell.exe'
+    }
+    return 'pwsh'
+}
+
+$hostExe = Get-FrpHostPowerShellExe
+Write-Host ("Host PowerShell engine : {0}" -f $hostExe)
+Write-Host ("Host PowerShell version: {0}" -f $PSVersionTable.PSVersion)
+Write-Host ("Host PSEdition         : {0}" -f $PSVersionTable.PSEdition)
 
 $tests = @(
     'test-crypto.ps1',
@@ -27,6 +45,8 @@ $tests = @(
     'test-clock-skew.ps1',
     'test-uninstall.ps1',
     'test-support-bundle.ps1',
+    'test-logs-redaction.ps1',
+    'test-identity-acl-diagnostic.ps1',
     'test-cross-language.ps1'
 )
 
@@ -37,7 +57,7 @@ foreach ($t in $tests) {
     Write-Host ""
     Write-Host "--- $t ---"
     try {
-        & pwsh -NoProfile -File $path
+        & $hostExe -NoProfile -File $path
         if ($LASTEXITCODE -ne 0) {
             Write-Host "FAIL $t (exit $LASTEXITCODE)"
             $failed++

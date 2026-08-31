@@ -892,6 +892,7 @@ def main(argv=None):
             note,
             label=client_name,
             assigned_group_ids=assigned_group_ids,
+            cfg=cfg,
         )
     except Exception as exc:
         fail('failed to issue bootstrap ticket: %s' % exc)

@@ -515,6 +515,45 @@ def run_retention_cleanup(
     return {'purged': purged}
 
 
+
+def reap_purging_tombstones(enrollments_dir, bootstrap_dir):
+    """Remove orphan ``*.json.purging`` leftovers after a failed phase-2 unlink.
+
+    Conservative rules (fail closed on ambiguity):
+    - only delete paths ending in ``.json.purging``
+    - skip symlinks
+    - never delete when the corresponding active ``*.json`` still exists
+    - never resurrect tombstones
+    """
+    removed = 0
+    for directory in (enrollments_dir, bootstrap_dir):
+        root = Path(directory or '')
+        if not root.is_dir():
+            continue
+        try:
+            candidates = list(root.iterdir())
+        except OSError:
+            continue
+        for path in candidates:
+            name = path.name
+            if not name.endswith('.json.purging'):
+                continue
+            if path.is_symlink():
+                continue
+            if not path.is_file():
+                continue
+            original = Path(str(path)[:-len('.purging')])
+            if original.exists() or original.is_symlink():
+                # Ambiguous: active object and tombstone both present — leave alone.
+                continue
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                continue
+    return removed
+
+
 def maybe_run_retention_cleanup(
     cfg,
     *,
@@ -538,6 +577,7 @@ def maybe_run_retention_cleanup(
         audit_emit=audit_emit,
         now=now,
     )
+    result['tombstones_reaped'] = reap_purging_tombstones(enrollments_dir, bootstrap_dir)
     _last_retention_cleanup = now_ts
     result['skipped'] = False
     return result
