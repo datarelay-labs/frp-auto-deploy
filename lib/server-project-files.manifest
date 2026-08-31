@@ -32,6 +32,8 @@ project usr/local/lib/frp-auto-deploy/frp_enrollment_lifecycle.py 0644 lib/frp_e
 project usr/local/lib/frp-auto-deploy/frp_enroll_challenge.py 0644 lib/frp_enroll_challenge.py python
 project usr/local/lib/frp-auto-deploy/frp_clock_sync.py 0644 lib/frp_clock_sync.py python
 project usr/local/lib/frp-auto-deploy/frp_audit.py 0644 lib/frp_audit.py python
+project usr/local/lib/frp-auto-deploy/frp_fleet.py 0644 lib/frp_fleet.py python
+project usr/local/lib/frp-auto-deploy/frp_server_lifecycle.py 0644 lib/frp_server_lifecycle.py python
 project usr/local/lib/frp-auto-deploy/frp_project_files.py 0644 lib/frp_project_files.py python
 project usr/local/lib/frp-auto-deploy/frp_control_locks.py 0644 lib/frp_control_locks.py python
 project usr/local/lib/frp-auto-deploy/server-project-files.manifest 0644 lib/server-project-files.manifest none

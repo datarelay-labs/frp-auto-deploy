@@ -1380,6 +1380,8 @@ class Allocator:
                         source_ip=source_ip,
                         seen_at=now_iso,
                     )
+                    CREG.apply_mgmt_seen(client, seen_at=now_iso)
+                    CREG.apply_build_report(client, payload, seen_at=now_iso)
                     CREG.seed_admin_metadata(
                         client,
                         label=(record or {}).get('label'),

@@ -66,6 +66,10 @@ from 2.1.0, newly generated Zero-touch / enrollment installer commands use the
 - Support bundles use deterministic redaction; uninstall preserves server records and port reservations
 - Windows: `frpctl.cmd` / `frpcli.cmd` wrappers; uninstall wording uses **release** (not revoke) for ports
 
+- Server fleet visibility: `show fleet`, `show ports`, management-stale/build-drift filters, audit export
+- Server diagnostics: role-aware `test`, `logs`, `support-bundle`; LAST MGMT SEEN on authenticated requests
+- Mgmt stale / build drift are read-only visibility; they do not imply tunnel offline or auto-cleanup
+
 - Windows TLS: enforce hostname/IP SAN verification on the pinned-.NET path (no `-or $true` bypass)
 - Windows zero-service tickets stay management-only (no automatic RDP)
 - `release` clears port reservations but keeps the management client record; `revoke` remains identity-only

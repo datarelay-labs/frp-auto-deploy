@@ -6,6 +6,7 @@ No eval, no glob, no variable expansion, no command substitution.
 from __future__ import annotations
 
 import json
+import re
 import sys
 
 UNQUOTED_META = set("$`;|&><*?(){}[]")
@@ -167,7 +168,7 @@ def _show_resources(role):
     client, server = _role_parts(role)
     items = ["status", "version"]
     if server:
-        items.extend(["clients", "client", "groups", "group", "enrollments", "audit", "upstream"])
+        items.extend(["fleet", "clients", "client", "groups", "group", "ports", "enrollments", "audit", "upstream"])
     if client:
         items.extend(["services", "info"])
     return items
@@ -307,8 +308,9 @@ def _root_help(role):
     if server:
         lines.extend(
             [
-                "  show clients",
-                "  show clients --group <GROUP>",
+                "  show fleet",
+                "  show clients [--group <GROUP>] [--tag KEY=VALUE] [--status online|offline|unknown]",
+                "  show clients [--stale] [--build-drift] [--last-mgmt-before 30d]",
                 "  show client <ID>",
                 "  show client <ID> services",
                 "  show client <ID> tags",
@@ -316,8 +318,9 @@ def _root_help(role):
                 "  show groups",
                 "  show group <GROUP>",
                 "  show group <GROUP> clients",
+                "  show ports [--client ID] [--free] [--reserved]",
                 "  show enrollments",
-                "  show audit",
+                "  show audit [--since 7d] [--format json|csv|table]",
                 "  show upstream",
             ]
         )
@@ -378,9 +381,19 @@ def _root_help(role):
                 "  pause                Pause remote FRP access (local)",
                 "  resume               Resume remote FRP access",
                 "  restart              Restart frpc without re-enroll",
-                "  test                 Read-only connectivity test",
+            ]
+        )
+    if client or server:
+        lines.extend(
+            [
+                "  test                 Read-only diagnostics (role-aware)",
                 "  logs [--lines N] [--follow]",
-                "  support-bundle [--anonymize]",
+                "  support-bundle       Create redacted support bundle",
+            ]
+        )
+    if client:
+        lines.extend(
+            [
                 "  uninstall [--yes]",
             ]
         )
@@ -652,12 +665,14 @@ def context_help(tokens, role, names=None, clients=None):
             if server:
                 rows.extend(
                     [
+                        ("fleet", "Server fleet overview"),
                         ("clients", "Registered client table"),
                         ("client", "One client (overview, services, tags, or groups)"),
                         ("groups", "Manual group inventory"),
                         ("group", "One group (overview or clients)"),
+                        ("ports", "Public port inventory"),
                         ("enrollments", "Issued enrollment credentials"),
-                        ("audit", "Recent audit events"),
+                        ("audit", "Audit events (filterable)"),
                         ("upstream", "FRP upstream check"),
                     ]
                 )
@@ -943,9 +958,9 @@ def match(tokens, role, names=None, clients=None, groups=None):
         "pause": lambda toks, role, names=None: _match_client_lifecycle("pause", toks, role),
         "resume": lambda toks, role, names=None: _match_client_lifecycle("resume", toks, role),
         "restart": lambda toks, role, names=None: _match_client_lifecycle("restart", toks, role),
-        "test": lambda toks, role, names=None: _match_client_lifecycle("test", toks, role),
-        "logs": lambda toks, role, names=None: _match_client_lifecycle("logs", toks, role),
-        "support-bundle": lambda toks, role, names=None: _match_client_lifecycle("support-bundle", toks, role),
+        "test": lambda toks, role, names=None: _match_shared_lifecycle("test", toks, role),
+        "logs": lambda toks, role, names=None: _match_shared_lifecycle("logs", toks, role),
+        "support-bundle": lambda toks, role, names=None: _match_shared_lifecycle("support-bundle", toks, role),
         "uninstall": lambda toks, role, names=None: _match_client_lifecycle("uninstall", toks, role),
         "doctor": lambda toks, role, names=None: {"status": "ok", "action": "doctor", "passthrough": toks[1:]},
         "help": lambda toks, role, names=None: {"status": "ok", "action": "help", "passthrough": toks[1:]},
@@ -972,11 +987,75 @@ def match(tokens, role, names=None, clients=None, groups=None):
         return fn(tokens, role, names)
     if verb in ("enable", "disable", "apply", "discard") and not client:
         return {"status": "role", "need": "client", "command": verb}
-    if verb in (
-        "pause", "resume", "restart", "test", "logs", "support-bundle", "uninstall",
-    ) and not client:
+    if verb in ("pause", "resume", "restart", "uninstall") and not client:
         return {"status": "role", "need": "client", "command": verb}
+    if verb in ("test", "logs", "support-bundle") and not client and not server:
+        return {"status": "role", "need": "client or server", "command": verb}
     return fn(tokens, role, names)
+
+
+def _match_shared_lifecycle(verb, tokens, role):
+    client, server = _role_parts(role)
+    if client and server:
+        result = _match_client_lifecycle(verb, tokens, role)
+        if result.get("status") == "ok":
+            result["action"] = "dual_%s" % verb.replace("-", "_")
+        return result
+    if server:
+        return _match_server_lifecycle(verb, tokens[1:], role)
+    if client:
+        return _match_client_lifecycle(verb, tokens, role)
+    return {"status": "role", "need": "client or server", "command": verb}
+
+
+def _match_server_lifecycle(verb, tokens, role):
+    _client, server = _role_parts(role)
+    if not server:
+        return {"status": "role", "need": "server", "command": verb}
+    passthrough = []
+    idx = 0
+    if verb == "logs":
+        while idx < len(tokens):
+            tok = tokens[idx]
+            if tok in ("--lines", "-n"):
+                if idx + 1 >= len(tokens):
+                    return {"status": "error", "message": "Missing value for --lines."}
+                if not re.fullmatch(r"[0-9]+", tokens[idx + 1]):
+                    return {"status": "error", "message": "Invalid --lines value."}
+                passthrough.extend([tok, tokens[idx + 1]])
+                idx += 2
+                continue
+            if tok in ("--follow", "-f"):
+                passthrough.append(tok)
+                idx += 1
+                continue
+            if tok.startswith("-"):
+                return {"status": "error", "message": "Unknown logs option: %s" % tok}
+            passthrough.append(tok)
+            idx += 1
+        return {"status": "ok", "action": "server_logs", "passthrough": passthrough}
+    if verb == "support-bundle":
+        while idx < len(tokens):
+            tok = tokens[idx]
+            if tok == "--anonymize":
+                passthrough.append(tok)
+                idx += 1
+                continue
+            if tok == "--output":
+                if idx + 1 >= len(tokens):
+                    return {"status": "error", "message": "Missing value for --output."}
+                passthrough.extend([tok, tokens[idx + 1]])
+                idx += 2
+                continue
+            if tok.startswith("-"):
+                return {"status": "error", "message": "Unknown support-bundle option: %s" % tok}
+            return {"status": "error", "message": "Unexpected argument: %s" % tok}
+        return {"status": "ok", "action": "server_support_bundle", "passthrough": passthrough}
+    if verb == "test":
+        if tokens:
+            return {"status": "error", "message": "Too many arguments for test."}
+        return {"status": "ok", "action": "server_test", "passthrough": []}
+    return {"status": "error", "message": "Unsupported server lifecycle verb: %s" % verb}
 
 
 def _match_client_lifecycle(verb, tokens, role):
@@ -1044,7 +1123,24 @@ def _match_show(tokens, role, names=None):
     if resource == "version":
         return {"status": "ok", "action": "show_version"}
     if resource == "clients":
-        return {"status": "ok", "action": "show_clients", "passthrough": tokens[2:]}
+        passthrough = []
+        idx = 2
+        while idx < len(tokens):
+            tok = tokens[idx]
+            if tok in ("--stale", "--build-drift"):
+                passthrough.append(tok)
+                idx += 1
+                continue
+            if tok in ("--last-mgmt-before", "--group", "--status", "--tag"):
+                if idx + 1 >= len(tokens):
+                    return {"status": "error", "message": "%s requires a value" % tok}
+                passthrough.extend([tok, tokens[idx + 1]])
+                idx += 2
+                continue
+            if tok.startswith("-"):
+                return {"status": "error", "message": "Unknown show clients option: %s" % tok}
+            return {"status": "error", "message": "Unexpected argument: %s" % tok}
+        return {"status": "ok", "action": "show_clients", "passthrough": passthrough}
     if resource == "groups":
         return {"status": "ok", "action": "show_groups"}
     if resource == "group":
@@ -1079,10 +1175,46 @@ def _match_show(tokens, role, names=None):
             "group": tokens[2],
             "view": "clients",
         }
+    if resource == "fleet":
+        if len(tokens) > 2:
+            return {"status": "error", "message": "show fleet does not take extra arguments"}
+        return {"status": "ok", "action": "show_fleet", "passthrough": []}
+    if resource == "ports":
+        passthrough = []
+        idx = 2
+        while idx < len(tokens):
+            tok = tokens[idx]
+            if tok == "--client":
+                if idx + 1 >= len(tokens):
+                    return {"status": "error", "message": "--client requires a value"}
+                passthrough.extend([tok, tokens[idx + 1]])
+                idx += 2
+                continue
+            if tok in ("--free", "--reserved"):
+                passthrough.append(tok)
+                idx += 1
+                continue
+            if tok.startswith("-"):
+                return {"status": "error", "message": "Unknown show ports option: %s" % tok}
+            return {"status": "error", "message": "Unexpected argument: %s" % tok}
+        return {"status": "ok", "action": "show_ports", "passthrough": passthrough}
     if resource == "enrollments":
         return {"status": "ok", "action": "show_enrollments"}
     if resource == "audit":
-        return {"status": "ok", "action": "show_audit"}
+        passthrough = []
+        idx = 2
+        while idx < len(tokens):
+            tok = tokens[idx]
+            if tok in ("--since", "--event", "--client", "--group", "--format", "-n", "--lines"):
+                if idx + 1 >= len(tokens):
+                    return {"status": "error", "message": "%s requires a value" % tok}
+                passthrough.extend([tok, tokens[idx + 1]])
+                idx += 2
+                continue
+            if tok.startswith("-"):
+                return {"status": "error", "message": "Unknown show audit option: %s" % tok}
+            return {"status": "error", "message": "Unexpected argument: %s" % tok}
+        return {"status": "ok", "action": "show_audit", "passthrough": passthrough}
     if resource == "upstream":
         return {"status": "ok", "action": "show_upstream", "passthrough": tokens[2:]}
     if resource == "services":
@@ -1738,12 +1870,14 @@ def _tab_desc_map(line, role, names=None, clients=None):
         rows = {
             "status": "Host status",
             "version": "Installed versions",
+            "fleet": "Server fleet overview",
             "clients": "Registered client table",
             "client": "One client (overview, services, tags, or groups)",
             "groups": "Manual group inventory",
             "group": "One group (overview or clients)",
+            "ports": "Public port inventory",
             "enrollments": "Issued enrollment credentials",
-            "audit": "Recent audit events",
+            "audit": "Audit events (filterable)",
             "upstream": "FRP upstream check",
             "services": "Local services",
             "info": "Local connection info",
@@ -1910,6 +2044,18 @@ def _canonical_completion(tokens, trailing, role, names, services, local_service
                 return _filter(groups, prefix)
             if len(filled) == 3:
                 return _filter(["clients"], prefix)
+        if filled[1] == "clients" and server:
+            return _filter(
+                ["--group", "--tag", "--status", "--stale", "--build-drift", "--last-mgmt-before"],
+                prefix,
+            )
+        if filled[1] == "ports" and server:
+            return _filter(["--client", "--free", "--reserved"], prefix)
+        if filled[1] == "audit" and server:
+            return _filter(
+                ["--since", "--event", "--client", "--group", "--format", "--lines"],
+                prefix,
+            )
         return []
     if verb == "set":
         if len(filled) == 1:

@@ -99,14 +99,30 @@ except ValueError:
 
 
 def print_overview():
+    cfg_path = Path(ROOT + '/etc/frp-auto-deploy/config.json')
+    cfg = json.loads(cfg_path.read_text()) if cfg_path.is_file() else {}
+    stale_sec = 30 * 86400
+    try:
+        stale_sec = int(cfg.get('client_stale_days', 30)) * 86400
+    except (TypeError, ValueError):
+        stale_sec = 30 * 86400
+    expected = CREG.load_server_version_metadata(ROOT or None)
+    act = CREG.mgmt_activity_class(client, stale_sec)
+    drift = CREG.build_drift_class(client, expected)
     print('Client ID      : %s' % cid)
     print('Machine ID     : %s' % CREG.sanitize_display(mid, 128))
     print('Label          : %s' % (label or '-'))
     print('Hostname       : %s' % (hostname or '-'))
     print('Management     : %s' % CREG.mgmt_status(client))
+    print('Mgmt activity  : %s' % act)
+    print('Last mgmt seen : %s' % CREG.sanitize_display(client.get('last_mgmt_seen_at') or '-'))
     print('Last source IP : %s' % CREG.sanitize_display(client.get('last_source_ip') or '-'))
     print('Last seen      : %s' % CREG.sanitize_display(client.get('last_seen_at') or '-'))
     print('Last enrolled  : %s' % CREG.sanitize_display(client.get('last_enrolled_at') or '-'))
+    print('Reported project build : %s' % CREG.sanitize_display(client.get('reported_project_version') or '-'))
+    print('Reported FRP version   : %s' % CREG.sanitize_display(client.get('reported_frp_version') or '-'))
+    print('Build reported at      : %s' % CREG.sanitize_display(client.get('build_reported_at') or '-'))
+    print('Build status           : %s' % drift)
     print('Description    : %s' % (note or '-'))
     print('Service count  : %s' % len(enabled))
     print('Tag count      : %s' % len(tags))

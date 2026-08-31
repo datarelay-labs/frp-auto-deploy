@@ -229,7 +229,8 @@ export FRP_CTL_TEST_ROOT="$SERVER"
 export FRP_CTL_TEST_MENU=1
 run_repl "$SERVER" "$WORKDIR/server-menu.out" menu exit || fail "server menu repl"
 grep -q 'Role            : Server' "$WORKDIR/server-menu.out" || fail "server role"
-grep -q '2) Manage clients' "$WORKDIR/server-menu.out" || fail "server menu manage clients"
+grep -q '1) Fleet overview' "$WORKDIR/server-menu.out" || fail "server menu fleet"
+grep -q '2) Clients' "$WORKDIR/server-menu.out" || fail "server menu clients"
 grep -q '8) Update FRP' "$WORKDIR/server-menu.out" || fail "server menu frp update"
 pass "FRPCTL_SERVER_DETECTION"
 
@@ -327,8 +328,10 @@ pass "FRPCTL_REPL_SERVER_CLIENT_INFO"
 pass "FRPCTL_REPL_SERVER_ENROLL_DISPATCH"
 
 export FRP_CTL_DRY_RUN=1
-run_repl "$SERVER" "$WORKDIR/guided-enroll.out" menu 3 1 zt-ssh-client "" aella "" 12 exit \
+# Server fleet menu: 3=Services/Ports → 2=Create enrollment → 1=Zero-touch SSH; 10=Exit
+run_repl "$SERVER" "$WORKDIR/guided-enroll.out" menu 3 2 1 zt-ssh-client "" aella "" 10 exit \
   || fail "guided enroll zero-touch"
+grep -q 'Services / Ports' "$WORKDIR/guided-enroll.out" || fail "guided enroll services menu"
 grep -q 'Create enrollment' "$WORKDIR/guided-enroll.out" || fail "guided enroll heading"
 grep -q 'Zero-touch SSH' "$WORKDIR/guided-enroll.out" || fail "guided enroll zero-touch option"
 grep -q 'Manual Enrollment Code' "$WORKDIR/guided-enroll.out" || fail "guided enroll manual option"
@@ -337,7 +340,8 @@ grep -q 'DISPATCH frp-create-client --platform linux --one-line --ssh --ssh-user
   || fail "guided enroll did not dispatch zero-touch"
 pass "FRPCTL_GUIDED_ENROLL_ZERO_TOUCH"
 
-run_repl "$SERVER" "$WORKDIR/guided-enroll-manual.out" menu 3 2 12 exit || fail "guided enroll manual"
+run_repl "$SERVER" "$WORKDIR/guided-enroll-manual.out" menu 3 2 2 10 exit || fail "guided enroll manual"
+grep -q 'Create enrollment' "$WORKDIR/guided-enroll-manual.out" || fail "guided enroll manual heading"
 grep -q 'DISPATCH frp-create-client' "$WORKDIR/guided-enroll-manual.out" \
   || fail "guided enroll manual dispatch"
 if grep -q 'DISPATCH frp-create-client --one-line' "$WORKDIR/guided-enroll-manual.out"; then
@@ -576,7 +580,8 @@ fi
 pass "NO_SECRET_HISTORY_PERSISTENCE"
 
 export FRP_CTL_DRY_RUN=1
-run_repl "$SERVER" "$WORKDIR/guided-meta.out" menu 2 1 12 12 exit || fail "guided metadata menu"
+# Clients → first client → Back(12) → Exit(10)
+run_repl "$SERVER" "$WORKDIR/guided-meta.out" menu 2 1 12 10 exit || fail "guided metadata menu"
 grep -q 'Set label' "$WORKDIR/guided-meta.out" || fail "guided set label"
 grep -q 'Unset label' "$WORKDIR/guided-meta.out" || fail "guided unset label"
 grep -q 'Set description' "$WORKDIR/guided-meta.out" || fail "guided set description"

@@ -2361,6 +2361,26 @@ if pub:
 op_id=os.environ.get('FRP_CLIENT_OPERATION_ID','').strip()
 if op_id:
     payload['operation_id']=op_id
+root=os.environ.get('FRP_CLIENT_TEST_ROOT') or os.environ.get('FRP_DEPLOY_TEST_ROOT') or ''
+ver_path=Path(root + '/etc/frp-auto-deploy/version') if root else Path('/etc/frp-auto-deploy/version')
+if ver_path.is_file():
+    meta={}
+    for line in ver_path.read_text(encoding='utf-8').splitlines():
+        if '=' not in line:
+            continue
+        k,v=line.split('=',1)
+        meta[k.strip()]=v.strip()
+    mapping={
+        'PROJECT_VERSION':'reported_project_version',
+        'RELEASE_CHANNEL':'reported_release_channel',
+        'SOURCE_REF':'reported_source_ref',
+        'BUNDLE_SHA256':'reported_bundle_sha256',
+        'FRP_VERSION':'reported_frp_version',
+    }
+    for src,dst in mapping.items():
+        val=str(meta.get(src) or '').strip()
+        if val:
+            payload[dst]=val
 print(json.dumps(payload, separators=(',', ':')))
 PY
 )"

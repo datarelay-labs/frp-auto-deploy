@@ -1105,6 +1105,28 @@ customer=acme
 
 # 35. Inventory Model
 
+Server fleet visibility (CLI, read-only):
+
+```text
+Fleet Overview       show fleet
+Port Inventory       show ports
+Last Management Seen last_mgmt_seen_at (server clock)
+Management Stale     LAST MGMT SEEN older than client_stale_days
+Build Drift          reported_* vs server /etc/frp-auto-deploy/version
+Audit Filtering      show audit --since / --event / --format
+Server Diagnostics   test, logs, support-bundle, doctor
+```
+
+Definitions:
+
+```text
+LAST_MGMT_SEEN = last successful authenticated management request (server timestamp)
+MGMT_STALE     = LAST_MGMT_SEEN older than configured threshold (default 30d)
+MGMT_STALE     != FRP tunnel offline
+BUILD_DRIFT    = client reported build differs from server expected build
+BUILD_UNKNOWN  = no trustworthy client build report
+```
+
 장기적으로 Server inventory는 다음 관점을 제공한다.
 
 ```text

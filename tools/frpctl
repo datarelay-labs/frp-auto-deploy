@@ -52,6 +52,46 @@ frpctl_is_server() {
   return 1
 }
 
+frpctl_python_lib() {
+  if [[ -f "${_FRPCTL_DIR}/../lib/frp_fleet.py" ]]; then
+    printf '%s' "${_FRPCTL_DIR}/../lib"
+  elif [[ -d /usr/local/lib/frp-auto-deploy ]]; then
+    printf '%s' /usr/local/lib/frp-auto-deploy
+  else
+    printf '%s' "${_FRPCTL_DIR}/../lib"
+  fi
+}
+
+frpctl_server_lifecycle_dispatch() {
+  local cmd="${1:-}"
+  local libdir
+  libdir="$(frpctl_python_lib)"
+  shift || true
+  PYTHONPATH="${libdir}${PYTHONPATH:+:$PYTHONPATH}" \
+    FRP_DEPLOY_TEST_ROOT="${FRP_DEPLOY_TEST_ROOT:-${FRP_CTL_TEST_ROOT:-}}" \
+    FRP_CTL_TEST_ROOT="${FRP_CTL_TEST_ROOT:-${FRP_DEPLOY_TEST_ROOT:-}}" \
+    FRP_SKIP_SYSTEMD="${FRP_SKIP_SYSTEMD:-}" \
+    python3 "${libdir}/frp_server_lifecycle.py" "$cmd" "$@"
+}
+
+frpctl_show_fleet() {
+  local libdir
+  libdir="$(frpctl_python_lib)"
+  PYTHONPATH="${libdir}${PYTHONPATH:+:$PYTHONPATH}" \
+    FRP_DEPLOY_TEST_ROOT="${FRP_DEPLOY_TEST_ROOT:-${FRP_CTL_TEST_ROOT:-}}" \
+    FRP_CTL_TEST_ROOT="${FRP_CTL_TEST_ROOT:-${FRP_DEPLOY_TEST_ROOT:-}}" \
+    python3 "${libdir}/frp_fleet.py" fleet
+}
+
+frpctl_show_ports() {
+  local libdir
+  libdir="$(frpctl_python_lib)"
+  PYTHONPATH="${libdir}${PYTHONPATH:+:$PYTHONPATH}" \
+    FRP_DEPLOY_TEST_ROOT="${FRP_DEPLOY_TEST_ROOT:-${FRP_CTL_TEST_ROOT:-}}" \
+    FRP_CTL_TEST_ROOT="${FRP_CTL_TEST_ROOT:-${FRP_DEPLOY_TEST_ROOT:-}}" \
+    python3 "${libdir}/frp_fleet.py" ports "$@"
+}
+
 frpctl_read_kv() {
   local file="$1" key="$2"
   if [[ ! -f "$file" ]]; then
@@ -523,19 +563,46 @@ frpctl_print_client_remote_menu() {
   echo "4) Back"
 }
 
+frpctl_print_server_diagnostics_menu() {
+  echo "1) Test server"
+  echo "2) Logs"
+  echo "3) Doctor"
+  echo "4) Create support bundle"
+  echo "5) Back"
+}
+
+frpctl_server_diagnostics_menu() {
+  local choice
+  while true; do
+    echo
+    frpctl_header
+    echo "Server diagnostics"
+    echo "=================="
+    frpctl_print_server_diagnostics_menu
+    echo
+    choice="$(frpctl_read "Select: " "")" || return 1
+    case "$choice" in
+      1) frpctl_server_lifecycle_dispatch test ;;
+      2) frpctl_server_lifecycle_dispatch logs ;;
+      3) frpctl_dispatch doctor || true ;;
+      4) frpctl_server_lifecycle_dispatch support-bundle ;;
+      5) return 0 ;;
+      *) echo "ERROR: select 1-5" >&2 ;;
+    esac
+  done
+}
+
 frpctl_print_server_menu() {
-  echo "1) Show status"
-  echo "2) Manage clients"
-  echo "3) Create enrollment"
-  echo "4) Create enrollments"
-  echo "5) Show enrollments"
-  echo "6) Create backup / Restore backup"
+  echo "1) Fleet overview"
+  echo "2) Clients"
+  echo "3) Services / Ports"
+  echo "4) Enrollments"
+  echo "5) Diagnostics"
+  echo "6) Audit"
   echo "7) Update project"
   echo "8) Update FRP"
-  echo "9) Doctor"
-  echo "10) Show audit"
-  echo "11) Help"
-  echo "12) Exit"
+  echo "9) Help"
+  echo "10) Exit"
 }
 
 frpctl_print_both_menu() {
@@ -1350,38 +1417,49 @@ frpctl_server_menu() {
     fi
     choice="$(frpctl_read "Select: " "")" || return 1
     case "$choice" in
-      1) frpctl_run frp-server-status ;;
+      1) frpctl_show_fleet ;;
       2) frpctl_manage_clients ;;
-      3) frpctl_guided_enroll ;;
-      4) frpctl_run frp-enroll-bulk ;;
-      5) frpctl_run frp-enrollments ;;
-      6)
-        echo "1) Backup"
-        echo "2) Restore"
+      3)
+        echo "1) Port inventory"
+        echo "2) Create enrollment"
+        echo "3) Create enrollments"
+        echo "4) Create backup / Restore backup"
         sub="$(frpctl_read "Select: " "")"
         case "$sub" in
-          1) frpctl_run frp-backup ;;
-          2)
-            path="$(frpctl_read "Backup path: " "")"
-            if [[ -z "$path" ]]; then
-              echo "ERROR: backup path is required" >&2
-              continue
-            fi
-            frpctl_run frp-restore "$path"
+          1) frpctl_show_ports ;;
+          2) frpctl_guided_enroll ;;
+          3) frpctl_run frp-enroll-bulk ;;
+          4)
+            echo "1) Backup"
+            echo "2) Restore"
+            sub2="$(frpctl_read "Select: " "")"
+            case "$sub2" in
+              1) frpctl_run frp-backup ;;
+              2)
+                path="$(frpctl_read "Backup path: " "")"
+                if [[ -z "$path" ]]; then
+                  echo "ERROR: backup path is required" >&2
+                  continue
+                fi
+                frpctl_run frp-restore "$path"
+                ;;
+              *) echo "ERROR: select 1-2" >&2 ;;
+            esac
             ;;
-          *) echo "ERROR: select 1-2" >&2 ;;
+          *) echo "ERROR: select 1-4" >&2 ;;
         esac
         ;;
+      4) frpctl_run frp-enrollments ;;
+      5) frpctl_server_diagnostics_menu ;;
+      6) frpctl_dispatch show audit ;;
       7) frpctl_run frp-project-update ;;
       8) frpctl_run frp-update ;;
-      9) frpctl_dispatch doctor || true ;;
-      10) frpctl_audit_tail ;;
-      11) frpctl_usage ;;
-      12)
+      9) frpctl_usage ;;
+      10)
         echo "Exit."
         return 0
         ;;
-      *) echo "ERROR: select 1-12" >&2 ;;
+      *) echo "ERROR: select 1-10" >&2 ;;
     esac
   done
 }
@@ -1567,20 +1645,70 @@ frpctl_clear_screen() {
   fi
 }
 
-frpctl_audit_tail() {
-  python3 - "${FRP_DEPLOY_TEST_ROOT:-${FRP_CTL_TEST_ROOT:-}}" <<'PY'
-import os, sys
+frpctl_audit_show() {
+  local libdir args_json
+  libdir="$(frpctl_python_lib)"
+  args_json="${1:-[]}"
+  PYTHONPATH="${libdir}${PYTHONPATH:+:$PYTHONPATH}" \
+    FRP_DEPLOY_TEST_ROOT="${FRP_DEPLOY_TEST_ROOT:-${FRP_CTL_TEST_ROOT:-}}" \
+    FRP_CTL_TEST_ROOT="${FRP_CTL_TEST_ROOT:-${FRP_DEPLOY_TEST_ROOT:-}}" \
+    python3 - "$libdir" "$args_json" <<'PY'
+import importlib.util
+import json
+import sys
 from pathlib import Path
-root = sys.argv[1]
-path = Path("/var/log/frp-auto-deploy/audit.jsonl")
-if root:
-    path = Path(root + "/var/log/frp-auto-deploy/audit.jsonl")
-if not path.is_file():
-    print("(no audit log)")
-    raise SystemExit(0)
-lines = path.read_text(encoding="utf-8").splitlines()[-50:]
-print("\n".join(lines) if lines else "(no audit log)")
+
+libdir = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('frp_audit', str(libdir / 'frp_audit.py'))
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+args = json.loads(sys.argv[2] or '[]')
+opts = {}
+i = 0
+while i < len(args):
+    tok = args[i]
+    if tok in ('--since', '--event', '--client', '--group', '--format', '--lines', '-n'):
+        if i + 1 >= len(args):
+            raise SystemExit('ERROR: %s requires a value' % tok)
+        key = tok.lstrip('-').replace('-', '_')
+        if key == 'n':
+            key = 'lines'
+        opts[key] = args[i + 1]
+        i += 2
+        continue
+    raise SystemExit('ERROR: unknown audit option: %s' % tok)
+
+since = opts.get('since')
+event = opts.get('event')
+client_id = opts.get('client')
+group = opts.get('group')
+fmt = (opts.get('format') or 'table').strip().lower()
+limit = int(opts.get('lines') or 500)
+try:
+    rows = mod.query(
+        since=since,
+        event=event,
+        client_id=client_id,
+        group=group,
+        limit=limit,
+    )
+except ValueError as exc:
+    raise SystemExit('ERROR: %s' % exc) from exc
+if fmt == 'json':
+    sys.stdout.write(mod.format_audit_json(rows))
+elif fmt == 'csv':
+    sys.stdout.write(mod.format_audit_csv(rows))
+elif fmt in ('table', ''):
+    text = mod.format_audit_table(rows)
+    sys.stdout.write(text if text.strip() else '(no audit log)\n')
+else:
+    raise SystemExit('ERROR: unknown format: %s' % fmt)
 PY
+}
+
+frpctl_audit_tail() {
+  frpctl_audit_show '[]'
 }
 
 frpctl_known_commands() {
@@ -1961,6 +2089,12 @@ frpctl_dispatch_canonical() {
     show_status) frpctl_status $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
     show_version) echo; frpctl_print_version; echo ;;
     show_clients) frpctl_require_server || return 1; frpctl_invoke frp-clients $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
+    show_fleet) frpctl_require_server || return 1; frpctl_show_fleet ;;
+    show_ports)
+      frpctl_require_server || return 1
+      # shellcheck disable=SC2086
+      frpctl_show_ports $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result")
+      ;;
     show_client)
       frpctl_require_server || return 1
       frpctl_invoke frp-client-info \
@@ -1985,7 +2119,10 @@ frpctl_dispatch_canonical() {
       echo
       ;;
     show_enrollments) frpctl_require_server || return 1; frpctl_invoke frp-enrollments ;;
-    show_audit) frpctl_require_server || return 1; frpctl_audit_tail ;;
+    show_audit)
+      frpctl_require_server || return 1
+      frpctl_audit_show "$(python3 -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1]).get("passthrough") or []))' "$result")"
+      ;;
     show_upstream) frpctl_require_server || return 1; frpctl_run frp-upstream $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
     show_services) frpctl_require_client || return 1; frpctl_invoke frp-client list ;;
     show_info) frpctl_require_client || return 1; frpctl_invoke frp-client info ;;
@@ -2104,6 +2241,54 @@ frpctl_dispatch_canonical() {
       frpctl_require_client || return 1
       # shellcheck disable=SC2086
       frpctl_lifecycle_dispatch uninstall $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result")
+      ;;
+    server_test) frpctl_require_server || return 1; frpctl_server_lifecycle_dispatch test ;;
+    server_logs)
+      frpctl_require_server || return 1
+      # shellcheck disable=SC2086
+      frpctl_server_lifecycle_dispatch logs $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result")
+      ;;
+    server_support_bundle)
+      frpctl_require_server || return 1
+      # shellcheck disable=SC2086
+      frpctl_server_lifecycle_dispatch support-bundle $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result")
+      ;;
+    dual_test)
+      if frpctl_is_server; then
+        echo "=== Server test ==="
+        frpctl_server_lifecycle_dispatch test || true
+        echo
+      fi
+      if frpctl_is_client; then
+        echo "=== Client test ==="
+        frpctl_lifecycle_dispatch test || true
+      fi
+      ;;
+    dual_logs)
+      if frpctl_is_server; then
+        echo "=== Server logs ==="
+        # shellcheck disable=SC2086
+        frpctl_server_lifecycle_dispatch logs $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") || true
+        echo
+      fi
+      if frpctl_is_client; then
+        echo "=== Client logs ==="
+        # shellcheck disable=SC2086
+        frpctl_lifecycle_dispatch logs $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") || true
+      fi
+      ;;
+    dual_support_bundle)
+      if frpctl_is_server; then
+        echo "=== Server support bundle ==="
+        # shellcheck disable=SC2086
+        frpctl_server_lifecycle_dispatch support-bundle $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") || true
+        echo
+      fi
+      if frpctl_is_client; then
+        echo "=== Client support bundle ==="
+        # shellcheck disable=SC2086
+        frpctl_lifecycle_dispatch support-bundle $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") || true
+      fi
       ;;
     doctor)
       if ! type frp_doctor_main >/dev/null 2>&1; then

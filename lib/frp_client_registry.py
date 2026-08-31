@@ -864,6 +864,153 @@ def apply_observed_fields(client, hostname=None, source_ip=None, seen_at=None):
     return client
 
 
+def apply_mgmt_seen(client, seen_at=None):
+    """Record successful authenticated management communication (server clock)."""
+    if not isinstance(client, dict):
+        return client
+    client['last_mgmt_seen_at'] = seen_at or utc_now_iso()
+    return client
+
+
+BUILD_REPORT_KEYS = (
+    'reported_project_version',
+    'reported_release_channel',
+    'reported_source_ref',
+    'reported_bundle_sha256',
+    'reported_frp_version',
+)
+
+
+def apply_build_report(client, payload, seen_at=None):
+    """Store client-reported build metadata from an authenticated request."""
+    if not isinstance(client, dict) or not isinstance(payload, dict):
+        return client
+    when = seen_at or utc_now_iso()
+    updated = False
+    for key in BUILD_REPORT_KEYS:
+        short = key.replace('reported_', '')
+        val = payload.get(key)
+        if val is None:
+            val = payload.get(short)
+        if val is None:
+            continue
+        text = str(val).strip()
+        if not text:
+            continue
+        client[key] = text
+        updated = True
+    if updated:
+        client['build_reported_at'] = when
+    return client
+
+
+def parse_iso_timestamp(value):
+    text = str(value or '').strip()
+    if not text:
+        return None
+    if text.endswith('Z'):
+        text = text[:-1] + '+00:00'
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+DURATION_RE = re.compile(r'^([0-9]+)([hd])$', re.IGNORECASE)
+
+
+def parse_duration(value):
+    text = str(value or '').strip().lower()
+    if not text:
+        raise ValueError('duration required')
+    match = DURATION_RE.fullmatch(text)
+    if not match:
+        raise ValueError('invalid duration; use 24h or 30d')
+    amount = int(match.group(1))
+    unit = match.group(2).lower()
+    if amount < 1:
+        raise ValueError('duration must be positive')
+    if unit == 'h':
+        if amount > 8760:
+            raise ValueError('duration too large')
+        return amount * 3600
+    if unit == 'd':
+        if amount > 3650:
+            raise ValueError('duration too large')
+        return amount * 86400
+    raise ValueError('invalid duration unit')
+
+
+def mgmt_activity_class(client, stale_seconds):
+    """Classify management activity: recent, stale, unknown. Not tunnel state."""
+    if not isinstance(client, dict):
+        return 'unknown'
+    if mgmt_status(client) == 'revoked':
+        return 'revoked'
+    ts = parse_iso_timestamp(client.get('last_mgmt_seen_at'))
+    if ts is None:
+        return 'unknown'
+    age = (datetime.now(timezone.utc) - ts).total_seconds()
+    if age <= stale_seconds:
+        return 'recent'
+    return 'stale'
+
+
+def load_server_version_metadata(root=None):
+    root = root if root is not None else os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
+    path = Path(str(root) + '/etc/frp-auto-deploy/version')
+    out = {}
+    if not path.is_file():
+        return out
+    for line in path.read_text(encoding='utf-8').splitlines():
+        if '=' not in line:
+            continue
+        key, val = line.split('=', 1)
+        out[key.strip()] = val.strip()
+    return out
+
+
+def build_drift_class(client, expected=None):
+    """Compare reported client build to server expected build metadata."""
+    if not isinstance(client, dict):
+        return 'unknown'
+    reported_at = client.get('build_reported_at')
+    project = str(client.get('reported_project_version') or '').strip()
+    if not project and not reported_at:
+        return 'unknown'
+    expected = expected or load_server_version_metadata()
+    exp_project = str(expected.get('PROJECT_VERSION') or '').strip()
+    exp_channel = str(expected.get('RELEASE_CHANNEL') or '').strip()
+    exp_ref = str(expected.get('SOURCE_REF') or '').strip()
+    exp_bundle = str(expected.get('BUNDLE_SHA256') or '').strip()
+    exp_frp = str(expected.get('FRP_VERSION') or '').strip()
+    if not exp_project:
+        return 'unknown' if project else 'unknown'
+    drift = False
+    if project and exp_project and project != exp_project:
+        drift = True
+    channel = str(client.get('reported_release_channel') or '').strip()
+    if channel and exp_channel and channel != exp_channel:
+        drift = True
+    ref = str(client.get('reported_source_ref') or '').strip()
+    if ref and exp_ref and ref != exp_ref:
+        drift = True
+    bundle = str(client.get('reported_bundle_sha256') or '').strip()
+    if bundle and exp_bundle and bundle != exp_bundle:
+        drift = True
+    frp = str(client.get('reported_frp_version') or '').strip()
+    if frp and exp_frp and frp != exp_frp:
+        drift = True
+    if drift:
+        return 'drift'
+    if project:
+        return 'current'
+    return 'unknown'
+
+
 def atomic_write_json(path, data, mode=0o600):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

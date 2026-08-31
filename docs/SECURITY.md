@@ -361,3 +361,19 @@ Authorization headers. Support bundles are written with restrictive permissions
 
 `frpctl uninstall` removes local software only. It does not revoke management
 identity or release public port reservations on the server.
+
+## 18. Server fleet visibility and diagnostics
+
+Server-side `show fleet`, `show ports`, management-stale filters, and audit export
+are read-only. They aggregate local registry/state only — no remote client probes.
+
+`last_mgmt_seen_at` is updated only after successful authenticated management
+requests (server clock). Failed auth, replay, or revoked identity must not refresh it.
+
+`frpctl test`, `frpctl logs`, and `frpctl support-bundle` on server hosts follow
+the same redaction rules as client diagnostics. Server support bundles include
+summaries (`registry-summary.redacted.json`), not raw credential fields. Bundles
+use `0600` permissions and safe temporary directories.
+
+Management-stale detection is informational only. It does not trigger auto-revoke,
+auto-release, or registry deletion.
