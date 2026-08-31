@@ -49,8 +49,12 @@ pass "MANUAL_ENROLLMENT_VISIBLE_IN_SHOW"
 pass "MANUAL_PENDING_STATE"
 ! grep -Fq "$MANUAL_SECRET" "$WORK/list1.out" || fail "ENROLLMENT_SECRET_NOT_SHOWN"
 pass "ENROLLMENT_SECRET_NOT_SHOWN"
+grep -q 'purge enrollment <ID>' "$WORK/list1.out" || fail "SHOW_ENROLLMENTS_PURGE_GUIDANCE"
 grep -q 'revoke enrollment <ID>' "$WORK/list1.out" || fail "SHOW_ENROLLMENTS_REVOKE_GUIDANCE"
+grep -q 'automatically retained for 30 days' "$WORK/list1.out" || fail "SHOW_ENROLLMENTS_RETENTION_GUIDANCE"
 pass "SHOW_ENROLLMENTS_REVOKE_GUIDANCE"
+pass "SHOW_ENROLLMENTS_PURGE_GUIDANCE"
+pass "SHOW_ENROLLMENTS_RETENTION_GUIDANCE"
 
 # --- Manual completed / expired / revoked states ---
 python3 - "$TREE" "$MANUAL_ID" <<'PY'

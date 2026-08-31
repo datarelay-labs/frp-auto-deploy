@@ -75,10 +75,11 @@ CLIENT ID, LABEL, and HOSTNAME. `show client <ID>` is the overview.
 disk: manual Enrollment Code records and zero-touch bootstrap tickets. Secrets
 are never printed. Zero-touch issuance that creates both an enrollment file and
 a bootstrap ticket appears once (ticket ID). Lifecycle states are normalized to
-`pending`, `bound`, `completed`, `expired`, or `revoked`. Completed and expired
-records remain visible until existing retention/cleanup removes them
-(`cleanup_expired_bootstrap_tickets` currently retains ticket metadata for
-audit). Use the non-secret enrollment ID with `revoke enrollment <ID>`.
+`pending`, `bound`, `completed`, `expired`, or `revoked`. Terminal records
+(`expired`, `completed`, `revoked`) are retained for
+`enrollment_retention_days` (default 30) and then removed automatically during
+enrollment issuance or allocator startup. Use `revoke enrollment <ID>` for active
+(`pending`/`bound`) credentials and `purge enrollment <ID>` for terminal records.
 
 ## set
 
@@ -148,15 +149,27 @@ discard
 
 Client-local pending changes. `apply` does not release server ports.
 
-## revoke / release / restore
+## revoke / purge / release / restore
 
 ```text
 revoke client <ID>
 revoke enrollment <ID>
+purge enrollment <ID>
+purge enrollments --older-than <days>
 release service <ID> <service-id>
 release client <ID>
 restore backup <path>
 ```
+
+`revoke enrollment` prevents a pending or bound enrollment credential from being
+used. It does not apply to terminal records (`expired`, `completed`, `revoked`).
+
+`purge enrollment` permanently removes terminal enrollment metadata. Active
+pending or bound enrollments must be revoked first. Bulk purge matches terminal
+records whose terminal timestamp is older than the requested threshold.
+
+Terminal enrollment JSON retention and audit log retention are separate.
+Purging enrollment metadata does not delete audit events.
 
 `release` keeps the existing confirmation, locking, and passive port recheck.
 Releasing the last service (or `release client`) leaves a management-only

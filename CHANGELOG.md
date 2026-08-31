@@ -32,6 +32,10 @@ from 2.1.0, newly generated Zero-touch / enrollment installer commands use the
 
 ## Unreleased (post-2.1.1 / feature/windows-client)
 
+- Enrollment retention hardening: terminal records (`expired`, `completed`,
+  `revoked`) retained for `enrollment_retention_days` (default 30), then
+  pair-aware automatic cleanup; `purge enrollment` / `purge enrollments
+  --older-than` for manual housekeeping; audit log retention unchanged
 - Windows TLS: enforce hostname/IP SAN verification on the pinned-.NET path (no `-or $true` bypass)
 - Windows zero-service tickets stay management-only (no automatic RDP)
 - `release` clears port reservations but keeps the management client record; `revoke` remains identity-only

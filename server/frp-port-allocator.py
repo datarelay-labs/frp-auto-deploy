@@ -85,6 +85,24 @@ def _load_client_registry():
 CREG = _load_client_registry()
 
 
+def _load_enrollment_lifecycle():
+    candidates = [
+        Path(__file__).resolve().parent / 'frp_enrollment_lifecycle.py',
+        Path(__file__).resolve().parent.parent / 'lib' / 'frp_enrollment_lifecycle.py',
+        Path('/usr/local/lib/frp-auto-deploy/frp_enrollment_lifecycle.py'),
+    ]
+    for path in candidates:
+        if path.is_file():
+            spec = importlib.util.spec_from_file_location('frp_enrollment_lifecycle', path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+    return None
+
+
+ELC = _load_enrollment_lifecycle()
+
+
 def unsupported_registry_message(state=None):
     version = None
     if isinstance(state, dict) and 'schema_version' in state:
@@ -282,9 +300,15 @@ def bootstrap_file_path(bootstrap_dir, ticket_id):
     return Path(bootstrap_dir) / (ticket_id.lower() + '.json')
 
 
-def cleanup_expired_bootstrap_tickets(bootstrap_dir, now=None, keep_id=None):
-    """Retain ticket metadata so administrators can audit expired enrollments."""
-    return
+def cleanup_expired_bootstrap_tickets(bootstrap_dir, now=None, keep_id=None, cfg=None):
+    """Pair-aware retention cleanup for terminal enrollment metadata."""
+    del keep_id  # retained for call-site compatibility; purge never targets active rows
+    if ELC is None or not cfg:
+        return
+    try:
+        ELC.maybe_run_retention_cleanup(cfg, force=False, audit_emit=ELC.load_audit_emit(), now=now)
+    except Exception:
+        return
 
 
 def issue_bootstrap_ticket(enrollments_dir, bootstrap_dir, services, ttl, note='', label=''):
@@ -338,7 +362,20 @@ def issue_bootstrap_ticket(enrollments_dir, bootstrap_dir, services, ttl, note='
             os.chmod(str(enrollments_dir), 0o700)
         except OSError:
             pass
-    cleanup_expired_bootstrap_tickets(bootstrap_dir, now)
+    cleanup_expired_bootstrap_tickets(bootstrap_dir, now, cfg={
+        'enrollments_dir': str(enrollments_dir),
+        'bootstrap_dir': str(bootstrap_dir),
+        'registry_file': str(Path(enrollments_dir).parent / 'registry.json'),
+    })
+    if ELC is not None:
+        try:
+            ELC.maybe_run_retention_cleanup({
+                'enrollments_dir': str(enrollments_dir),
+                'bootstrap_dir': str(bootstrap_dir),
+                'registry_file': str(Path(enrollments_dir).parent / 'registry.json'),
+            }, force=True, audit_emit=ELC.load_audit_emit(), now=now)
+        except Exception:
+            pass
     enroll_path = enrollment_file_path(enrollments_dir, enrollment_id)
     ticket_path = bootstrap_file_path(bootstrap_dir, ticket_id)
     if enroll_path is None or ticket_path is None:
@@ -741,8 +778,18 @@ class Allocator:
     def save_bootstrap(self, path, record):
         atomic_write_json(path, record, mode=0o600)
 
-    def cleanup_expired_bootstrap_tickets(self, now=None, keep_id=None):
-        cleanup_expired_bootstrap_tickets(self.bootstrap_dir, now, keep_id=keep_id)
+    def cleanup_expired_bootstrap_tickets(self, now=None, keep_id=None, force=False):
+        if ELC is None:
+            return
+        try:
+            ELC.maybe_run_retention_cleanup(
+                self.cfg,
+                force=force,
+                audit_emit=ELC.load_audit_emit(),
+                now=now,
+            )
+        except Exception:
+            return
 
     def issue_bootstrap_ticket(self, services, ttl, note='', label=''):
         ensure_secret_dir(self.bootstrap_dir, 0o700)
@@ -787,7 +834,7 @@ class Allocator:
         try:
             with LOCK:
                 with self.registry_lock():
-                    self.cleanup_expired_bootstrap_tickets(keep_id=ticket_id)
+                    self.cleanup_expired_bootstrap_tickets(keep_id=ticket_id, force=False)
                     record = None
                     path = None
                     stored_hash = BOOTSTRAP_DUMMY_HASH
@@ -912,15 +959,8 @@ class Allocator:
 
     def cleanup_expired_enrollments(self):
         now = int(time.time())
-        for path in self.enrollments_dir.glob('*.json'):
-            try:
-                record = load_json(path)
-                if int(record.get('expires_at', 0)) < now - 86400:
-                    path.unlink(missing_ok=True)
-            except Exception:
-                continue
         self.expire_nonces(now)
-        self.cleanup_expired_bootstrap_tickets(now)
+        self.cleanup_expired_bootstrap_tickets(now, force=True)
 
     def load_nonces(self):
         path = self.nonce_file

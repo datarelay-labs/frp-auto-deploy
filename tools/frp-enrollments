@@ -16,6 +16,21 @@ ROOT = os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
 CONFIG = Path(ROOT + '/etc/frp-auto-deploy/config.json')
 
 
+def load_lifecycle():
+    import importlib.util
+    here = Path(__file__).resolve()
+    for path in (
+        here.parent.parent / 'lib' / 'frp_enrollment_lifecycle.py',
+        Path('/usr/local/lib/frp-auto-deploy/frp_enrollment_lifecycle.py'),
+    ):
+        if path.is_file():
+            spec = importlib.util.spec_from_file_location('frp_enrollment_lifecycle', str(path))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+    return None
+
+
 def remap(path):
     path = Path(path)
     if ROOT and not str(path).startswith(ROOT):
@@ -157,8 +172,21 @@ def main(argv=None):
         print('(none)')
     else:
         print()
-        print('Use the enrollment ID with:')
-        print('  revoke enrollment <ID>')
+        print('Actions:')
+        print('  pending/bound:')
+        print('    revoke enrollment <ID>')
+        print()
+        print('  expired/completed/revoked:')
+        print('    purge enrollment <ID>')
+    retention_days = 30
+    lifecycle = load_lifecycle()
+    if lifecycle is not None:
+        try:
+            retention_days = lifecycle.retention_days_from_config(cfg)
+        except Exception:
+            retention_days = lifecycle.DEFAULT_RETENTION_DAYS
+    print()
+    print('Terminal records are automatically retained for %s days.' % retention_days)
     return 0
 
 
