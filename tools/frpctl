@@ -7,20 +7,6 @@ set -euo pipefail
 _FRPCTL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _FRP_CTL_SESSION_HIST=()
 _FRP_CTL_RC=0
-if [[ -f "${_FRPCTL_DIR}/../lib/frp-doctor-common.sh" ]]; then
-  # shellcheck source=../lib/frp-doctor-common.sh
-  . "${_FRPCTL_DIR}/../lib/frp-doctor-common.sh"
-elif [[ -f /usr/local/lib/frp-auto-deploy/frp-doctor-common.sh ]]; then
-  # shellcheck disable=SC1091
-  . /usr/local/lib/frp-auto-deploy/frp-doctor-common.sh
-fi
-if [[ -f "${_FRPCTL_DIR}/../lib/frp-client-lifecycle.sh" ]]; then
-  # shellcheck source=../lib/frp-client-lifecycle.sh
-  . "${_FRPCTL_DIR}/../lib/frp-client-lifecycle.sh"
-elif [[ -f /usr/local/lib/frp-auto-deploy/frp-client-lifecycle.sh ]]; then
-  # shellcheck disable=SC1091
-  . /usr/local/lib/frp-auto-deploy/frp-client-lifecycle.sh
-fi
 
 frpctl_path() {
   local p="$1"
@@ -31,6 +17,42 @@ frpctl_path() {
     printf '%s' "$p"
   fi
 }
+
+# Prefer remapped installed libdir under FRP_*_TEST_ROOT, then checkout, then
+# the live /usr/local install. Never rely on a developer /home/... path.
+frpctl_installed_libdir() {
+  local cand
+  cand="$(frpctl_path /usr/local/lib/frp-auto-deploy)"
+  if [[ -d "$cand" ]]; then
+    printf '%s' "$cand"
+    return 0
+  fi
+  if [[ -d /usr/local/lib/frp-auto-deploy ]]; then
+    printf '%s' /usr/local/lib/frp-auto-deploy
+    return 0
+  fi
+  return 1
+}
+
+_frpctl_source_lib() {
+  local name="$1"
+  local cand
+  # Development checkout: tools/frpctl → ../lib/
+  if [[ -f "${_FRPCTL_DIR}/../lib/${name}" ]]; then
+    # shellcheck disable=SC1090
+    . "${_FRPCTL_DIR}/../lib/${name}"
+    return 0
+  fi
+  if cand="$(frpctl_installed_libdir)" && [[ -f "${cand}/${name}" ]]; then
+    # shellcheck disable=SC1090
+    . "${cand}/${name}"
+    return 0
+  fi
+  return 1
+}
+
+_frpctl_source_lib frp-doctor-common.sh || true
+_frpctl_source_lib frp-client-lifecycle.sh || true
 
 frpctl_is_client() {
   if [[ -f "$(frpctl_path /etc/frp/client-state.json)" ]]; then
@@ -53,13 +75,16 @@ frpctl_is_server() {
 }
 
 frpctl_python_lib() {
+  local cand
   if [[ -f "${_FRPCTL_DIR}/../lib/frp_fleet.py" ]]; then
     printf '%s' "${_FRPCTL_DIR}/../lib"
-  elif [[ -d /usr/local/lib/frp-auto-deploy ]]; then
-    printf '%s' /usr/local/lib/frp-auto-deploy
-  else
-    printf '%s' "${_FRPCTL_DIR}/../lib"
+    return 0
   fi
+  if cand="$(frpctl_installed_libdir)" && [[ -f "${cand}/frp_fleet.py" || -d "$cand" ]]; then
+    printf '%s' "$cand"
+    return 0
+  fi
+  printf '%s' "${_FRPCTL_DIR}/../lib"
 }
 
 frpctl_server_lifecycle_dispatch() {
@@ -302,13 +327,13 @@ frpctl_invoke() {
 }
 
 frpctl_grammar_py() {
-  local here
+  local here cand
   if [[ -n "${_FRPCTL_DIR:-}" && -f "${_FRPCTL_DIR}/../lib/frp_ctl_grammar.py" ]]; then
     printf '%s' "${_FRPCTL_DIR}/../lib/frp_ctl_grammar.py"
     return 0
   fi
-  if [[ -f /usr/local/lib/frp-auto-deploy/frp_ctl_grammar.py ]]; then
-    printf '%s' /usr/local/lib/frp-auto-deploy/frp_ctl_grammar.py
+  if cand="$(frpctl_installed_libdir)" && [[ -f "${cand}/frp_ctl_grammar.py" ]]; then
+    printf '%s' "${cand}/frp_ctl_grammar.py"
     return 0
   fi
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -321,13 +346,13 @@ frpctl_grammar_py() {
 }
 
 frpctl_repl_py() {
-  local here
+  local here cand
   if [[ -n "${_FRPCTL_DIR:-}" && -f "${_FRPCTL_DIR}/../lib/frp_ctl_repl.py" ]]; then
     printf '%s' "${_FRPCTL_DIR}/../lib/frp_ctl_repl.py"
     return 0
   fi
-  if [[ -f /usr/local/lib/frp-auto-deploy/frp_ctl_repl.py ]]; then
-    printf '%s' /usr/local/lib/frp-auto-deploy/frp_ctl_repl.py
+  if cand="$(frpctl_installed_libdir)" && [[ -f "${cand}/frp_ctl_repl.py" ]]; then
+    printf '%s' "${cand}/frp_ctl_repl.py"
     return 0
   fi
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
