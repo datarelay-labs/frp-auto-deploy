@@ -65,9 +65,7 @@ EOF
 chmod 600 "$CLIENT/etc/frp/frpc.toml"
 
 cat >"$CLIENT/etc/frp/client-identity.key" <<'EOF'
------BEGIN PRIVATE KEY-----
-TESTKEY
------END PRIVATE KEY-----
+TEST-IDENTITY-KEY-FIXTURE-NOT-A-REAL-KEY
 EOF
 echo 'pub' >"$CLIENT/etc/frp/client-identity.pub"
 echo 'mac' >"$CLIENT/etc/frp/client-identity.mac"
