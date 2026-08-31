@@ -306,7 +306,8 @@ function Save-FrpClientState {
         [string]$Transport = 'tcp',
         [string]$ProjectVersion,
         [string]$FrpVersion,
-        [string]$InstallStatus
+        [string]$InstallStatus,
+        $ManagementTimeOffsetSec = $null
     )
     Initialize-FrpDirectories
     $transport = ([string]$Transport).Trim().ToLowerInvariant()
@@ -342,6 +343,15 @@ function Save-FrpClientState {
         frp_version      = $(if ($FrpVersion) { $FrpVersion } else { Get-FrpUpstreamVersion })
         platform         = 'windows'
         install_status   = $(if ($InstallStatus) { $InstallStatus } elseif (-not $enabledAny) { 'management_only' } else { 'installed' })
+    }
+    $offset = $null
+    if (Get-Command Test-FrpValidateOffset -ErrorAction SilentlyContinue) {
+        $offset = Test-FrpValidateOffset -Value $ManagementTimeOffsetSec
+    } elseif ($null -ne $ManagementTimeOffsetSec) {
+        try { $offset = [int64]$ManagementTimeOffsetSec } catch { $offset = $null }
+    }
+    if ($null -ne $offset) {
+        $state['management_time_offset_sec'] = [int64]$offset
     }
     $path = Get-FrpStatePath
     $json = Get-FrpCanonicalJson -Object $state

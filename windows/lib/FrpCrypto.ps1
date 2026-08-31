@@ -752,6 +752,22 @@ function Get-FrpEnrollmentSignature {
     return Get-FrpHmacHex -Secret $Secret -Message ("${Timestamp}`n${Body}")
 }
 
+function Get-FrpEnrollmentChallengeSignature {
+    <#
+    .SYNOPSIS
+      HMAC over challenge_id + nonce + body (clock-skew tolerant enrollment).
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Secret,
+        [Parameter(Mandatory = $true)][string]$ChallengeId,
+        [Parameter(Mandatory = $true)][string]$Nonce,
+        [Parameter(Mandatory = $true)][string]$Body
+    )
+    $cid = ([string]$ChallengeId).Trim().ToLowerInvariant()
+    $n = ([string]$Nonce).Trim().ToLowerInvariant()
+    return Get-FrpHmacHex -Secret $Secret -Message ("${cid}`n${n}`n${Body}")
+}
+
 function New-FrpNonce { Initialize-FrpCryptoTypes; return [FrpCryptoNative]::NewNonceHex() }
 function New-FrpClientId { Initialize-FrpCryptoTypes; return [FrpCryptoNative]::NewClientIdHex() }
 function Get-FrpSha256Hex { param([Parameter(Mandatory = $true)][byte[]]$Bytes); Initialize-FrpCryptoTypes; return [FrpCryptoNative]::Sha256Hex($Bytes) }

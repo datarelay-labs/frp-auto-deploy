@@ -40,7 +40,7 @@ function Import-FrpWindowsModules {
         throw 'ERROR: cannot locate windows/lib modules'
     }
     foreach ($mod in @(
-            'FrpPaths.ps1', 'FrpCrypto.ps1', 'FrpTls.ps1', 'FrpState.ps1',
+            'FrpPaths.ps1', 'FrpCrypto.ps1', 'FrpTls.ps1', 'FrpClockSync.ps1', 'FrpState.ps1',
             'FrpConfig.ps1', 'FrpProcess.ps1', 'FrpBootstrap.ps1', 'FrpLifecycle.ps1'
         )) {
         . (Join-Path $libDir $mod)
@@ -219,48 +219,6 @@ function Invoke-FrpClientUpdate {
     }
 }
 
-
-function Invoke-FrpClientUninstall {
-    Write-Host 'LOCAL SOFTWARE REMOVED, SERVER RESERVATIONS PRESERVED'
-    Write-Host 'This removes local frpc binaries, config, state, and tools.'
-    Write-Host 'Public port reservations on the server remain until an administrator releases them.'
-    $root = Get-FrpWindowsRoot
-    # Fail-closed: stop must succeed (or process already gone) before removing credentials.
-    try {
-        Stop-FrpClient | Out-Null
-    } catch {
-        Write-Host ("ERROR: failed to stop frpc before uninstall: {0}" -f $_.Exception.Message)
-        return 1
-    }
-    $st = Get-FrpClientStatus
-    if ($st.Running) {
-        Write-Host 'ERROR: frpc still running; refusing to remove credentials'
-        return 1
-    }
-    if (-not (Test-Path -LiteralPath $root)) {
-        Write-Host 'Nothing to remove (already uninstalled).'
-        return 0
-    }
-    try {
-        Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction Stop
-    } catch {
-        Write-Host ("ERROR: failed to remove local install: {0}" -f $_.Exception.Message)
-        if (Test-Path -LiteralPath $root) {
-            Write-Host 'Remaining items:'
-            Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue |
-                ForEach-Object { Write-Host ("  {0}" -f $_.FullName) }
-        }
-        return 1
-    }
-    if (Test-Path -LiteralPath $root) {
-        Write-Host 'ERROR: local install directory still present after Remove-Item'
-        Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue |
-            ForEach-Object { Write-Host ("  {0}" -f $_.FullName) }
-        return 1
-    }
-    Write-Host ("Removed: {0}" -f $root)
-    return 0
-}
 
 function Invoke-FrpClientDoctor {
     $issues = 0

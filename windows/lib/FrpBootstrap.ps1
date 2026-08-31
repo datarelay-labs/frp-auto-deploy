@@ -158,6 +158,40 @@ function Invoke-FrpBootstrapRedeem {
     }
 }
 
+function Invoke-FrpEnrollChallenge {
+    param(
+        [Parameter(Mandatory = $true)][string]$AllocatorUrl,
+        [Parameter(Mandatory = $true)][string]$EnrollmentId
+    )
+    $origin = Get-FrpAllocatorOrigin -AllocatorUrl $AllocatorUrl
+    $url = "$origin/enroll/challenge"
+    $headers = @{ 'X-Enrollment-ID' = $EnrollmentId }
+    $result = Invoke-FrpHttpsExchange -Method POST -Url $url -Headers $headers
+    $code = [int]$result.StatusCode
+    if ($code -eq 404) {
+        return @{ Legacy = $true }
+    }
+    if ($code -ne 200) {
+        $err = 'failed'
+        try {
+            $parsed = $result.Body | ConvertFrom-Json
+            if ($parsed.error) { $err = [string]$parsed.error }
+        } catch { }
+        throw ("ERROR: allocator rejected enrollment challenge: {0}" -f $err)
+    }
+    $data = $result.Body | ConvertFrom-Json
+    if (-not $data.challenge_id -or -not $data.nonce) {
+        throw 'ERROR: enrollment challenge response is incomplete'
+    }
+    return @{
+        Legacy       = $false
+        ChallengeId  = [string]$data.challenge_id
+        Nonce        = [string]$data.nonce
+        ServerTime   = $(if ($null -ne $data.server_time) { [int64]$data.server_time } else { $null })
+        ExpiresAt    = $(if ($null -ne $data.expires_at) { [int64]$data.expires_at } else { $null })
+    }
+}
+
 function Invoke-FrpEnroll {
     param(
         [Parameter(Mandatory = $true)][string]$AllocatorUrl,
@@ -166,7 +200,8 @@ function Invoke-FrpEnroll {
         [Parameter(Mandatory = $true)][string]$MachineId,
         [Parameter(Mandatory = $true)][string]$Hostname,
         [Parameter(Mandatory = $true)]$Services,
-        [string]$PublicPem
+        [string]$PublicPem,
+        $ManagementTimeOffsetSec = $null
     )
     $enrollServices = Get-FrpEnrollServiceList -Services $Services
     $payload = [ordered]@{
@@ -179,18 +214,80 @@ function Invoke-FrpEnroll {
         $payload['mgmt_alg'] = 'ecdsa-p256-sha256'
     }
     $body = Get-FrpCanonicalJson -Object $payload
-    $ts = [int64]([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())
-    $sig = Get-FrpEnrollmentSignature -Secret $EnrollmentSecret -Timestamp ([string]$ts) -Body $body
-    $headers = @{
-        'X-Enrollment-ID' = $EnrollmentId
-        'X-Timestamp'     = [string]$ts
-        'X-Signature'     = $sig
+
+    $offset = Test-FrpValidateOffset -Value $ManagementTimeOffsetSec
+    if ($null -eq $offset) {
+        $offset = Get-FrpManagementTimeOffsetFromState
     }
-    $respText = Invoke-FrpHttpsJson -Method POST -Url $AllocatorUrl -Body $body -Headers $headers
-    $data = $respText | ConvertFrom-Json
-    if ($data.error) {
-        throw ("ERROR: allocator rejected enrollment: {0}" -f [string]$data.error)
+
+    $challenge = Invoke-FrpEnrollChallenge -AllocatorUrl $AllocatorUrl -EnrollmentId $EnrollmentId
+    $useLegacy = [bool]$challenge.Legacy
+    $clockRetry = 0
+    $respText = $null
+    $data = $null
+
+    while ($true) {
+        if (-not $useLegacy) {
+            if ($null -ne $challenge.ServerTime) {
+                $offset = Get-FrpOffsetFromServerTime -ServerTime $challenge.ServerTime
+                Write-FrpMaybeSkewWarning -Offset $offset
+            }
+            $sig = Get-FrpEnrollmentChallengeSignature -Secret $EnrollmentSecret `
+                -ChallengeId $challenge.ChallengeId -Nonce $challenge.Nonce -Body $body
+            $headers = @{
+                'X-Enrollment-ID'               = $EnrollmentId
+                'X-Enrollment-Challenge-ID'     = $challenge.ChallengeId
+                'X-Enrollment-Challenge-Nonce'  = $challenge.Nonce
+                'X-Signature'                   = $sig
+            }
+            $exchange = Invoke-FrpHttpsExchange -Method POST -Url $AllocatorUrl -Body $body -Headers $headers
+            $respText = $exchange.Body
+            if ([int]$exchange.StatusCode -lt 200 -or [int]$exchange.StatusCode -ge 300) {
+                $errMsg = "HTTP $($exchange.StatusCode)"
+                try {
+                    $errObj = $respText | ConvertFrom-Json
+                    if ($errObj.error) { $errMsg = [string]$errObj.error }
+                } catch { }
+                throw ("ERROR: allocator rejected enrollment: {0}" -f $errMsg)
+            }
+            $data = $respText | ConvertFrom-Json
+            if ($data.error) {
+                throw ("ERROR: allocator rejected enrollment: {0}" -f [string]$data.error)
+            }
+            break
+        }
+
+        # Legacy X-Timestamp enrollment (servers without /enroll/challenge).
+        $ts = Get-FrpManagementTimestamp -Offset $offset
+        $sig = Get-FrpEnrollmentSignature -Secret $EnrollmentSecret -Timestamp ([string]$ts) -Body $body
+        $headers = @{
+            'X-Enrollment-ID' = $EnrollmentId
+            'X-Timestamp'     = [string]$ts
+            'X-Signature'     = $sig
+        }
+        $exchange = Invoke-FrpHttpsExchange -Method POST -Url $AllocatorUrl -Body $body -Headers $headers
+        $respText = $exchange.Body
+        try {
+            $data = $respText | ConvertFrom-Json
+        } catch {
+            throw 'ERROR: allocator returned malformed JSON'
+        }
+        if (([int]$exchange.StatusCode -lt 200 -or [int]$exchange.StatusCode -ge 300) -or $data.error) {
+            $errMsg = if ($data.error) { [string]$data.error } else { "HTTP $($exchange.StatusCode)" }
+            if ((Test-FrpIsClockSkewError -Message $errMsg) -and $clockRetry -eq 0) {
+                try {
+                    $offset = Sync-FrpManagementOffset -AllocatorUrl $AllocatorUrl
+                } catch {
+                    # Fall through to reject if /time is unavailable.
+                }
+                $clockRetry = 1
+                continue
+            }
+            throw ("ERROR: allocator rejected enrollment: {0}" -f $errMsg)
+        }
+        break
     }
+
     # Verify response HMAC over payload without response_hmac field
     $received = [string]$data.response_hmac
     $copy = ConvertTo-FrpPlainObject $data
@@ -209,13 +306,25 @@ function Invoke-FrpEnroll {
     if ($transport -ne 'tcp' -and $transport -ne 'wss') {
         throw 'ERROR: allocator returned an unsupported FRP transport'
     }
+
+    $serverTime = $null
+    if ($null -ne $data.server_time) {
+        try { $serverTime = [int64]$data.server_time } catch { $serverTime = $null }
+    }
+    if ($null -ne $serverTime) {
+        $offset = Get-FrpOffsetFromServerTime -ServerTime $serverTime
+        Write-FrpMaybeSkewWarning -Offset $offset
+    }
+
     return @{
-        FrpServer       = [string]$data.frp_server
-        FrpServerPort   = [int]$data.frp_server_port
-        FrpTransport    = $transport
-        TokenCiphertext = [string]$data.token_ciphertext
-        Services        = @($data.services)
-        MgmtStatus      = [string]$data.mgmt_status
+        FrpServer                 = [string]$data.frp_server
+        FrpServerPort             = [int]$data.frp_server_port
+        FrpTransport              = $transport
+        TokenCiphertext           = [string]$data.token_ciphertext
+        Services                  = @($data.services)
+        MgmtStatus                = [string]$data.mgmt_status
+        ServerTime                = $serverTime
+        ManagementTimeOffsetSec   = $offset
     }
 }
 
@@ -415,7 +524,8 @@ function Invoke-FrpZeroTouch {
         Save-FrpClientState -AllocatorUrl $AllocatorUrl -FrpServer $enroll.FrpServer `
             -FrpServerPort $enroll.FrpServerPort -Hostname $Hostname -MachineId $machineId `
             -HostId $hostId -Services $merged -Transport $enroll.FrpTransport `
-            -InstallStatus $initialStatus | Out-Null
+            -InstallStatus $initialStatus `
+            -ManagementTimeOffsetSec $enroll.ManagementTimeOffsetSec | Out-Null
 
         New-FrpClientToml -ServerAddr $enroll.FrpServer -ServerPort $enroll.FrpServerPort `
             -Token $token -HostId $hostId -Services $merged -Transport $enroll.FrpTransport | Out-Null

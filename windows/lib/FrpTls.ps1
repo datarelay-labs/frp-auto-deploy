@@ -380,10 +380,11 @@ function New-FrpPinnedServerCertificateValidator {
     return @{ Callback = $validator; Ca = $caHandle }
 }
 
-function Invoke-FrpHttpsJson {
+function Invoke-FrpHttpsExchange {
     <#
     .SYNOPSIS
-      HTTPS JSON request using the pinned project CA. Never installs a permanent bypass.
+      HTTPS JSON request using the pinned project CA. Returns StatusCode + Body.
+      Never disables TLS verification. Never installs a permanent bypass.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$Method,
@@ -408,29 +409,39 @@ function Invoke-FrpHttpsJson {
         $tmpBody = $null
         $tmpResp = [System.IO.Path]::GetTempFileName()
         $args = @(
-            '--silent', '--show-error', '--fail',
+            '--silent', '--show-error',
             '--max-time', ([string]$TimeoutSec),
             '--cacert', $CaPath,
             '-X', $Method.ToUpperInvariant(),
-            '-H', 'Content-Type: application/json'
+            '-H', 'Content-Type: application/json',
+            '-w', '%{http_code}'
         )
         if ($Headers) {
             foreach ($k in $Headers.Keys) {
                 $args += @('-H', ("{0}: {1}" -f $k, $Headers[$k]))
             }
         }
-        if ($null -ne $Body) {
+        if ($null -ne $Body -and $Method.ToUpperInvariant() -ne 'GET') {
             $tmpBody = [System.IO.Path]::GetTempFileName()
             [System.IO.File]::WriteAllText($tmpBody, $Body, [System.Text.UTF8Encoding]::new($false))
             $args += @('--data-binary', "@$tmpBody")
         }
         $args += @('-o', $tmpResp, $Url)
         try {
-            $p = Start-Process -FilePath 'curl.exe' -ArgumentList $args -Wait -PassThru -NoNewWindow
-            if ($p.ExitCode -ne 0) {
+            $codeText = & curl.exe @args 2>$null
+            $exit = $LASTEXITCODE
+            $respBody = ''
+            if (Test-Path -LiteralPath $tmpResp) {
+                $respBody = [System.IO.File]::ReadAllText($tmpResp, [System.Text.Encoding]::UTF8)
+            }
+            if ($exit -ne 0 -and [string]::IsNullOrWhiteSpace($codeText)) {
                 throw 'ERROR: allocator request failed'
             }
-            return [System.IO.File]::ReadAllText($tmpResp, [System.Text.Encoding]::UTF8)
+            $status = 0
+            if (-not [int]::TryParse(([string]$codeText).Trim(), [ref]$status)) {
+                throw 'ERROR: allocator request failed'
+            }
+            return @{ StatusCode = $status; Body = $respBody }
         } finally {
             if ($tmpBody) { Remove-Item -LiteralPath $tmpBody -Force -ErrorAction SilentlyContinue }
             Remove-Item -LiteralPath $tmpResp -Force -ErrorAction SilentlyContinue
@@ -462,17 +473,21 @@ function Invoke-FrpHttpsJson {
         $resp = $req.GetResponse()
         try {
             $sr = New-Object System.IO.StreamReader($resp.GetResponseStream(), [System.Text.Encoding]::UTF8)
-            try { return $sr.ReadToEnd() } finally { $sr.Close() }
+            try {
+                $text = $sr.ReadToEnd()
+                return @{ StatusCode = [int]$resp.StatusCode; Body = $text }
+            } finally { $sr.Close() }
         } finally {
             $resp.Close()
         }
     } catch [System.Net.WebException] {
         $ex = $_.Exception
         if ($ex.Response) {
-            $sr = New-Object System.IO.StreamReader($ex.Response.GetResponseStream(), [System.Text.Encoding]::UTF8)
+            $httpResp = [System.Net.HttpWebResponse]$ex.Response
+            $sr = New-Object System.IO.StreamReader($httpResp.GetResponseStream(), [System.Text.Encoding]::UTF8)
             try {
                 $errBody = $sr.ReadToEnd()
-                if ($errBody) { return $errBody }
+                return @{ StatusCode = [int]$httpResp.StatusCode; Body = $errBody }
             } finally { $sr.Close() }
         }
         throw 'ERROR: allocator request failed'
@@ -480,4 +495,28 @@ function Invoke-FrpHttpsJson {
         [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $previous
         if ($pin.Ca) { $pin.Ca.Dispose() }
     }
+}
+
+function Invoke-FrpHttpsJson {
+    <#
+    .SYNOPSIS
+      HTTPS JSON request using the pinned project CA. Never installs a permanent bypass.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Method,
+        [Parameter(Mandatory = $true)][string]$Url,
+        [string]$Body,
+        [hashtable]$Headers,
+        [string]$CaPath,
+        [int]$TimeoutSec = 30
+    )
+    $result = Invoke-FrpHttpsExchange -Method $Method -Url $Url -Body $Body -Headers $Headers `
+        -CaPath $CaPath -TimeoutSec $TimeoutSec
+    $code = [int]$result.StatusCode
+    if ($code -lt 200 -or $code -ge 300) {
+        # Preserve prior behavior: return error JSON body when present so callers can parse .error
+        if ($result.Body) { return $result.Body }
+        throw ("ERROR: allocator request failed (HTTP {0})" -f $code)
+    }
+    return $result.Body
 }
