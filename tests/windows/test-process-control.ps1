@@ -1,4 +1,4 @@
-# test-process-control.ps1 — may skip if no frpc
+# test-process-control.ps1 — real frpc on Windows; fake process on Linux CI
 . (Join-Path $PSScriptRoot 'common.ps1')
 . (Join-Path $PSScriptRoot '_import.ps1')
 try {
@@ -25,21 +25,20 @@ try {
         Stop-FrpClient | Out-Null
         Write-FrpTestPass 'test-process-control (fake)'
     } else {
+        # Provision hash-verified frpc.exe when missing so Windows CI does not
+        # silently skip critical process coverage.
         if (-not (Test-Path -LiteralPath (Get-FrpFrpcPath))) {
-            Write-Host 'SKIP test-process-control (no frpc.exe)'
-            exit 0
+            Write-Host 'Provisioning hash-verified frpc.exe for process-control test...'
+            Install-FrpWindowsBinary | Out-Null
         }
-        # Real frpc present: actually start/stop. Do not fake PASS for path-only.
+        if (-not (Test-Path -LiteralPath (Get-FrpFrpcPath))) {
+            throw 'ERROR: frpc.exe missing after Install-FrpWindowsBinary'
+        }
         New-Item -ItemType Directory -Path (Get-FrpConfigDir) -Force | Out-Null
         if (-not (Test-Path -LiteralPath (Get-FrpTomlPath))) {
             Set-Content -LiteralPath (Get-FrpTomlPath) -Value "serverAddr = `"127.0.0.1`"`nserverPort = 7000`n"
         }
-        try {
-            $pid1 = Start-FrpClient
-        } catch {
-            Write-Host ("SKIP test-process-control (frpc present but could not start: {0})" -f $_.Exception.Message)
-            exit 0
-        }
+        $pid1 = Start-FrpClient
         Assert-FrpTrue ((Get-FrpClientStatus).Running) 'frpc running'
         $pid2 = Start-FrpClient
         Assert-FrpEqual $pid1 $pid2 'idempotent start'

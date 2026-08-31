@@ -24,6 +24,8 @@ jobs:
           test -f dist/bootstrap-client.ps1
       - name: Run Windows client test suite
         shell: powershell
+        env:
+          FRP_WINDOWS_CRITICAL_NO_SKIP: '1'
         run: |
           # StrictMode avoided: PS 5.1 lacks $IsWindows
           $ErrorActionPreference = 'Stop'
@@ -73,6 +75,8 @@ jobs:
           test -f dist/bootstrap-client.ps1
       - name: Run Windows client test suite
         shell: pwsh
+        env:
+          FRP_WINDOWS_CRITICAL_NO_SKIP: '1'
         run: |
           # StrictMode avoided: PS 5.1 lacks $IsWindows
           $ErrorActionPreference = 'Stop'

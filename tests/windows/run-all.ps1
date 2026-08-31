@@ -82,5 +82,10 @@ foreach ($t in $tests) {
 
 Write-Host ''
 Write-Host ("Summary: passed={0} failed={1} skipped={2}" -f $passed, $failed, $skipped)
+Write-Host ("CRITICAL_TEST_SKIPS={0}" -f $skipped)
 if ($failed -gt 0) { exit 1 }
+if ($skipped -gt 0 -and $env:FRP_WINDOWS_CRITICAL_NO_SKIP -eq '1') {
+    Write-Host 'FAIL: critical Windows coverage requires CRITICAL_TEST_SKIPS=0'
+    exit 1
+}
 exit 0
