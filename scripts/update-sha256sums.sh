@@ -31,6 +31,8 @@ for _name, meta in artifacts.items():
     # without creating a self-referential client-bundle hash.
     if path == 'dist/bootstrap-client.sh':
         meta['sha256'] = sums.get(path, '')
+    if path == 'dist/bootstrap-client.ps1':
+        meta['sha256'] = sums.get(path, '')
 manifest_path.write_text(
     json.dumps(manifest, indent=2, sort_keys=False) + '\n', encoding='utf-8'
 )

@@ -54,26 +54,25 @@ done
 . "$BASE_DIR/lib/frp-server-upgrade.sh"
 
 DEFAULT_CLIENT_INSTALLER_URL="$(frp_default_client_installer_url)"
-# Historical owner/repo, concatenated only to recognize the obsolete project URL.
-LEGACY_CLIENT_INSTALLER_OWNER='RickLee-kr'
-LEGACY_CLIENT_INSTALLER_REPO='frp-auto-deploy'
+DEFAULT_WINDOWS_CLIENT_INSTALLER_URL="$(frp_default_windows_client_installer_url)"
 
 frp_legacy_client_installer_url() {
-  printf 'https://raw.githubusercontent.com/%s/%s/main/dist/bootstrap-client.sh' \
-    "$LEGACY_CLIENT_INSTALLER_OWNER" "$LEGACY_CLIENT_INSTALLER_REPO"
+  frp_legacy_project_client_installer_url
 }
 
 frp_migrate_legacy_client_installer_url() {
-  local legacy
-  legacy="$(frp_legacy_client_installer_url)"
-  if [[ "${CLIENT_INSTALLER_URL:-}" == "$legacy" ]]; then
-    CLIENT_INSTALLER_URL="$(frp_default_client_installer_url)"
+  # Prefer explicit env override; never rewrite it during migration.
+  if [[ -n "${FRP_CLIENT_INSTALLER_URL:-}" ]]; then
+    return 0
   fi
-  if [[ -z "${FRP_CLIENT_INSTALLER_URL:-}" ]] && \
-     [[ "$(frp_release_channel)" == "stable" ]] && \
-     frp_is_official_main_installer_url "${CLIENT_INSTALLER_URL:-}"; then
-    CLIENT_INSTALLER_URL="$(frp_default_client_installer_url)"
+  CLIENT_INSTALLER_URL="$(frp_canonicalize_managed_client_installer_url "${CLIENT_INSTALLER_URL:-}")"
+}
+
+frp_migrate_legacy_windows_client_installer_url() {
+  if [[ -n "${FRP_WINDOWS_CLIENT_INSTALLER_URL:-}" ]]; then
+    return 0
   fi
+  WINDOWS_CLIENT_INSTALLER_URL="$(frp_canonicalize_managed_windows_client_installer_url "${WINDOWS_CLIENT_INSTALLER_URL:-}")"
 }
 
 frp_server_fs() {
@@ -642,6 +641,7 @@ load_existing_server_config() {
   EXISTING_ALLOCATOR_LISTEN_PORT=""
   EXISTING_ALLOCATOR_URL=""
   EXISTING_CLIENT_INSTALLER_URL=""
+  EXISTING_WINDOWS_CLIENT_INSTALLER_URL=""
   EXISTING_DEPLOYMENT_MODE=""
   EXISTING_SERVER_CONFIG=""
   [[ -r "$path" ]] || return 0
@@ -668,6 +668,7 @@ mapping = {
     'allocator_listen_port': 'EXISTING_ALLOCATOR_LISTEN_PORT',
     'allocator_public_port': 'EXISTING_ALLOCATOR_PUBLIC_PORT',
     'client_installer_url': 'EXISTING_CLIENT_INSTALLER_URL',
+    'windows_client_installer_url': 'EXISTING_WINDOWS_CLIENT_INSTALLER_URL',
     'deployment_mode': 'EXISTING_DEPLOYMENT_MODE',
 }
 # public_host wins over public_ip when both exist.
@@ -677,6 +678,7 @@ order = [
     'port_start', 'port_end',
     'listen_port', 'allocator_listen_port', 'allocator_public_port',
     'client_installer_url',
+    'windows_client_installer_url',
     'deployment_mode',
 ]
 seen = {}
@@ -740,6 +742,30 @@ resolve_server_settings() {
   FRP_PORT_END="${FRP_PORT_END:-${EXISTING_PORT_END:-}}"
   CLIENT_INSTALLER_URL="${FRP_CLIENT_INSTALLER_URL:-${EXISTING_CLIENT_INSTALLER_URL:-$DEFAULT_CLIENT_INSTALLER_URL}}"
   frp_migrate_legacy_client_installer_url
+  WINDOWS_CLIENT_INSTALLER_URL="${FRP_WINDOWS_CLIENT_INSTALLER_URL:-${EXISTING_WINDOWS_CLIENT_INSTALLER_URL:-$DEFAULT_WINDOWS_CLIENT_INSTALLER_URL}}"
+  frp_migrate_legacy_windows_client_installer_url
+
+  if [[ -n "${FRP_CLIENT_INSTALLER_URL:-}" ]]; then
+    if ! frp_validate_https_url "$FRP_CLIENT_INSTALLER_URL"; then
+      echo "ERROR: FRP_CLIENT_INSTALLER_URL must be a valid https:// URL" >&2
+      exit 1
+    fi
+  fi
+  if [[ -n "${FRP_WINDOWS_CLIENT_INSTALLER_URL:-}" ]]; then
+    if ! frp_validate_https_url "$FRP_WINDOWS_CLIENT_INSTALLER_URL"; then
+      echo "ERROR: FRP_WINDOWS_CLIENT_INSTALLER_URL must be a valid https:// URL" >&2
+      exit 1
+    fi
+  fi
+  if ! frp_validate_https_url "$CLIENT_INSTALLER_URL"; then
+    echo "ERROR: client_installer_url must be a valid https:// URL" >&2
+    exit 1
+  fi
+  if ! frp_validate_https_url "$WINDOWS_CLIENT_INSTALLER_URL"; then
+    echo "ERROR: windows_client_installer_url must be a valid https:// URL" >&2
+    exit 1
+  fi
+
   FRP_MODE_SWITCH=0
 
   # Public vs listen: dedicated vars win; a single legacy FRP_CONTROL_PORT or
@@ -1007,11 +1033,12 @@ write_server_config() {
     "$FRP_ALLOCATOR_LISTEN_PORT" \
     "$FRP_ALLOCATOR_PUBLIC_URL" \
     "$CLIENT_INSTALLER_URL" \
+    "$WINDOWS_CLIENT_INSTALLER_URL" \
     "$pki" <<'PY'
 import json, os, sys, tempfile
 from pathlib import Path
 path = Path(sys.argv[1])
-pki = sys.argv[11]
+pki = sys.argv[12]
 host = sys.argv[2]
 cfg = {
     'public_host': host,
@@ -1034,6 +1061,7 @@ cfg = {
     'bootstrap_dir': '/var/lib/frp-auto-deploy/bootstrap',
     'token_file': '/etc/frp/server_token',
     'client_installer_url': sys.argv[10],
+    'windows_client_installer_url': sys.argv[11],
     'tls_ca_cert': pki.rstrip('/') + '/ca.crt',
     'tls_server_cert': pki.rstrip('/') + '/server.crt',
     'tls_server_key': pki.rstrip('/') + '/server.key',

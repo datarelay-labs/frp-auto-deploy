@@ -134,8 +134,8 @@ for idx, (mid, client) in enumerate(clients, start=1):
     )
 
 print()
-print('Use CLIENT ID in client commands.')
-print('A unique label or hostname is also accepted as a shortcut.')
+print('Use CLIENT ID for set/unset/revoke/release.')
+print('A unique label or hostname is accepted for show/info only.')
 if clients:
     example = CREG.sanitize_display(CREG.unique_short_id(clients[0][0], all_mids), 16)
     if example:

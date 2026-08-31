@@ -84,6 +84,53 @@ def test_display_and_match():
     pass_('CLIENT_ID_UNIQUE_SHORT')
 
 
+def test_mutation_id_only():
+    state = {
+        'schema_version': 2,
+        'clients': {
+            'aabbccdd00112233': {
+                'hostname': 'ubuntu',
+                'label': 'seoul-web01',
+            },
+            '0303cedf99999999': {
+                'hostname': 'aella',
+                'label': 'lab',
+            },
+        },
+    }
+    mid, _client = creg.resolve_client_id_only(state, 'aabbccdd00112233')
+    if mid != 'aabbccdd00112233':
+        fail('exact full id', mid)
+    mid, _client = creg.resolve_client_id_only(state, 'aabbccdd')
+    if mid != 'aabbccdd00112233':
+        fail('unique short id', mid)
+    for bad in ('seoul-web01', 'ubuntu', 'aella', 'lab', '0303', 'aa'):
+        try:
+            creg.resolve_client_id_only(state, bad)
+            fail('mutation accepted non-id', bad)
+        except creg.ClientLookupError:
+            pass
+    # After label rename, neither old nor new label mutates
+    state['clients']['aabbccdd00112233']['label'] = 'production'
+    for bad in ('seoul-web01', 'production'):
+        try:
+            creg.resolve_client_id_only(state, bad)
+            fail('label still mutates', bad)
+        except creg.ClientLookupError:
+            pass
+    mid, _client = creg.resolve_client_id_only(state, 'aabbccdd00112233')
+    if mid != 'aabbccdd00112233':
+        fail('id still works after label change', mid)
+    # Read-only shortcuts still work
+    mid, _client = creg.resolve_client(state, 'production')
+    if mid != 'aabbccdd00112233':
+        fail('read-only label', mid)
+    mid, _client = creg.resolve_client(state, 'aella')
+    if mid != '0303cedf99999999':
+        fail('read-only hostname', mid)
+    pass_('MUTATION_CLIENT_ID_ONLY')
+
+
 def test_seed_does_not_overwrite():
     client = {
         'label': 'keep-me',
@@ -138,6 +185,7 @@ def test_tags():
 def main():
     test_source_ip()
     test_display_and_match()
+    test_mutation_id_only()
     test_seed_does_not_overwrite()
     test_tags()
     print('CLIENT_REGISTRY_HELPERS=PASS')

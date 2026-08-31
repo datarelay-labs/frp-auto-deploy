@@ -1,6 +1,6 @@
 # Security architecture
 
-This document describes the security model of `frp-auto-deploy` **2.1.0**.
+This document describes the security model of `frp-auto-deploy` **2.1.1**.
 It is not a certification, audit report, or guarantee against a compromised
 root account.
 
@@ -138,12 +138,13 @@ Apply uses a new timestamp/nonce/signature and reuses existing public ports.
 
 ## 9. Revoke vs release
 
-| Action | Management identity | Port reservations |
-| --- | --- | --- |
-| `frp-revoke-client` | blocked | kept |
-| `frp-release-client` / `frp-release-service` | unchanged | freed |
+| Action | Management identity | Port reservations | Client record |
+| --- | --- | --- | --- |
+| `frp-revoke-client` | blocked | kept | kept |
+| `frp-release-client` / `frp-release-service` | unchanged | freed | kept (`services: {}` when none remain) |
 
 Revoke is not release. An administrator can still release after revoke.
+Release does not delete the client record.
 
 ## 10. Disable vs release
 
@@ -234,6 +235,7 @@ bundles. Checksum verification is not the same as signature verification.
 | MITM after CA pin | TLS verification with pinned CA |
 | Stolen Enrollment Code | Usable until expiry / first-machine bind |
 | Stolen Bootstrap Ticket | Same; one-line command is sensitive |
+| Windows Zero-touch command | Downloads `bootstrap-client.ps1`, verifies SHA256 against `SHA256SUMS`, then `-File` (no `irm|iex`); ticket still short-lived/one-time |
 | Replayed management request | Rejected (nonce/timestamp) |
 | Compromised client local root | **Outside** the protection boundary |
 | Compromised server root | **Outside** the protection boundary |

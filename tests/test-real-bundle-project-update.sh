@@ -42,18 +42,19 @@ EOF
 EOF
   printf '{"schema_version":2,"reserved":[6000],"clients":{}}\n' \
     >"$tree/var/lib/frp-auto-deploy/registry.json"
-  cat >"$tree/etc/frp-auto-deploy/version" <<'EOF'
+  cat >"$tree/etc/frp-auto-deploy/version" <<EOF
 PROJECT_VERSION=2.0.0
 FRP_VERSION=0.70.1
-RELEASE_CHANNEL=dev
-SOURCE_REF=main
+RELEASE_CHANNEL=stable
+SOURCE_REF=v${PROJECT_VERSION}
 EOF
 }
 
 TREE="$WORKDIR/tree"
 setup_tree "$TREE"
 BEFORE="$(find "$TREE" -type f -exec sha256sum {} + | sort)"
-env FRP_SERVER_TEST_ROOT="$TREE" bash "$ROOT/dist/bootstrap-server.sh" --upgrade --check \
+env FRP_SERVER_TEST_ROOT="$TREE" FRP_RELEASE_CHANNEL=stable \
+  bash "$ROOT/dist/bootstrap-server.sh" --upgrade --check \
   >"$WORKDIR/bundle-check.out" 2>"$WORKDIR/bundle-check.err" || fail "bundle --check"
 grep -q 'State mutation             : NO' "$WORKDIR/bundle-check.out" || fail "bundle check report"
 AFTER="$(find "$TREE" -type f -exec sha256sum {} + | sort)"
@@ -93,7 +94,7 @@ cp "$ROOT/tools/frp-project-update" "$REMOTE/usr/local/sbin/frp-project-update"
 cp "$ROOT/lib/frp-common.sh" "$REMOTE/usr/local/lib/frp-auto-deploy/frp-common.sh"
 BEFORE2="$(find "$REMOTE" -type f -exec sha256sum {} + | sort)"
 env PATH="$MOCK:$PATH" FRP_TEST_FIXTURE="$FIX" FRP_SERVER_TEST_ROOT="$REMOTE" \
-  FRP_RELEASE_CHANNEL=dev \
+  FRP_RELEASE_CHANNEL=stable \
   FRP_SERVER_PROJECT_SHA256SUMS_URL=https://fixture.invalid/SHA256SUMS \
   FRP_SERVER_PROJECT_UPDATE_URL=https://fixture.invalid/bootstrap-server.sh \
   "$ROOT/tools/frp-project-update" --check \

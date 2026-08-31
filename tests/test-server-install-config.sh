@@ -259,6 +259,64 @@ resolve_server_settings
 [[ "$CLIENT_INSTALLER_URL" != *'/main/'* ]] || fail "stable channel still uses mutable main"
 pass "official main installer URL migrated to immutable tag"
 
+# Prior official stable tag is rewritten to the current release-line tag.
+OFFICIAL_V210_INSTALLER_URL='https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/bootstrap-client.sh'
+EXISTING_V210="$WORKDIR/v210-installer-url.json"
+python3 - "$EXISTING_V210" "$OFFICIAL_V210_INSTALLER_URL" <<'PY'
+import json, sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps({
+  "public_ip": "203.0.113.10",
+  "control_port": 443,
+  "port_start": 6000,
+  "port_end": 6098,
+  "listen_port": 6099,
+  "allocator_public_url": "https://203.0.113.10:6099/enroll",
+  "client_installer_url": sys.argv[2],
+}, indent=2, sort_keys=True) + "\n")
+PY
+reset_env
+export FRP_RELEASE_CHANNEL=stable
+export FRP_SERVER_CONFIG="$EXISTING_V210"
+load_existing_server_config
+resolve_server_settings
+[[ "$CLIENT_INSTALLER_URL" == "$CANONICAL_INSTALLER_URL" ]] || fail "official v2.1.0 installer URL not migrated"
+pass "official prior stable installer URL migrated"
+
+# Explicit FRP_CLIENT_INSTALLER_URL wins over migration.
+reset_env
+export FRP_RELEASE_CHANNEL=stable
+export FRP_SERVER_CONFIG="$EXISTING_V210"
+export FRP_CLIENT_INSTALLER_URL="$OFFICIAL_V210_INSTALLER_URL"
+load_existing_server_config
+resolve_server_settings
+[[ "$CLIENT_INSTALLER_URL" == "$OFFICIAL_V210_INSTALLER_URL" ]] || fail "explicit installer URL was migrated"
+pass "explicit FRP_CLIENT_INSTALLER_URL preserved against migration"
+
+# Look-alike host is not treated as official managed.
+LOOKALIKE_INSTALLER_URL='https://raw.githubusercontent.com.evil.example/datarelay-labs/frp-auto-deploy/v2.1.0/dist/bootstrap-client.sh'
+EXISTING_LOOKALIKE="$WORKDIR/lookalike-installer-url.json"
+python3 - "$EXISTING_LOOKALIKE" "$LOOKALIKE_INSTALLER_URL" <<'PY'
+import json, sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps({
+  "public_ip": "203.0.113.10",
+  "control_port": 443,
+  "port_start": 6000,
+  "port_end": 6098,
+  "listen_port": 6099,
+  "allocator_public_url": "https://203.0.113.10:6099/enroll",
+  "client_installer_url": sys.argv[2],
+}, indent=2, sort_keys=True) + "\n")
+PY
+reset_env
+export FRP_RELEASE_CHANNEL=stable
+export FRP_SERVER_CONFIG="$EXISTING_LOOKALIKE"
+load_existing_server_config
+resolve_server_settings
+[[ "$CLIENT_INSTALLER_URL" == "$LOOKALIKE_INSTALLER_URL" ]] || fail "lookalike installer URL rewritten"
+pass "lookalike installer URL preserved"
+
 # Arbitrary custom installer URLs are left unchanged.
 EXISTING_CUSTOM="$WORKDIR/custom-installer-url.json"
 python3 - "$EXISTING_CUSTOM" <<'PY'

@@ -35,13 +35,16 @@ The canonical client selector is **CLIENT ID**: the immutable short machine
 identity (usually 8 hex characters; longer when that prefix is not unique).
 Changing label, note, tags, or hostname never changes CLIENT ID.
 `show clients` prints CLIENT ID as the first identity column. Tab completes
-CLIENT ID only. A unique label or unique hostname still works when typed by
-hand. An SSH connection string such as `user@host:port` is not a selector.
-An ambiguous prefix fails closed; use a longer CLIENT ID prefix.
+CLIENT ID only. Mutation commands (`set` / `unset` / `revoke` / `release`)
+require CLIENT ID. A unique label or unique hostname is accepted for
+`show` / `show client` only. An SSH connection string such as
+`user@host:port` is not a selector. An ambiguous prefix fails closed; use a
+longer CLIENT ID prefix.
 
-`unset` removes stored metadata. `release` returns public port reservations.
-`revoke` removes management identity. Those three are never aliases of each
-other. There is no `delete client`.
+`unset` removes stored metadata. `release` frees public port reservations and
+keeps the client management record (`services` becomes `{}`). `revoke` removes
+management identity and keeps reservations. Those three are never aliases of
+each other. There is no `delete client`.
 
 ---
 
@@ -124,10 +127,13 @@ create enrollment [--one-line] [--ssh --ssh-user USER --label NAME]
 create enrollments --count N
 create enrollments --csv clients.csv
 create backup [path]
-add service [--preset ssh|http|https|custom] ...
+add service [--preset ssh|http|https|rdp|custom] ...
 ```
 
 `create zero-touch` is the recommended everyday client onboarding path.
+It prompts for client platform (Linux or Windows), then service shortcuts
+(SSH only / RDP only / Configure services). Non-interactive issuance supports
+`--platform linux|windows` and `--rdp` on `frp-create-client`.
 Enrollment Code and bootstrap ticket secrets are never completed or shown by
 `show` / `?` / Tab.
 
@@ -153,6 +159,8 @@ restore backup <path>
 ```
 
 `release` keeps the existing confirmation, locking, and passive port recheck.
+Releasing the last service (or `release client`) leaves a management-only
+client record with `services: {}`; it does not delete the client.
 `restore` keeps archive validation, snapshot, restart, doctor, and rollback.
 
 ## update

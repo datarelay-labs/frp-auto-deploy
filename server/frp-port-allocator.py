@@ -33,7 +33,7 @@ SERVICE_ID_RE = re.compile(r'^[a-z0-9][a-z0-9._-]{0,31}$')
 MAX_SERVICES = 32
 MAX_NAME_LEN = 64
 MAX_HOST_LEN = 253
-ALLOWED_PRESETS = ('ssh', 'http', 'https', 'custom')
+ALLOWED_PRESETS = ('ssh', 'http', 'https', 'rdp', 'custom')
 ALLOWED_PROTOCOLS = ('tcp',)
 NONCE_RE = re.compile(r'^[0-9a-f]{64}$')
 BOOTSTRAP_TICKET_PREFIX = 'bt1'
@@ -595,6 +595,7 @@ def normalize_service(raw):
         'ssh': 'SSH',
         'http': 'HTTP',
         'https': 'HTTPS',
+        'rdp': 'RDP',
     }.get(preset, sid)
     name = str(raw.get('name', '') or default_name).strip() or default_name
     try:
@@ -880,13 +881,14 @@ class Allocator:
         Same-machine redeem remains allowed until this runs. After
         completed_at is set, further redeem attempts fail with
         BOOTSTRAP_TICKET_USED.
+
+        OSError while listing or saving bootstrap state propagates to the
+        enroll path so the mutation fails closed (ticket is not left
+        incorrectly reusable after a successful-looking enroll).
         """
         if not enrollment_id:
             return
-        try:
-            entries = list(self.bootstrap_dir.glob('*.json'))
-        except OSError:
-            return
+        entries = list(self.bootstrap_dir.glob('*.json'))
         now_iso = utc_now_iso()
         for path in entries:
             try:
@@ -905,10 +907,7 @@ class Allocator:
             record['completed_at'] = now_iso
             if not bound:
                 record['bound_machine_id'] = machine_id
-            try:
-                self.save_bootstrap(path, record)
-            except OSError:
-                return
+            self.save_bootstrap(path, record)
             return
 
     def cleanup_expired_enrollments(self):

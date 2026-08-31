@@ -67,6 +67,7 @@ python3 tests/test-frontend-proxy.py
 ./tests/test-release-docs.sh
 ./tests/test-probe-tcp-injection.sh
 ./tests/test-immutable-release-channel.sh
+./tests/test-client-installer-url-migration.sh
 ./tests/test-install-txn-rollback.sh
 python3 tests/test-audit-log.py
 ./tests/test-frp-compatibility.sh

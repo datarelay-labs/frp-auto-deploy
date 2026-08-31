@@ -8,13 +8,15 @@ fi
 FRP_COMMON_LOADED=1
 
 # Defaults match VERSION. A sibling VERSION file overrides project/FRP versions.
-PROJECT_VERSION="${PROJECT_VERSION:-2.1.0}"
+PROJECT_VERSION="${PROJECT_VERSION:-2.1.1}"
 FRP_VERSION="${FRP_VERSION:-0.70.1}"
 # FRP 0.70.1 pkg/util/net/websocket.go FrpWebsocketPath. Not configurable.
 FRP_WEBSOCKET_PATH="${FRP_WEBSOCKET_PATH:-/~!frp}"
 FRP_SINGLE443_BACKEND_PORT="${FRP_SINGLE443_BACKEND_PORT:-7000}"
 FRP_SHA256_AMD64="${FRP_SHA256_AMD64:-333da23d1b9009d7c01638e9ba38cf4600f7d37d393f854e96ee1396adefa9a6}"
 FRP_SHA256_ARM64="${FRP_SHA256_ARM64:-3990f396a9a490ee7f0e5f355287750ed41520064ed999eab443b5e9a78d773d}"
+# Official fatedier/frp v0.70.1 Windows amd64 zip (verified against GitHub release asset).
+FRP_SHA256_WINDOWS_AMD64="${FRP_SHA256_WINDOWS_AMD64:-531f3cd3cc41c0b4f077b54fe6b7dd83c0ff727e7f0bf412a4c78fa279165de5}"
 
 _FRP_COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${_FRP_COMMON_DIR}/../VERSION" ]]; then
@@ -171,6 +173,10 @@ frp_default_client_installer_url() {
   frp_github_raw_url dist/bootstrap-client.sh
 }
 
+frp_default_windows_client_installer_url() {
+  frp_github_raw_url dist/bootstrap-client.ps1
+}
+
 frp_default_client_update_url() {
   frp_github_raw_url dist/bootstrap-client.sh
 }
@@ -209,8 +215,11 @@ frp_validate_https_url() {
 import sys
 from urllib.parse import urlsplit
 
+url = sys.argv[1]
+if not url or any(ord(ch) < 32 or ord(ch) == 127 for ch in url):
+    raise SystemExit(1)
 try:
-    parsed = urlsplit(sys.argv[1])
+    parsed = urlsplit(url)
     port = parsed.port
 except (TypeError, ValueError):
     raise SystemExit(1)
@@ -236,9 +245,113 @@ raise SystemExit(0 if sys.argv[2] in parts else 1)
 PY
 }
 
-frp_is_official_main_installer_url() {
+frp_official_managed_client_installer_ref() {
+  # Print the git ref when URL is exactly the project-managed client installer.
+  # Exact shape only:
+  #   https://raw.githubusercontent.com/<owner>/<repo>/<ref>/dist/bootstrap-client.sh
+  #   https://raw.githubusercontent.com/<owner>/<repo>/<ref>/dist/bootstrap-client.ps1
+  # Managed refs: main | vX.Y.Z
+  # Rejects look-alike hosts, wrong owner/repo, extra path segments, userinfo,
+  # non-default ports, query strings, and fragments.
   local url="${1:-}"
-  [[ "$url" == "https://${FRP_GITHUB_RAW_HOST}/${FRP_GITHUB_OWNER}/${FRP_GITHUB_REPO}/main/dist/bootstrap-client.sh" ]]
+  local artifact="${2:-bootstrap-client.sh}"
+  python3 - "$url" "$FRP_GITHUB_RAW_HOST" "$FRP_GITHUB_OWNER" "$FRP_GITHUB_REPO" "$artifact" <<'PY'
+import re
+import sys
+from urllib.parse import unquote, urlsplit
+
+url, expect_host, expect_owner, expect_repo, expect_name = sys.argv[1:]
+try:
+    parsed = urlsplit(url)
+    port = parsed.port
+except (TypeError, ValueError):
+    raise SystemExit(1)
+if parsed.scheme != "https":
+    raise SystemExit(1)
+if parsed.username is not None or parsed.password is not None:
+    raise SystemExit(1)
+host = (parsed.hostname or "").lower()
+if host != expect_host.lower():
+    raise SystemExit(1)
+if port is not None and port != 443:
+    raise SystemExit(1)
+if parsed.query or parsed.fragment:
+    raise SystemExit(1)
+parts = [unquote(part) for part in parsed.path.split("/") if part]
+if len(parts) != 5:
+    raise SystemExit(1)
+owner, repo, ref, dist, name = parts
+if owner != expect_owner or repo != expect_repo:
+    raise SystemExit(1)
+if dist != "dist" or name != expect_name:
+    raise SystemExit(1)
+if ref != "main" and not re.fullmatch(r"v\d+\.\d+\.\d+", ref):
+    raise SystemExit(1)
+sys.stdout.write(ref)
+PY
+}
+
+frp_official_managed_windows_client_installer_ref() {
+  frp_official_managed_client_installer_ref "${1:-}" "bootstrap-client.ps1"
+}
+
+frp_is_official_managed_client_installer_url() {
+  local url="${1:-}"
+  frp_official_managed_client_installer_ref "$url" "bootstrap-client.sh" >/dev/null 2>&1
+}
+
+frp_is_official_managed_windows_client_installer_url() {
+  local url="${1:-}"
+  frp_official_managed_windows_client_installer_ref "$url" >/dev/null 2>&1
+}
+
+frp_is_official_main_installer_url() {
+  local url="${1:-}" ref
+  ref="$(frp_official_managed_client_installer_ref "$url" "bootstrap-client.sh" 2>/dev/null)" || return 1
+  [[ "$ref" == "main" ]]
+}
+
+frp_legacy_project_client_installer_url() {
+  # Historical owner/repo URL still recognized for one-time migration.
+  printf 'https://raw.githubusercontent.com/%s/%s/main/dist/bootstrap-client.sh' \
+    'RickLee-kr' 'frp-auto-deploy'
+}
+
+frp_canonicalize_managed_client_installer_url() {
+  # Rewrite project-managed installer URLs to the current channel canonical.
+  # Explicit FRP_CLIENT_INSTALLER_URL in the environment disables rewriting.
+  # Custom / look-alike / third-party URLs are returned unchanged.
+  local url="${1:-}"
+  local canonical
+  if [[ -n "${FRP_CLIENT_INSTALLER_URL:-}" ]]; then
+    printf '%s' "$url"
+    return 0
+  fi
+  canonical="$(frp_default_client_installer_url)"
+  if [[ "$url" == "$(frp_legacy_project_client_installer_url)" ]]; then
+    printf '%s' "$canonical"
+    return 0
+  fi
+  if frp_is_official_managed_client_installer_url "$url"; then
+    printf '%s' "$canonical"
+    return 0
+  fi
+  printf '%s' "$url"
+}
+
+frp_canonicalize_managed_windows_client_installer_url() {
+  local url="${1:-}"
+  local canonical
+  if [[ -n "${FRP_WINDOWS_CLIENT_INSTALLER_URL:-}" ]]; then
+    printf '%s' "$url"
+    return 0
+  fi
+  canonical="$(frp_default_windows_client_installer_url)"
+  if frp_is_official_managed_windows_client_installer_url "$url"; then
+    printf '%s' "$canonical"
+    return 0
+  fi
+  printf '%s' "$url"
 }
 
 frp_validate_release_source_metadata() {
