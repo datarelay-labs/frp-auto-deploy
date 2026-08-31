@@ -172,12 +172,17 @@ function Initialize-FrpDpapi {
     } catch {
         throw ('ERROR: System.Security assembly unavailable; DPAPI required on Windows: {0}' -f $_.Exception.Message)
     }
+    # Force runtime resolution only after Add-Type (Save previously referenced types too early).
+    $probe = $null
     try {
-        $null = [System.Security.Cryptography.DataProtectionScope]::LocalMachine
+        $probe = [System.Security.Cryptography.DataProtectionScope]::LocalMachine
         $null = [System.Security.Cryptography.DataProtectionScope]::CurrentUser
         $null = [System.Security.Cryptography.ProtectedData]
     } catch {
         throw ('ERROR: DPAPI types unavailable; cannot persist identity key on Windows: {0}' -f $_.Exception.Message)
+    }
+    if ($null -eq $probe) {
+        throw 'ERROR: DPAPI types unavailable; cannot persist identity key on Windows'
     }
     $script:FrpDpapiReady = $true
     return $true

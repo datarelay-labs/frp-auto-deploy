@@ -30,9 +30,10 @@ jobs:
           Write-Host "WINDOWS_POWERSHELL_ENGINE=$($PSVersionTable.PSVersion) edition=$($PSVersionTable.PSEdition)"
           Write-Host "WINDOWS_POWERSHELL_HOST=$((Get-Process -Id $PID).Path)"
           if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Expected Windows PowerShell Desktop (5.1) host' }
-          # Invoke as a child process so exit codes cannot be swallowed by call-operator quirks.
-          $p = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-File','.\tests\windows\run-all.ps1') -Wait -PassThru -NoNewWindow
-          if ($p.ExitCode -ne 0) { throw ("run-all.ps1 failed with exit {0}" -f $p.ExitCode) }
+          # Native powershell.exe -File (not Start-Process -NoNewWindow): ExitCode can be $null on PS5.1.
+          # Do not use `& run-all.ps1` either: its `exit` terminates this step before the PASS marker.
+          powershell.exe -NoProfile -File .\tests\windows\run-all.ps1
+          if ($LASTEXITCODE -ne 0) { throw ("run-all.ps1 failed with exit {0}" -f $LASTEXITCODE) }
           Write-Host 'WINDOWS_POWERSHELL_5_1=PASS'
       - name: FRP binary smoke (download + hash + version)
         shell: powershell
@@ -77,8 +78,8 @@ jobs:
           $ErrorActionPreference = 'Stop'
           Write-Host "WINDOWS_POWERSHELL_ENGINE=$($PSVersionTable.PSVersion) edition=$($PSVersionTable.PSEdition)"
           if ($PSVersionTable.PSEdition -ne 'Core') { throw 'Expected PowerShell Core (7+) host' }
-          $p = Start-Process -FilePath 'pwsh' -ArgumentList @('-NoProfile','-File','.\tests\windows\run-all.ps1') -Wait -PassThru -NoNewWindow
-          if ($p.ExitCode -ne 0) { throw ("run-all.ps1 failed with exit {0}" -f $p.ExitCode) }
+          pwsh -NoProfile -File .\tests\windows\run-all.ps1
+          if ($LASTEXITCODE -ne 0) { throw ("run-all.ps1 failed with exit {0}" -f $LASTEXITCODE) }
           Write-Host 'WINDOWS_POWERSHELL_7=PASS'
 
   linux-pwsh-cross:

@@ -4,7 +4,7 @@
 
 function Invoke-FrpPythonUtf8Stdin {
     # PS 5.1 pipes strings to native exes as UTF-16LE by default; Python expects UTF-8.
-    # Write UTF-8 bytes to the child stdin BaseStream instead of using the pipeline.
+    # Write UTF-8 bytes directly to the child stdin BaseStream (no pipeline encoding).
     param(
         [Parameter(Mandatory = $true)][string]$PythonExe,
         [Parameter(Mandatory = $true)][string[]]$ArgumentList,
@@ -13,9 +13,8 @@ function Invoke-FrpPythonUtf8Stdin {
     )
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $PythonExe
-    # ProcessStartInfo.Arguments quoting: join simply; paths here have no spaces in CI.
     $psi.Arguments = ($ArgumentList | ForEach-Object {
-            if ($_ -match '\s') { '"{0}"' -f ($_ -replace '"', '\"') } else { $_ }
+            if ($_ -match '[\s"]') { '"{0}"' -f ($_ -replace '"', '\"') } else { $_ }
         }) -join ' '
     $psi.UseShellExecute = $false
     $psi.RedirectStandardInput = $true
@@ -25,13 +24,8 @@ function Invoke-FrpPythonUtf8Stdin {
     foreach ($key in $Environment.Keys) {
         $psi.EnvironmentVariables[$key] = [string]$Environment[$key]
     }
-    # Prefer UTF-8 stdio on the Python side when supported.
-    if (-not $psi.EnvironmentVariables.ContainsKey('PYTHONUTF8')) {
-        $psi.EnvironmentVariables['PYTHONUTF8'] = '1'
-    }
-    if (-not $psi.EnvironmentVariables.ContainsKey('PYTHONIOENCODING')) {
-        $psi.EnvironmentVariables['PYTHONIOENCODING'] = 'utf-8'
-    }
+    $psi.EnvironmentVariables['PYTHONUTF8'] = '1'
+    $psi.EnvironmentVariables['PYTHONIOENCODING'] = 'utf-8'
 
     $proc = New-Object System.Diagnostics.Process
     $proc.StartInfo = $psi
@@ -50,6 +44,14 @@ function Invoke-FrpPythonUtf8Stdin {
     return $stdout
 }
 
+function Get-FrpPythonExe {
+    foreach ($name in @('python3', 'python')) {
+        $cmd = Get-Command $name -ErrorAction SilentlyContinue
+        if ($cmd -and $cmd.Source) { return $cmd.Source }
+    }
+    throw 'python3/python not found on PATH'
+}
+
 $crossDir = Join-Path $PSScriptRoot 'cross'
 $gen = Join-Path $crossDir 'generate_python_vectors.py'
 $verify = Join-Path $crossDir 'verify_ps_signature.py'
@@ -57,7 +59,8 @@ $vectorsPath = Join-Path $crossDir 'vectors.json'
 
 try {
     Assert-FrpTrue (Test-Path -LiteralPath $gen) 'generator exists'
-    & python3 $gen
+    $python = Get-FrpPythonExe
+    & $python $gen
     if ($LASTEXITCODE -ne 0) { throw 'generator failed' }
     Assert-FrpTrue (Test-Path -LiteralPath $vectorsPath) 'vectors.json written'
 
@@ -70,7 +73,7 @@ try {
     # Python decrypts PowerShell ciphertext (UTF-8 byte-safe stdin; no PS5.1 pipeline)
     $psCt = Protect-FrpTokenPbkdf2 -Token $v.token -Secret $v.secret
     $authPy = Join-Path $script:RepoRoot 'lib/frp_mgmt_auth.py'
-    $pyPt = Invoke-FrpPythonUtf8Stdin -PythonExe 'python3' `
+    $pyPt = Invoke-FrpPythonUtf8Stdin -PythonExe $python `
         -ArgumentList @($authPy, 'decrypt-token') `
         -StdinText $psCt `
         -Environment @{ FRP_ENROLL_SECRET = $v.secret }
@@ -94,7 +97,7 @@ try {
     $sig = Protect-FrpSignMessage -PrivatePem $id.PrivatePem -Message $msg
     $pubFile = Join-Path $crossDir 'ps-pub.pem'
     [System.IO.File]::WriteAllText($pubFile, $id.PublicPem)
-    & python3 $verify --pubkey-pem $pubFile --body $v.body --ts $v.ts --nonce $v.nonce `
+    & $python $verify --pubkey-pem $pubFile --body $v.body --ts $v.ts --nonce $v.nonce `
         --machine-id $v.machine_id --sig-b64 $sig
     if ($LASTEXITCODE -ne 0) { throw 'Python verify of PS signature failed' }
 
