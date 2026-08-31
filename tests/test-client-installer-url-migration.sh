@@ -3,6 +3,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WORKDIR="$(mktemp -d)"
+trap 'rm -rf "$WORKDIR"' EXIT
 # shellcheck source=../lib/frp-common.sh
 . "$ROOT/lib/frp-common.sh"
 
@@ -131,7 +133,47 @@ frp_validate_https_url '' && fail "empty URL accepted"
 frp_validate_https_url 'http://example.test/bootstrap-client.sh' && fail "http accepted"
 frp_validate_https_url 'https://' && fail "incomplete https accepted"
 frp_validate_https_url 'not-a-url' && fail "garbage URL accepted"
+frp_validate_https_url 'file:///etc/passwd' && fail "file URL accepted"
+frp_validate_https_url 'ftp://example.test/x' && fail "ftp URL accepted"
+frp_validate_https_url 'javascript:alert(1)' && fail "javascript URL accepted"
+frp_validate_https_url $'https://example.test/x\ny' && fail "newline URL accepted"
+frp_validate_https_url $'https://example.test/\x01path' && fail "control char URL accepted"
+frp_validate_https_url 'https://user:pass@example.test/x' && fail "userinfo URL accepted"
 pass "URL_VALIDATION_INTACT"
+
+# --- frp-set-client-installer-url enforces https ---
+mkdir -p "$WORKDIR/set-url/etc/frp-auto-deploy"
+python3 - "$WORKDIR/set-url/etc/frp-auto-deploy/config.json" <<'PY'
+import json, sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps({
+  "public_ip": "203.0.113.10",
+  "client_installer_url": "https://example.test/old.sh",
+}, indent=2) + "\n")
+PY
+export FRP_DEPLOY_TEST_ROOT="$WORKDIR/set-url"
+python3 "$ROOT/tools/frp-set-client-installer-url" \
+  'https://mirror.example/bootstrap-client.sh' \
+  >"$WORKDIR/set-ok.out" || fail "https set failed"
+got="$(python3 -c 'import json; print(json.load(open("'"$WORKDIR/set-url/etc/frp-auto-deploy/config.json"'"))["client_installer_url"])')"
+[[ "$got" == 'https://mirror.example/bootstrap-client.sh' ]] || fail "https not stored"
+set +e
+python3 "$ROOT/tools/frp-set-client-installer-url" \
+  'http://mirror.example/bootstrap-client.sh' \
+  >"$WORKDIR/set-http.out" 2>"$WORKDIR/set-http.err"
+http_rc=$?
+set -e
+[[ "$http_rc" -ne 0 ]] || fail "http set accepted"
+grep -qi 'https' "$WORKDIR/set-http.err" || fail "http set error message"
+set +e
+python3 "$ROOT/tools/frp-set-client-installer-url" \
+  $'https://mirror.example/x\ny' \
+  >"$WORKDIR/set-nl.out" 2>"$WORKDIR/set-nl.err"
+nl_rc=$?
+set -e
+[[ "$nl_rc" -ne 0 ]] || fail "newline set accepted"
+unset FRP_DEPLOY_TEST_ROOT
+pass "SET_CLIENT_INSTALLER_URL_HTTPS_ONLY"
 
 # --- Legacy historical owner URL migrates ---
 LEGACY="$(frp_legacy_project_client_installer_url)"

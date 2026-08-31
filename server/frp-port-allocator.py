@@ -881,13 +881,14 @@ class Allocator:
         Same-machine redeem remains allowed until this runs. After
         completed_at is set, further redeem attempts fail with
         BOOTSTRAP_TICKET_USED.
+
+        OSError while listing or saving bootstrap state propagates to the
+        enroll path so the mutation fails closed (ticket is not left
+        incorrectly reusable after a successful-looking enroll).
         """
         if not enrollment_id:
             return
-        try:
-            entries = list(self.bootstrap_dir.glob('*.json'))
-        except OSError:
-            return
+        entries = list(self.bootstrap_dir.glob('*.json'))
         now_iso = utc_now_iso()
         for path in entries:
             try:
@@ -906,10 +907,7 @@ class Allocator:
             record['completed_at'] = now_iso
             if not bound:
                 record['bound_machine_id'] = machine_id
-            try:
-                self.save_bootstrap(path, record)
-            except OSError:
-                return
+            self.save_bootstrap(path, record)
             return
 
     def cleanup_expired_enrollments(self):

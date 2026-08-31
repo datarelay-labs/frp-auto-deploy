@@ -744,6 +744,28 @@ resolve_server_settings() {
   frp_migrate_legacy_client_installer_url
   WINDOWS_CLIENT_INSTALLER_URL="${FRP_WINDOWS_CLIENT_INSTALLER_URL:-${EXISTING_WINDOWS_CLIENT_INSTALLER_URL:-$DEFAULT_WINDOWS_CLIENT_INSTALLER_URL}}"
   frp_migrate_legacy_windows_client_installer_url
+
+  if [[ -n "${FRP_CLIENT_INSTALLER_URL:-}" ]]; then
+    if ! frp_validate_https_url "$FRP_CLIENT_INSTALLER_URL"; then
+      echo "ERROR: FRP_CLIENT_INSTALLER_URL must be a valid https:// URL" >&2
+      exit 1
+    fi
+  fi
+  if [[ -n "${FRP_WINDOWS_CLIENT_INSTALLER_URL:-}" ]]; then
+    if ! frp_validate_https_url "$FRP_WINDOWS_CLIENT_INSTALLER_URL"; then
+      echo "ERROR: FRP_WINDOWS_CLIENT_INSTALLER_URL must be a valid https:// URL" >&2
+      exit 1
+    fi
+  fi
+  if ! frp_validate_https_url "$CLIENT_INSTALLER_URL"; then
+    echo "ERROR: client_installer_url must be a valid https:// URL" >&2
+    exit 1
+  fi
+  if ! frp_validate_https_url "$WINDOWS_CLIENT_INSTALLER_URL"; then
+    echo "ERROR: windows_client_installer_url must be a valid https:// URL" >&2
+    exit 1
+  fi
+
   FRP_MODE_SWITCH=0
 
   # Public vs listen: dedicated vars win; a single legacy FRP_CONTROL_PORT or

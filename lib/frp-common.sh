@@ -215,8 +215,11 @@ frp_validate_https_url() {
 import sys
 from urllib.parse import urlsplit
 
+url = sys.argv[1]
+if not url or any(ord(ch) < 32 or ord(ch) == 127 for ch in url):
+    raise SystemExit(1)
 try:
-    parsed = urlsplit(sys.argv[1])
+    parsed = urlsplit(url)
     port = parsed.port
 except (TypeError, ValueError):
     raise SystemExit(1)
