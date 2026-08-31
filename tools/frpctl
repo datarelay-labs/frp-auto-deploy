@@ -2231,7 +2231,12 @@ frpctl_dispatch_canonical() {
     purge_enrollments) frpctl_require_server || return 1; frpctl_invoke frp-enrollment-purge enrollments --older-than "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("older_than",""))' "$result")" ;;
     release_client) frpctl_require_server || return 1; frpctl_invoke frp-release-client "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("client",""))' "$result")" $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
     release_service) frpctl_require_server || return 1; frpctl_invoke frp-release-service "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("client",""))' "$result")" "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("service",""))' "$result")" $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
-    update_default) frpctl_update ;;
+    update_default)
+      # Preserve flags such as --check from "update --check".
+      extra_args="$(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result")"
+      # shellcheck disable=SC2086
+      frpctl_update $extra_args
+      ;;
     update_project)
       extra_args="$(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result")"
       if frpctl_is_client; then
