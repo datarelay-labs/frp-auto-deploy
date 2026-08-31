@@ -194,10 +194,12 @@ function Start-FrpClient {
     $frpc = Get-FrpFrpcPath
     $toml = Get-FrpTomlPath
     $log = Get-FrpLogPath
+    $errLog = Join-Path (Split-Path -Parent $log) 'frpc.err.log'
     $argList = @('-c', $toml)
-    # Window-close resilient: Hidden + not tied to console
+    # Window-close resilient: Hidden + not tied to console.
+    # Windows cannot redirect stdout and stderr to the same file handle.
     $p = Start-Process -FilePath $frpc -ArgumentList $argList -WindowStyle Hidden -PassThru `
-        -RedirectStandardOutput $log -RedirectStandardError $log
+        -RedirectStandardOutput $log -RedirectStandardError $errLog
     if (-not $p -or $p.Id -le 0) {
         throw 'ERROR: failed to start frpc'
     }
