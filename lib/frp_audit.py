@@ -186,6 +186,106 @@ def rotate_if_needed(max_bytes=5 * 1024 * 1024, keep=5):
     os.chmod(path, 0o600)
 
 
+def query(
+    *,
+    since=None,
+    event=None,
+    client_id=None,
+    group=None,
+    limit=500,
+):
+    """Return filtered audit rows (server-side timestamps, redacted)."""
+    from frp_client_registry import parse_duration, parse_iso_timestamp
+
+    path = audit_path()
+    if not path.is_file():
+        return []
+    cutoff = None
+    if since:
+        try:
+            delta = parse_duration(since)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        from datetime import timedelta
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=delta)
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        ts = parse_iso_timestamp(row.get("ts"))
+        if cutoff and (ts is None or ts < cutoff):
+            continue
+        if event and row.get("event") != event:
+            continue
+        if client_id:
+            cid = str(client_id).lower()
+            if str(row.get("client_id", "")).lower() != cid:
+                meta = row.get("meta") or {}
+                if str(meta.get("client_id", "")).lower() != cid:
+                    continue
+        if group:
+            g = str(group).lower()
+            meta = row.get("meta") or {}
+            if str(meta.get("group", "")).lower() != g:
+                continue
+        rows.append(row)
+        if len(rows) >= max(int(limit), 1):
+            break
+    return rows
+
+
+def format_audit_table(rows):
+    lines = []
+    for row in rows:
+        meta = row.get("meta") or {}
+        meta_bits = []
+        for key in sorted(meta.keys()):
+            meta_bits.append("%s=%s" % (key, meta[key]))
+        meta_text = ", ".join(meta_bits)
+        lines.append(
+            "%s  event=%s  actor=%s%s"
+            % (
+                row.get("ts", ""),
+                row.get("event", ""),
+                row.get("actor", ""),
+                ("  " + meta_text) if meta_text else "",
+            )
+        )
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def format_audit_json(rows):
+    return json.dumps(rows, indent=2, sort_keys=True) + "\n"
+
+
+def format_audit_csv(rows):
+    import csv
+    import io
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["ts", "event", "actor", "client_id", "meta_json"])
+    for row in rows:
+        meta = row.get("meta") or {}
+        writer.writerow(
+            [
+                row.get("ts", ""),
+                row.get("event", ""),
+                row.get("actor", ""),
+                row.get("client_id", meta.get("client_id", "")),
+                json.dumps(meta, sort_keys=True),
+            ]
+        )
+    return buf.getvalue()
+
+
 def main(argv=None):
     import argparse
     import sys

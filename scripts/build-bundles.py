@@ -31,6 +31,8 @@ files=[
  'lib/frp-server-upgrade.sh',
  'lib/frp_client_registry.py',
  'lib/frp_audit.py',
+ 'lib/frp_fleet.py',
+ 'lib/frp_server_lifecycle.py',
  'lib/frp_project_files.py',
  'lib/frp_control_locks.py',
  'lib/server-project-files.manifest',

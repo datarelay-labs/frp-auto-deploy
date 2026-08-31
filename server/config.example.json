@@ -21,5 +21,6 @@
   "enrollments_dir": "/var/lib/frp-auto-deploy/enrollments",
   "bootstrap_dir": "/var/lib/frp-auto-deploy/bootstrap",
   "token_file": "/etc/frp/server_token",
-  "client_installer_url": ""
+  "client_installer_url": "",
+  "client_stale_days": 30
 }

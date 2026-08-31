@@ -53,12 +53,14 @@ each other. There is no `delete client`.
 ```text
 show status
 show version
-show clients
+show fleet
+show clients [--stale] [--build-drift] [--last-mgmt-before 30d]
 show client <ID>
 show client <ID> services
 show client <ID> tags
+show ports [--client ID] [--free] [--reserved]
 show enrollments
-show audit
+show audit [--since 7d] [--event NAME] [--client ID] [--format table|json|csv]
 show upstream
 show services
 show info
@@ -250,3 +252,28 @@ uninstall [--yes]
 - **uninstall** removes local software only. It is not `revoke client` (identity) or `release client` (ports).
 
 Root (or Administrator on Windows) is required for mutating lifecycle commands.
+
+---
+
+## Server fleet visibility & diagnostics (server hosts)
+
+```text
+show fleet
+show ports [--client ID] [--free] [--reserved]
+show clients --stale
+show clients --last-mgmt-before 30d
+show clients --build-drift
+show audit --since 7d --format json
+test
+logs [frps|allocator|nginx] [--lines N] [--follow]
+support-bundle [--output PATH]
+```
+
+Terminology:
+
+- **LAST MGMT SEEN** — last successful authenticated management communication (server clock).
+- **Mgmt stale** — LAST MGMT SEEN older than `client_stale_days` (default 30). Not tunnel offline.
+- **Build drift** — client-reported build differs from server expected build; not “update available” unless an updater confirms a target.
+
+`test`, `logs`, and `support-bundle` are role-aware on dual-role hosts (server section runs first, then client).
+External Internet reachability is never claimed from local listener checks alone.

@@ -37,6 +37,21 @@ parser.add_argument(
     metavar='KEY=VALUE',
     help='show clients with this tag; multiple --tag filters use AND semantics',
 )
+parser.add_argument(
+    '--stale',
+    action='store_true',
+    help='show management-stale clients only (LAST MGMT SEEN threshold)',
+)
+parser.add_argument(
+    '--build-drift',
+    action='store_true',
+    help='show clients with build drift vs server expected build',
+)
+parser.add_argument(
+    '--last-mgmt-before',
+    metavar='DURATION',
+    help='show clients whose LAST MGMT SEEN is older than DURATION (e.g. 30d)',
+)
 args = parser.parse_args()
 tag_filters = []
 try:
@@ -88,6 +103,18 @@ if ROOT and not str(reg).startswith(ROOT):
 state = json.loads(reg.read_text()) if reg.exists() else {'schema_version': 2, 'clients': {}}
 require_v2(state)
 
+stale_sec = 30 * 86400
+try:
+    stale_sec = int(cfg.get('client_stale_days', 30)) * 86400
+except (TypeError, ValueError):
+    stale_sec = 30 * 86400
+if args.last_mgmt_before:
+    try:
+        stale_sec = CREG.parse_duration(args.last_mgmt_before)
+    except ValueError as exc:
+        parser.error(str(exc))
+expected = CREG.load_server_version_metadata(ROOT or None)
+
 public_ip = CREG.sanitize_display(cfg.get('public_host') or cfg.get('public_ip') or '', 253)
 clients = CREG.sorted_clients(state)
 if tag_filters:
@@ -96,10 +123,28 @@ if tag_filters:
         for mid, client in clients
         if CREG.client_matches_tags(client, tag_filters)
     ]
+if args.stale or args.last_mgmt_before:
+    clients = [
+        (mid, client)
+        for mid, client in clients
+        if CREG.mgmt_activity_class(client, stale_sec) == 'stale'
+    ]
+if args.build_drift:
+    clients = [
+        (mid, client)
+        for mid, client in clients
+        if CREG.build_drift_class(client, expected) == 'drift'
+    ]
 listener_snapshot = CREG.passive_listening_ports()
 
-print('Registered clients')
-print('==================')
+title = 'Registered clients'
+if args.stale or args.last_mgmt_before:
+    title = 'Management-stale clients'
+elif args.build_drift:
+    title = 'Build-drift clients'
+
+print(title)
+print('=' * len(title))
 print()
 print(
     f'{"#":<3} {"CLIENT ID":<10} {"LABEL":<12} {"HOSTNAME":<14} '
@@ -117,7 +162,15 @@ for idx, (mid, client) in enumerate(clients, start=1):
     hostname = CREG.sanitize_display(client.get('hostname') or '-', 14)
     short_id = CREG.sanitize_display(CREG.unique_short_id(mid, all_mids), 10)
     state_txt = client_state(services, listener_snapshot)
-    mgmt = CREG.mgmt_status(client)
+    mgmt = CREG.mgmt_activity_class(client, stale_sec)
+    if mgmt == 'revoked':
+        mgmt_txt = 'revoked'
+    elif mgmt == 'recent':
+        mgmt_txt = 'recent'
+    elif mgmt == 'stale':
+        mgmt_txt = 'stale'
+    else:
+        mgmt_txt = 'unknown'
     ssh_txt = '-'
     _sid, ssh = CREG.first_ssh_service(client)
     if ssh:
@@ -130,11 +183,12 @@ for idx, (mid, client) in enumerate(clients, start=1):
         ssh_txt = CREG.sanitize_display(ssh_txt, 48)
     print(
         f'{idx:<3} {short_id:<10} {label:<12} {hostname:<14} '
-        f'{str(len(services)):<8} {state_txt:<8} {mgmt:<10} {ssh_txt}'
+        f'{str(len(services)):<8} {state_txt:<8} {mgmt_txt:<10} {ssh_txt}'
     )
 
 print()
 print('Use CLIENT ID for set/unset/revoke/release.')
+print('MGMT = management activity (LAST MGMT SEEN), not FRP tunnel state.')
 print('A unique label or hostname is accepted for show/info only.')
 if clients:
     example = CREG.sanitize_display(CREG.unique_short_id(clients[0][0], all_mids), 16)
