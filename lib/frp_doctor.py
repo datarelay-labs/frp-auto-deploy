@@ -1004,6 +1004,55 @@ def validate_registry(state, cfg=None):
         reserved = []
     if not isinstance(reserved, list):
         return FAIL, 'registry reserved list is invalid', issues
+    groups = state.get('groups')
+    if groups is None:
+        groups = {}
+    if not isinstance(groups, dict):
+        return FAIL, 'registry groups must be an object', issues
+    group_names = {}
+    for gid, group in groups.items():
+        gid_text = str(gid or '').strip()
+        if not re.fullmatch(r'grp_[0-9a-f]{8}', gid_text):
+            issues.append('invalid group id %s' % redact(gid_text or '(empty)'))
+            continue
+        if not isinstance(group, dict):
+            issues.append('group record %s is not an object' % gid_text)
+            continue
+        name = str(group.get('name') or '').strip()
+        if not name:
+            issues.append('group %s missing name' % gid_text)
+        else:
+            if name.lower() in ('all', 'ungrouped'):
+                issues.append('group %s uses reserved system name %s' % (gid_text, name))
+            if name in group_names:
+                issues.append('duplicate group name %s' % redact(name))
+            else:
+                group_names[name] = gid_text
+        gtype = str(group.get('type') or 'manual').strip() or 'manual'
+        if gtype not in ('manual', 'dynamic'):
+            issues.append('unsupported group type %s on %s' % (redact(gtype), gid_text))
+        if gtype == 'dynamic':
+            match_tags = group.get('match_tags')
+            if not isinstance(match_tags, dict) or not match_tags:
+                issues.append('dynamic group %s has empty or invalid selector' % gid_text)
+            else:
+                for key, value in match_tags.items():
+                    if not isinstance(key, str) or not isinstance(value, str):
+                        issues.append('dynamic group %s selector must use string keys/values' % gid_text)
+                        break
+                    if any(
+                        ord(ch) < 32 or 127 <= ord(ch) <= 159
+                        for ch in (key + value)
+                    ):
+                        issues.append('dynamic group %s selector contains control characters' % gid_text)
+                        break
+        description = group.get('description')
+        if description is not None and not isinstance(description, str):
+            issues.append('group %s description must be a string' % gid_text)
+        elif isinstance(description, str) and any(
+            ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in description
+        ):
+            issues.append('group %s description contains control characters' % gid_text)
     port_start = port_end = None
     protected = set()
     if cfg:
@@ -1038,6 +1087,39 @@ def validate_registry(state, cfg=None):
         if status == 'revoked':
             revoked += 1
             infos.append('revoked client %s is a valid lifecycle state' % (client.get('hostname') or mid[:12]))
+        group_ids = client.get('group_ids')
+        if group_ids is not None:
+            if not isinstance(group_ids, list):
+                issues.append('client %s group_ids must be a list' % redact(str(mid)[:12]))
+            else:
+                seen_gids = set()
+                for item in group_ids:
+                    gid_text = str(item or '').strip()
+                    if not re.fullmatch(r'grp_[0-9a-f]{8}', gid_text):
+                        issues.append(
+                            'client %s has invalid group id %s'
+                            % (redact(str(mid)[:12]), redact(gid_text or '(empty)'))
+                        )
+                        continue
+                    if gid_text in seen_gids:
+                        issues.append(
+                            'client %s has duplicate group id %s'
+                            % (redact(str(mid)[:12]), gid_text)
+                        )
+                        continue
+                    seen_gids.add(gid_text)
+                    if gid_text not in groups:
+                        issues.append(
+                            'client %s references nonexistent group %s'
+                            % (redact(str(mid)[:12]), gid_text)
+                        )
+                        continue
+                    ref_type = str((groups.get(gid_text) or {}).get('type') or 'manual').strip()
+                    if ref_type == 'dynamic':
+                        issues.append(
+                            'client %s group_ids references dynamic group %s'
+                            % (redact(str(mid)[:12]), gid_text)
+                        )
         services = client.get('services') or {}
         if not isinstance(services, dict):
             issues.append('client services must be a map')
@@ -1070,12 +1152,79 @@ def validate_registry(state, cfg=None):
     if outside:
         extra.append('reservations outside current range: %s' % ','.join(str(p) for p in outside[:8]))
         return WARN, extra[0], extra
-    msg = 'valid schema v2 (%s clients, %s reserved ports)' % (len(clients), len(seen_ports))
+    msg = 'valid schema v2 (%s clients, %s groups, %s reserved ports)' % (
+        len(clients),
+        len(groups),
+        len(seen_ports),
+    )
     if revoked:
         msg += ', %s revoked' % revoked
     if disabled:
         msg += ', %s disabled services' % disabled
     return PASS, msg, infos
+
+
+def validate_pending_enrollments(paths, state, cfg=None):
+    issues = []
+    enroll_dir = ''
+    if cfg:
+        enroll_dir = str(cfg.get('enrollments_dir') or '').strip()
+    if not enroll_dir:
+        return PASS, 'no enrollments directory configured', issues
+    root = os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
+    if root and not enroll_dir.startswith(root):
+        enroll_dir = root + enroll_dir
+    directory = paths.p(enroll_dir) if hasattr(paths, 'p') else enroll_dir
+    groups = (state or {}).get('groups') or {}
+    if not isinstance(groups, dict):
+        groups = {}
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return PASS, 'enrollments directory not readable', issues
+    for name in sorted(names):
+        if not name.endswith('.json'):
+            continue
+        abs_path = os.path.join(directory, name)
+        try:
+            with open(abs_path, encoding='utf-8') as fh:
+                record = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            issues.append('enrollment record %s is unreadable' % redact(name))
+            continue
+        if not isinstance(record, dict):
+            issues.append('enrollment record %s is not an object' % redact(name))
+            continue
+        if record.get('used_at'):
+            continue
+        if record.get('revoked_at'):
+            continue
+        assigned = record.get('assigned_group_ids')
+        if assigned is None:
+            continue
+        if not isinstance(assigned, list):
+            issues.append('enrollment %s assigned_group_ids must be a list' % redact(name))
+            continue
+        seen = set()
+        for item in assigned:
+            gid_text = str(item or '').strip()
+            if not re.fullmatch(r'grp_[0-9a-f]{8}', gid_text):
+                issues.append('enrollment %s has invalid assigned group id' % redact(name))
+                continue
+            if gid_text in seen:
+                issues.append('enrollment %s has duplicate assigned group id' % redact(name))
+                continue
+            seen.add(gid_text)
+            group = groups.get(gid_text)
+            if not isinstance(group, dict):
+                issues.append('pending enrollment references missing group %s' % gid_text)
+                continue
+            gtype = str(group.get('type') or 'manual').strip()
+            if gtype != 'manual':
+                issues.append('enrollment %s assigned to non-manual group %s' % (redact(name), gid_text))
+    if issues:
+        return FAIL, '; '.join(issues[:6]), issues
+    return PASS, 'pending enrollment group assignments valid', issues
 
 
 def check_host_facts(report, facts):
@@ -1551,6 +1700,20 @@ def check_server(report, paths, facts, skip_network):
             rec = 'restore registry.json from a known-good backup; doctor does not repair it'
         report.add('server_registry', status, message, '; '.join(extra[:4]) if extra and status != PASS else '', rec, 'state')
         check_permissions(report, paths, registry_path, 'server_registry_permissions', secret=True, expect_root=expect_root, section='security')
+        enroll_status, enroll_message, enroll_extra = validate_pending_enrollments(
+            paths, state if isinstance(state, dict) else {}, cfg if isinstance(cfg, dict) else None
+        )
+        enroll_rec = ''
+        if enroll_status == FAIL:
+            enroll_rec = 'revoke or purge affected enrollments and re-issue with valid manual groups'
+        report.add(
+            'server_enrollment_groups',
+            enroll_status,
+            enroll_message,
+            '; '.join(enroll_extra[:4]) if enroll_extra and enroll_status != PASS else '',
+            enroll_rec,
+            'state',
+        )
 
     pki_dir = '/etc/frp-auto-deploy/pki'
     if cfg:

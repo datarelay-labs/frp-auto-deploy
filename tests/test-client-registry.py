@@ -136,17 +136,44 @@ def test_seed_does_not_overwrite():
         'label': 'keep-me',
         'note': 'keep-note',
         'tags': {'customer': 'lotte', 'site': 'seoul'},
+        'group_ids': ['grp_deadbeef'],
     }
     creg.seed_admin_metadata(client, label='new', note='new-note')
     if client['label'] != 'keep-me' or client['note'] != 'keep-note':
         fail('overwrite', client)
     if client['tags'] != {'customer': 'lotte', 'site': 'seoul'}:
         fail('tags overwritten', client)
+    if client['group_ids'] != ['grp_deadbeef']:
+        fail('group_ids overwritten', client)
     empty = {}
     creg.seed_admin_metadata(empty, label='seoul-groupware', note='desc')
     if empty.get('label') != 'seoul-groupware':
         fail('seed label')
     pass_('SEED_ADMIN_METADATA')
+
+
+def test_groups():
+    state = {
+        'schema_version': 2,
+        'groups': {
+            'grp_11111111': {'name': 'customer-acme', 'type': 'manual'},
+            'grp_22222222': {'name': 'pilot', 'type': 'manual'},
+        },
+        'clients': {
+            'aaaaaaaa11111111': {'group_ids': ['grp_11111111', 'grp_22222222']},
+        },
+    }
+    gid, group = creg.resolve_group(state, 'customer-acme')
+    if gid != 'grp_11111111' or group.get('name') != 'customer-acme':
+        fail('resolve by name', gid, group)
+    try:
+        creg.validate_group_name('all')
+        fail('reserved all accepted')
+    except ValueError:
+        pass
+    if not creg.client_matches_group(state['clients']['aaaaaaaa11111111'], 'grp_11111111'):
+        fail('client_matches_group')
+    pass_('GROUPS')
 
 
 def test_tags():
@@ -188,6 +215,7 @@ def main():
     test_mutation_id_only()
     test_seed_does_not_overwrite()
     test_tags()
+    test_groups()
     print('CLIENT_REGISTRY_HELPERS=PASS')
 
 

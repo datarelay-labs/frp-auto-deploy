@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""List and show server-owned manual client groups."""
+import argparse
+import importlib.util
+import json
+import os
+import sys
+from pathlib import Path
+
+ROOT = os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
+
+
+def load_creg():
+    here = Path(__file__).resolve()
+    candidates = [
+        here.parent.parent / 'lib' / 'frp_client_registry.py',
+        Path('/usr/local/lib/frp-auto-deploy/frp_client_registry.py'),
+    ]
+    if ROOT:
+        candidates.insert(1, Path(ROOT) / 'usr/local/lib/frp-auto-deploy/frp_client_registry.py')
+    for path in candidates:
+        if path.is_file():
+            spec = importlib.util.spec_from_file_location('frp_client_registry', str(path))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+    raise SystemExit('ERROR: missing frp_client_registry.py')
+
+
+CREG = load_creg()
+
+
+def require_v2(state):
+    if not isinstance(state, dict) or state.get('schema_version') != 2:
+        version = 1
+        if isinstance(state, dict) and 'schema_version' in state:
+            version = state.get('schema_version')
+        raise SystemExit(
+            f'ERROR: unsupported registry schema version {version}.\n\n'
+            'This release requires registry schema version 2.\n\n'
+            'Back up the existing registry and redeploy/reset it explicitly before continuing.'
+        )
+    clients = state.get('clients')
+    if clients is None:
+        clients = {}
+    if not isinstance(clients, dict):
+        raise SystemExit('ERROR: unsupported registry schema version 2.')
+    for client in clients.values():
+        if not isinstance(client, dict):
+            raise SystemExit('ERROR: unsupported registry schema version 2.')
+        if 'ssh_port' in client or 'https_port' in client:
+            raise SystemExit(
+                'ERROR: unsupported registry schema version 2.\n\n'
+                'Legacy SSH/HTTPS fields are present. This release requires the generic multi-service registry.\n\n'
+                'Back up the existing registry and redeploy/reset it explicitly before continuing.'
+            )
+    groups = state.get('groups')
+    if groups is not None and not isinstance(groups, dict):
+        raise SystemExit('ERROR: registry groups must be an object')
+
+
+def load_state():
+    cfg = json.loads(Path(ROOT + '/etc/frp-auto-deploy/config.json').read_text())
+    reg = Path(cfg['registry_file'])
+    if ROOT and not str(reg).startswith(ROOT):
+        reg = Path(ROOT + str(reg))
+    state = json.loads(reg.read_text()) if reg.exists() else {
+        'schema_version': 2,
+        'clients': {},
+        'groups': {},
+    }
+    require_v2(state)
+    return cfg, state
+
+
+def print_groups_table(state):
+    print('%-14s %-24s %-8s %7s' % ('GROUP ID', 'NAME', 'TYPE', 'CLIENTS'))
+    print('-' * 58)
+    for name in (CREG.SYSTEM_GROUP_ALL, CREG.SYSTEM_GROUP_UNGROUPED):
+        count = CREG.group_member_count(state, name)
+        print('%-14s %-24s %-8s %7d' % ('-', name, 'system', count))
+    groups = CREG.sorted_groups(state)
+    if not groups:
+        return
+    for gid, group in groups:
+        name = CREG.sanitize_display(group.get('name') or '-', 24)
+        gtype = CREG.sanitize_display(group.get('type') or 'manual', 8)
+        count = CREG.group_member_count(state, gid)
+        print('%-14s %-24s %-8s %7d' % (
+            CREG.sanitize_display(gid, 14),
+            name,
+            gtype,
+            count,
+        ))
+
+
+def print_group_detail(state, gid, group):
+    print('Group ID      : %s' % CREG.sanitize_display(gid, 32))
+    print('Name          : %s' % CREG.sanitize_display(group.get('name') or '-', 64))
+    gtype = CREG.group_record_type(group)
+    print('Type          : %s' % CREG.sanitize_display(gtype, 16))
+    if gtype == 'dynamic':
+        match_tags = group.get('match_tags') or {}
+        if isinstance(match_tags, dict) and match_tags:
+            print('Selector      :')
+            for key in sorted(match_tags):
+                print('  %s=%s' % (
+                    CREG.sanitize_display(key, 32),
+                    CREG.sanitize_display(match_tags[key], 64),
+                ))
+        else:
+            print('Selector      : (empty)')
+    print('Description   : %s' % (
+        CREG.sanitize_display(group.get('description') or '-', 1024) or '-'
+    ))
+    if gtype != 'system':
+        print('Created       : %s' % CREG.sanitize_display(group.get('created_at') or '-', 64))
+        print('Updated       : %s' % CREG.sanitize_display(group.get('updated_at') or '-', 64))
+    print('Client count  : %s' % CREG.group_member_count(state, gid))
+
+
+def print_group_clients(state, cfg, gid):
+    public_ip = CREG.sanitize_display(cfg.get('public_host') or cfg.get('public_ip') or '', 253)
+    clients = CREG.clients_in_group(state, gid)
+    print(
+        f'{"#":<3} {"CLIENT ID":<10} {"LABEL":<12} {"HOSTNAME":<14} '
+        f'{"SERVICES":<8} {"MGMT":<10}'
+    )
+    print('-' * 70)
+    if not clients:
+        print('(none)')
+        return
+    all_mids = [mid for mid, _client in clients]
+    for idx, (mid, client) in enumerate(clients, start=1):
+        services = CREG.enabled_services(client)
+        label = CREG.sanitize_display(client.get('label') or '-', 12)
+        hostname = CREG.sanitize_display(client.get('hostname') or '-', 14)
+        short_id = CREG.sanitize_display(CREG.unique_short_id(mid, all_mids), 10)
+        mgmt = CREG.mgmt_status(client)
+        print(
+            f'{idx:<3} {short_id:<10} {label:<12} {hostname:<14} '
+            f'{str(len(services)):<8} {mgmt:<10}'
+        )
+    if public_ip:
+        print()
+        print('Public host: %s' % public_ip)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description='Show manual client groups')
+    parser.add_argument(
+        'query',
+        nargs='?',
+        default=None,
+        help='GROUP ID or unique group name (omit to list all groups)',
+    )
+    parser.add_argument(
+        '--clients',
+        action='store_true',
+        help='list clients that belong to the selected group',
+    )
+    args = parser.parse_args(argv)
+    cfg, state = load_state()
+    if args.query is None:
+        if args.clients:
+            parser.error('--clients requires a group selector')
+        print_groups_table(state)
+        return 0
+    gid, group = CREG.resolve_group_or_exit(state, args.query)
+    if args.clients:
+        print_group_clients(state, cfg, gid)
+    else:
+        print_group_detail(state, gid, group)
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        raise SystemExit(main())
+    except BrokenPipeError:
+        raise SystemExit(0)

@@ -54,15 +54,15 @@ def require_v2(state):
 
 
 if len(sys.argv) not in (2, 3):
-    print(f'Usage: {sys.argv[0]} <client-id|label|hostname> [overview|services|tags]', file=sys.stderr)
+    print(f'Usage: {sys.argv[0]} <client-id|label|hostname> [overview|services|tags|groups]', file=sys.stderr)
     sys.exit(2)
 
 q = sys.argv[1]
 view = (sys.argv[2] if len(sys.argv) > 2 else 'overview').strip().lower()
 if view in ('', 'info'):
     view = 'overview'
-if view not in ('overview', 'services', 'tags'):
-    print('ERROR: unknown view. Use overview, services, or tags.', file=sys.stderr)
+if view not in ('overview', 'services', 'tags', 'groups'):
+    print('ERROR: unknown view. Use overview, services, tags, or groups.', file=sys.stderr)
     sys.exit(2)
 
 cfg = json.loads(Path(ROOT + '/etc/frp-auto-deploy/config.json').read_text())
@@ -86,6 +86,16 @@ cid = CREG.sanitize_display(CREG.unique_short_id(mid, all_mids), 16)
 tags = client.get('tags') or {}
 if not isinstance(tags, dict):
     tags = {}
+try:
+    membership = CREG.normalize_group_ids(client.get('group_ids'))
+except ValueError:
+    membership = []
+manual_groups, dynamic_groups = CREG.client_group_memberships(state, client)
+groups_map = {}
+try:
+    groups_map = CREG.ensure_groups_map(state)
+except ValueError:
+    groups_map = {}
 
 
 def print_overview():
@@ -100,6 +110,7 @@ def print_overview():
     print('Description    : %s' % (note or '-'))
     print('Service count  : %s' % len(enabled))
     print('Tag count      : %s' % len(tags))
+    print('Group count    : %s' % (len(manual_groups) + len(dynamic_groups)))
 
 
 def print_services():
@@ -170,9 +181,35 @@ def print_tags():
         ))
 
 
+def print_groups():
+    rows = []
+    for gid, group in manual_groups:
+        rows.append((
+            CREG.sanitize_display(group.get('name') or gid, 24),
+            'manual',
+            CREG.sanitize_display(gid, 14),
+        ))
+    for gid, group in dynamic_groups:
+        rows.append((
+            CREG.sanitize_display(group.get('name') or gid, 24),
+            'dynamic',
+            CREG.sanitize_display(gid, 14),
+        ))
+    if not rows:
+        print('(none)')
+        if CREG.client_is_ungrouped(state, client):
+            print('System view: ungrouped')
+        return
+    print('%-24s %-8s %s' % ('GROUP', 'TYPE', 'GROUP ID'))
+    for name, gtype, gid in rows:
+        print('%-24s %-8s %s' % (name, gtype, gid))
+
+
 if view == 'overview':
     print_overview()
 elif view == 'services':
     print_services()
-else:
+elif view == 'tags':
     print_tags()
+else:
+    print_groups()

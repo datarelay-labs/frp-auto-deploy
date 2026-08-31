@@ -30,6 +30,27 @@ Already enrolled 2.1.0 clients remain compatible. After a server project update
 from 2.1.0, newly generated Zero-touch / enrollment installer commands use the
 `v2.1.1` bootstrap URL when the persisted URL was an official managed ref.
 
+## Unreleased (feature/group-management)
+
+- Manual Group Management (P3.1): immutable GROUP ID (`grp_…`), mutable name,
+  multiple membership via client `group_ids`, server-owned metadata only
+- Enrollment Group Assignment (P3.2): `create enrollment|zero-touch --group`
+  (repeatable, manual groups only); enrollment `assigned_group_ids`; merge on
+  enroll; fail closed when assigned group deleted
+- System Groups (P3.3): virtual `all` / `ungrouped` views (not persisted)
+- Dynamic Groups (P3.4): `create group --dynamic --match-tag KEY=VALUE` (AND);
+  computed membership from server-owned tags; no persisted dynamic `group_ids`
+- Filters & UX (P3.5): `show clients --group`, repeated `--tag`, `--status`
+  (`online`/`offline`/`unknown`); `show client … groups` shows manual vs dynamic
+- CLI: `show groups` / `show group` / `show client … groups` /
+  `create group [--dynamic --match-tag]` / `set group name|description|match-tag` /
+  `remove group [match-tag KEY]` /
+  `add client … group` / `remove client … group` / `remove group` /
+  `show clients --group [--tag …] [--status …]`
+- Doctor: dynamic selectors, dynamic group in client `group_ids`, pending
+  enrollment group references
+- Audit events `group.*`; old registries/backups without groups remain readable
+
 ## Unreleased (post-2.1.1 / feature/windows-client)
 
 - Enrollment retention hardening: terminal records (`expired`, `completed`,

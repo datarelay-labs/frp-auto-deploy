@@ -500,9 +500,14 @@ CLIENT ID.
 show status
 show version
 show clients
+show clients --group <GROUP>
 show client <ID>
 show client <ID> services
 show client <ID> tags
+show client <ID> groups
+show groups
+show group <GROUP>
+show group <GROUP> clients
 show enrollments
 show audit
 show upstream
@@ -510,6 +515,8 @@ show upstream
 set client <ID> label production-gateway
 set client <ID> note "Seoul office gateway"
 set client <ID> tag site seoul
+set group <GROUP> name acme-korea
+set group <GROUP> description "ACME customer systems"
 
 unset client <ID> label
 unset client <ID> note
@@ -518,7 +525,12 @@ unset client <ID> tag site
 create enrollment
 create enrollment --one-line --ssh --ssh-user aella --label branch-a
 create enrollments --count 3
+create group customer-acme
 create backup
+
+add client <CLIENT-ID> group <GROUP>
+remove client <CLIENT-ID> group <GROUP>
+remove group <GROUP>
 
 revoke enrollment <ID>
 revoke client <CLIENT-ID>
