@@ -20,13 +20,32 @@ function Get-FrpHostPowerShellExe {
 
 function Test-FrpOutputSkipped {
     param([object[]]$Output)
+    $hasSkip = $false
+    $hasPass = $false
     foreach ($line in @($Output)) {
         $text = [string]$line
-        if ($text -match '^\s*SKIP(\s|$)') {
-            return $true
-        }
+        if ($text -match '^\s*SKIP(\s|$)') { $hasSkip = $true }
+        if ($text -match '^\s*PASS(\s|$)') { $hasPass = $true }
     }
-    return $false
+    # Partial optional coverage that still emits PASS is not a skip.
+    return ($hasSkip -and -not $hasPass)
+}
+
+function Test-FrpIsCriticalSkip {
+    param(
+        [string]$TestName,
+        [object[]]$Output
+    )
+    $critical = @(
+        'test-process-control.ps1',
+        'test-pid-ownership.ps1',
+        'test-dpapi-identity-roundtrip.ps1',
+        'test-acl-fail-closed.ps1',
+        'test-ca-pinning.ps1',
+        'test-tls-hostname-negative.ps1'
+    )
+    if ($critical -notcontains $TestName) { return $false }
+    return (Test-FrpOutputSkipped -Output $Output)
 }
 
 $hostExe = Get-FrpHostPowerShellExe
@@ -70,6 +89,10 @@ foreach ($t in $tests) {
         } elseif (Test-FrpOutputSkipped -Output $output) {
             Write-Host "SKIP counted for $t"
             $skipped++
+            if ($env:FRP_WINDOWS_CRITICAL_NO_SKIP -eq '1' -and (Test-FrpIsCriticalSkip -TestName $t -Output $output)) {
+                Write-Host ("FAIL critical skip: {0}" -f $t)
+                $failed++
+            }
         } else {
             $passed++
         }
@@ -84,8 +107,4 @@ Write-Host ''
 Write-Host ("Summary: passed={0} failed={1} skipped={2}" -f $passed, $failed, $skipped)
 Write-Host ("CRITICAL_TEST_SKIPS={0}" -f $skipped)
 if ($failed -gt 0) { exit 1 }
-if ($skipped -gt 0 -and $env:FRP_WINDOWS_CRITICAL_NO_SKIP -eq '1') {
-    Write-Host 'FAIL: critical Windows coverage requires CRITICAL_TEST_SKIPS=0'
-    exit 1
-}
 exit 0

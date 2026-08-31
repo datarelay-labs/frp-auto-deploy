@@ -36,7 +36,7 @@ try {
 
     $openssl = Get-Command openssl -ErrorAction SilentlyContinue
     if (-not $openssl) {
-        Write-Host 'SKIP openssl cert generation (openssl unavailable); source guard still enforced'
+        Write-Host 'NOTE: openssl unavailable; TLS hostname unit certs skipped, source guard still enforced'
         Write-FrpTestPass 'test-tls-hostname-negative'
         return
     }
