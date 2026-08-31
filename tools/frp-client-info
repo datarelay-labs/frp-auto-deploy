@@ -88,9 +88,14 @@ if not isinstance(tags, dict):
     tags = {}
 try:
     membership = CREG.normalize_group_ids(client.get('group_ids'))
-except ValueError:
-    membership = []
-manual_groups, dynamic_groups = CREG.client_group_memberships(state, client)
+except ValueError as exc:
+    print('ERROR: corrupt client group_ids: %s' % exc, file=sys.stderr)
+    raise SystemExit(1)
+try:
+    manual_groups, dynamic_groups = CREG.client_group_memberships(state, client)
+except ValueError as exc:
+    print('ERROR: corrupt group membership: %s' % exc, file=sys.stderr)
+    raise SystemExit(1)
 groups_map = {}
 try:
     groups_map = CREG.ensure_groups_map(state)

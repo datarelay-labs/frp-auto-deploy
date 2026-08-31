@@ -1,5 +1,10 @@
 # Windows Client Guide
 
+**Status:** implemented and CI-tested on the candidate / integration branch.
+Real-environment validation is still pending — do **not** treat this as Stable
+release coverage. **Windows Service** install/autostart remains deferred
+(optional operator Task Scheduler / Service setup is out of MVP scope).
+
 Supported OS: **Windows 10 / 11 / Server 2019+** (amd64), Windows PowerShell **5.1** or PowerShell **7+**.
 
 This client reuses the existing frp-auto-deploy allocator protocol (bootstrap redeem, enroll, CA pin, PBKDF2 token wrap, ECDSA management identity). It does **not** introduce a Windows-only enrollment API.
@@ -119,7 +124,7 @@ tools\frp-client.cmd autostart
 | `info` | Prints `mstsc` / `ssh` / HTTP(S) URLs without secrets |
 | `update` | Replaces `frpc.exe` after SHA256 verify; preserves identity and ports; transactional rollback of managed files + process state |
 | `uninstall` | **LOCAL SOFTWARE REMOVED, SERVER RESERVATIONS PRESERVED** |
-| `autostart` | Stub: reports not configured (Task Scheduler / Service is optional) |
+| `autostart` | Stub: reports not configured (**Windows Service / Task Scheduler deferred**) |
 
 ## Reboot semantics
 
@@ -130,7 +135,8 @@ frpc does **not** auto-start after reboot unless you configure optional autostar
 - ARM64 Windows packages (amd64 only in this release)
 - Automatic firewall changes
 - Automatic RDP enablement or credential provisioning
-- Guaranteed headless Service install (autostart is optional, not MVP-blocking)
+- Windows Service integration (deferred; autostart stub only)
+- Guaranteed headless Service install
 - Forked Windows-only enrollment APIs
 
 ## Security summary

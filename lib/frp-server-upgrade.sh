@@ -42,7 +42,14 @@ try:
     data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 except Exception:
     raise SystemExit(1)
-raise SystemExit(0 if data.get("deployment_mode", "direct") == "single443" else 1)
+raw = data.get("deployment_mode")
+text = str(raw if raw is not None else "direct").strip().lower().replace("-", "").replace("_", "")
+if text in ("single443", "enterprise", "enterprisesingle443"):
+    raise SystemExit(0)
+if text in ("direct", ""):
+    raise SystemExit(1)
+# Unknown mode: fail closed (treat as not single443; callers must not invent direct).
+raise SystemExit(1)
 PY
 }
 
@@ -78,7 +85,16 @@ if Path(version_path).is_file():
 def emit(key, value):
     print("%s=%s" % (key, value if value is not None else ""))
 
-emit("FRP_DEPLOYMENT_MODE", data.get("deployment_mode") or "direct")
+_mode_raw = data.get("deployment_mode")
+_mode_text = str(_mode_raw if _mode_raw is not None else "direct").strip().lower().replace("-", "").replace("_", "")
+if _mode_text in ("single443", "enterprise", "enterprisesingle443"):
+    _mode = "single443"
+elif _mode_text in ("direct", ""):
+    _mode = "direct"
+else:
+    sys.stderr.write("ERROR: invalid deployment_mode in installed config: %r\n" % (_mode_raw,))
+    raise SystemExit(1)
+emit("FRP_DEPLOYMENT_MODE", _mode)
 emit("FRP_PUBLIC_HOST", data.get("public_host") or data.get("public_ip") or "")
 emit("FRP_CONTROL_PUBLIC_PORT", data.get("frp_control_public_port") or "")
 emit("FRP_CONTROL_LISTEN_PORT", data.get("frp_control_listen_port") or "")

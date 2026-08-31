@@ -405,4 +405,75 @@ print('PASS PAIR_PURGE_ATOMICITY')
 PY
 pass "PAIR_PURGE_ATOMICITY"
 
+# Malformed JSON must surface as malformed_bootstrap / malformed_enrollment
+# (not orphan_bootstrap_ticket) and doctor must WARN on them.
+python3 - "$TREE" "$LIFECYCLE" <<'PY'
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('elc', sys.argv[2])
+elc = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(elc)
+
+enroll_dir = root / 'var/lib/frp-auto-deploy/enrollments'
+boot_dir = root / 'var/lib/frp-auto-deploy/bootstrap'
+(enroll_dir / 'bad-enroll.json').write_text('{not-json\n')
+(boot_dir / 'bad-boot.json').write_text('[]\n')
+
+# collect still skips corrupt files (housekeeping must not abort).
+rows = elc.collect_logical_enrollments(enroll_dir, boot_dir)
+for row in rows:
+    if row.get('id') in ('bad-enroll', 'bad-boot'):
+        raise SystemExit('FAIL: collect should skip malformed JSON rows')
+
+findings = elc.scan_malformed_enrollment_files(enroll_dir, boot_dir)
+kinds = {k for k, _name, _d in findings}
+if 'malformed_enrollment' not in kinds:
+    raise SystemExit('FAIL: missing malformed_enrollment finding: %r' % (findings,))
+if 'malformed_bootstrap' not in kinds:
+    raise SystemExit('FAIL: missing malformed_bootstrap finding: %r' % (findings,))
+if any(k == 'orphan_bootstrap_ticket' for k, _n, _d in findings):
+    raise SystemExit('FAIL: malformed bootstrap must not be named orphan_bootstrap_ticket')
+
+scan = elc.doctor_scan_enrollment_lifecycle(enroll_dir, boot_dir, retention_days=30)
+scan_kinds = {k for k, _n, _d in scan}
+if 'malformed_enrollment' not in scan_kinds or 'malformed_bootstrap' not in scan_kinds:
+    raise SystemExit('FAIL: doctor_scan missing malformed kinds: %r' % (scan,))
+if any(k == 'orphan_bootstrap_ticket' for k, _n, _d in scan):
+    raise SystemExit('FAIL: doctor_scan still emits orphan_bootstrap_ticket for corrupt JSON')
+
+# Doctor WARN surface (state checks) must classify these as WARN.
+# FRP_DEPLOY_TEST_ROOT remaps /var/lib/... into the isolated tree.
+os.environ['FRP_DEPLOY_TEST_ROOT'] = str(root)
+sys.path.insert(0, str(Path(sys.argv[2]).resolve().parent))
+import frp_doctor
+
+facts = {
+    'expect_root_owner': False,
+    'systemd_usable': False,
+    'skip_network': True,
+    'units': {},
+    'network': {},
+    'platform': {},
+    'disk': {},
+    'clock': {'status': 'ok', 'detail': ''},
+}
+_text, _code, report = frp_doctor.run_doctor(str(root), facts, fmt='json', skip_network=True)
+statuses = {c['id']: c['status'] for c in report.checks}
+matched = [
+    (cid, st) for cid, st in statuses.items()
+    if 'malformed_bootstrap' in cid or 'malformed_enrollment' in cid
+]
+if not matched:
+    raise SystemExit('FAIL: doctor report missing malformed checks: %r' % (sorted(statuses),))
+for cid, st in matched:
+    if st != 'WARN':
+        raise SystemExit('FAIL: doctor %s status=%s (want WARN)' % (cid, st))
+print('PASS MALFORMED_ENROLLMENT_VISIBILITY')
+PY
+pass "MALFORMED_ENROLLMENT_VISIBILITY"
+
 echo "ENROLLMENT_RETENTION_TESTS=PASS"

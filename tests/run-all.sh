@@ -12,9 +12,22 @@ git ls-files -o --exclude-standard '*.sh' | xargs -r bash -n
 bash -n tools/frp-server-status tools/frp-project-update tools/frp-update tools/frp-upstream tools/frp-client tools/frpctl tools/frpcli lib/frp-client-lifecycle.sh
 
 echo "=== Python compile ==="
-python3 -m py_compile server/frp-port-allocator.py server/migrate_token.py scripts/build-bundles.py lib/frp_mgmt_auth.py lib/frp_pki.py lib/frp_frontend.py lib/frp_doctor.py lib/frp_install_txn.py lib/frp_client_registry.py lib/frp_audit.py lib/frp_project_files.py lib/frp_control_locks.py lib/frp_ctl_grammar.py lib/frp_ctl_repl.py lib/frp_enrollment_lifecycle.py lib/frp_client_lifecycle.py
-python3 -m py_compile tools/frp-create-client tools/frp-enrollments tools/frp-enrollment-revoke tools/frp-enroll-bulk tools/frp-clients tools/frp-client-info tools/frp-client-set tools/frp-groups tools/frp-group-set tools/frp-release-client tools/frp-release-service tools/frp-revoke-client tools/frp-set-client-installer-url tools/frp-backup tools/frp-restore
-python3 -m py_compile tests/test-allocator.py tests/test-enrollment-security.py tests/test-mgmt-identity.py tests/test-pki-https.py tests/test-bootstrap-ticket.py tests/test-frontend-proxy.py tests/test-client-registry.py tests/test-clock-skew-auth.py lib/frp_enroll_challenge.py lib/frp_clock_sync.py
+mapfile -t PY_INVENTORY < <(
+  git ls-files 'lib/*.py' 'server/*.py' 'scripts/*.py'
+  git ls-files 'tools/*' | while read -r f; do
+    [[ -f "$f" ]] || continue
+    head -n 1 "$f" | grep -qE '^#!.*python' && printf '%s\n' "$f"
+  done
+)
+# Inventory guard: refuse silent omission of fleet/lifecycle/purge modules.
+printf '%s\n' "${PY_INVENTORY[@]}" | grep -qx 'lib/frp_fleet.py' \
+  || { echo "FAIL missing lib/frp_fleet.py in compile inventory" >&2; exit 1; }
+printf '%s\n' "${PY_INVENTORY[@]}" | grep -qx 'lib/frp_server_lifecycle.py' \
+  || { echo "FAIL missing lib/frp_server_lifecycle.py in compile inventory" >&2; exit 1; }
+printf '%s\n' "${PY_INVENTORY[@]}" | grep -qx 'tools/frp-enrollment-purge' \
+  || { echo "FAIL missing tools/frp-enrollment-purge in compile inventory" >&2; exit 1; }
+python3 -m py_compile "${PY_INVENTORY[@]}"
+python3 -m py_compile tests/test-allocator.py tests/test-enrollment-security.py tests/test-mgmt-identity.py tests/test-pki-https.py tests/test-bootstrap-ticket.py tests/test-frontend-proxy.py tests/test-client-registry.py tests/test-clock-skew-auth.py tests/test-deployment-mode-fail-closed.py tests/test-audit-log.py tests/test-audit-query.py
 
 echo "=== tests ==="
 ./tests/test-server-migration.sh
@@ -49,6 +62,7 @@ python3 tests/test-mgmt-identity.py
 ./tests/test-client-groups.sh
 ./tests/test-client-groups-phase3.sh
 python3 tests/test-client-registry.py
+python3 tests/test-deployment-mode-fail-closed.py
 ./tests/test-frp-client.sh
 ./tests/test-lifecycle.sh
 ./tests/test-guided-ux.sh
@@ -67,6 +81,7 @@ bash ./tests/test-bundle-source-leakage.sh
 ./tests/test-frpctl-completion.sh
 ./tests/test-create-zero-touch.sh
 ./tests/test-frpctl-doctor.sh
+./tests/test-systemd-units.sh
 ./tests/test-port-architecture.sh
 ./tests/test-ca-bootstrap.sh
 ./tests/test-pki-https.py

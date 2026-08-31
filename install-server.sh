@@ -272,7 +272,8 @@ frp_distro_nginx_is_enabled() {
 
 frp_nginx_is_single443_reinstall() {
   local existing
-  existing="$(frp_normalize_deployment_mode "${EXISTING_DEPLOYMENT_MODE:-direct}")" || existing=direct
+  # Fail closed: unknown EXISTING_DEPLOYMENT_MODE is not a single443 reinstall.
+  existing="$(frp_normalize_deployment_mode "${EXISTING_DEPLOYMENT_MODE:-direct}")" || return 1
   [[ "$existing" == "single443" ]]
 }
 

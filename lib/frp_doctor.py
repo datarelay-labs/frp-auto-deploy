@@ -962,15 +962,18 @@ def server_config_ports(cfg):
     port_end = coerce_port(cfg.get('port_end'))
     listen_host = str(cfg.get('listen_host') or '0.0.0.0')
     bind_addr = str(cfg.get('frp_control_bind_addr') or listen_host or '0.0.0.0')
-    mode = str(cfg.get('deployment_mode') or 'direct').strip().lower()
-    compact = mode.replace('-', '').replace('_', '')
-    if compact in ('single443', 'enterprise', 'enterprisesingle443'):
-        mode = 'single443'
-    else:
-        mode = 'direct'
-    transport = str(cfg.get('frp_transport') or '').strip().lower()
-    if not transport:
-        transport = 'wss' if mode == 'single443' else 'tcp'
+    mode_raw = cfg.get('deployment_mode')
+    try:
+        from frp_frontend import normalize_deployment_mode, normalize_transport
+        if mode_raw is None or (isinstance(mode_raw, str) and not str(mode_raw).strip()):
+            mode = 'direct'
+        else:
+            mode = normalize_deployment_mode(mode_raw)
+        transport = normalize_transport(cfg.get('frp_transport'), mode)
+    except Exception:
+        # Fail closed in doctor output rather than silently mapping typos to direct.
+        mode = 'INVALID'
+        transport = 'INVALID'
     alloc_url = str(cfg.get('allocator_public_url') or '')
     return {
         'public_host': public_host,
@@ -1970,6 +1973,13 @@ def check_server(report, paths, facts, skip_network):
                 bootstrap_abs = parent + '/bootstrap'
         if enrollments.startswith('/'):
             enrollments_abs = enrollments
+        # Isolated test trees prefix live absolute paths under FRP_DEPLOY_TEST_ROOT.
+        test_root = os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
+        if test_root:
+            if enrollments_abs.startswith('/') and not enrollments_abs.startswith(test_root):
+                enrollments_abs = test_root + enrollments_abs
+            if bootstrap_abs.startswith('/') and not bootstrap_abs.startswith(test_root):
+                bootstrap_abs = test_root + bootstrap_abs
         try:
             elc = None
             for candidate in (
@@ -1992,6 +2002,7 @@ def check_server(report, paths, facts, skip_network):
                     'duplicate_pairing': FAIL,
                     'orphan_bootstrap_ticket': WARN,
                     'orphan_paired_enrollment': WARN,
+                    'malformed_bootstrap': WARN,
                     'malformed_enrollment': WARN,
                     'malformed_terminal_timestamp': WARN,
                     'retention_overdue': WARN,

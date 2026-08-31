@@ -568,6 +568,13 @@ if grep -E 'Public inbound:.*7000' "$WORKDIR/s443-fw.out"; then
 fi
 pass "single443 firewall summary hides backends"
 
+# O — IPv6 port-collision scope:
+# Public/listen port architecture assertions in this suite are IPv4-oriented
+# (0.0.0.0 / 127.0.0.1 / dotted-quad public_host). Dual-stack IPv6 bind
+# collision (same port on :: and 0.0.0.0, or v4-mapped peers) is out of
+# product scope until an explicit IPv6 architecture exists. Do not invent one.
+pass "IPv4-only port architecture scope (no IPv6 dual-stack claims)"
+
 echo
 echo "DIRECT_MODE_REGRESSION=PASS"
 echo "SINGLE443_CONFIG=PASS"

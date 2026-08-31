@@ -209,7 +209,15 @@ def cert_days_remaining(cert_path):
 
 def run_server_test():
     cfg = load_config()
-    mode = str(cfg.get('deployment_mode') or 'direct').strip().lower()
+    try:
+        from frp_frontend import normalize_deployment_mode
+        raw_mode = cfg.get('deployment_mode')
+        if raw_mode is None or (isinstance(raw_mode, str) and not str(raw_mode).strip()):
+            mode = 'direct'
+        else:
+            mode = normalize_deployment_mode(raw_mode)
+    except Exception:
+        mode = 'INVALID'
     checks = []
 
     def configuration():
@@ -385,7 +393,15 @@ def validate_log_lines(value):
 
 def fetch_logs(component='all', lines=100, follow=False):
     cfg = load_config()
-    mode = str(cfg.get('deployment_mode') or 'direct').strip().lower()
+    try:
+        from frp_frontend import normalize_deployment_mode
+        raw_mode = cfg.get('deployment_mode')
+        if raw_mode is None or (isinstance(raw_mode, str) and not str(raw_mode).strip()):
+            mode = 'direct'
+        else:
+            mode = normalize_deployment_mode(raw_mode)
+    except Exception:
+        mode = 'direct'
     units = ['frps', 'frp-port-allocator']
     if mode == 'single443':
         units.append('frp-frontend')

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import json
+import multiprocessing
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -16,12 +18,25 @@ def load_audit():
     return mod
 
 
+def _concurrent_emit_worker(root, count, queue):
+    os.environ["FRP_DEPLOY_TEST_ROOT"] = root
+    os.environ.pop("FRP_AUDIT_LOG", None)
+    audit = load_audit()
+    ok = 0
+    for index in range(count):
+        if audit.emit("backup.created", details={"n": index, "pid": os.getpid()}):
+            ok += 1
+    queue.put(ok)
+
+
 class AuditLogTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = self.tmp.name
         os.environ["FRP_DEPLOY_TEST_ROOT"] = self.root
         os.environ.pop("FRP_AUDIT_LOG", None)
+        os.environ.pop("FRP_AUDIT_ROTATE_BYTES", None)
+        os.environ.pop("FRP_AUDIT_ROTATE_KEEP", None)
         self.audit = load_audit()
 
     def tearDown(self):
@@ -84,6 +99,82 @@ class AuditLogTests(unittest.TestCase):
         self.assertFalse(Path(f"{path}.{keep + 1}").exists())
         self.assertTrue(Path(f"{path}.1").is_file())
         self.assertTrue(Path(f"{path}.{keep}").is_file())
+
+    def test_symlink_current_log_refused(self):
+        path = self.audit.audit_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        victim = Path(self.root) / "victim.jsonl"
+        victim.write_text("keep\n", encoding="utf-8")
+        path.symlink_to(victim)
+        ok = self.audit.emit("backup.created", details={"n": 1})
+        self.assertFalse(ok)
+        self.assertEqual(victim.read_text(encoding="utf-8"), "keep\n")
+
+    def test_concurrent_writers_bounded(self):
+        workers = 4
+        per_worker = 25
+        queue = multiprocessing.Queue()
+        procs = []
+        for _ in range(workers):
+            proc = multiprocessing.Process(
+                target=_concurrent_emit_worker,
+                args=(self.root, per_worker, queue),
+            )
+            proc.start()
+            procs.append(proc)
+        for proc in procs:
+            proc.join(timeout=30)
+            self.assertEqual(proc.exitcode, 0)
+        total_ok = sum(queue.get(timeout=1) for _ in range(workers))
+        self.assertEqual(total_ok, workers * per_worker)
+        path = self.audit.audit_path()
+        lines = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        self.assertEqual(len(lines), workers * per_worker)
+        for line in lines:
+            json.loads(line)
+
+    def test_rotation_with_lock(self):
+        path = self.audit.audit_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.environ["FRP_AUDIT_ROTATE_BYTES"] = "200"
+        os.environ["FRP_AUDIT_ROTATE_KEEP"] = "3"
+        # Hold the audit lock while another emit must wait then succeed.
+        lock_path = path.parent / (path.name + ".lock")
+        import fcntl
+
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            started = time.time()
+            result = {"ok": None}
+
+            def delayed_emit():
+                os.environ["FRP_DEPLOY_TEST_ROOT"] = self.root
+                audit = load_audit()
+                result["ok"] = audit.emit("backup.created", details={"pad": "y" * 40})
+
+            import threading
+
+            thread = threading.Thread(target=delayed_emit)
+            thread.start()
+            time.sleep(0.2)
+            self.assertTrue(thread.is_alive())
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            thread.join(timeout=10)
+            self.assertFalse(thread.is_alive())
+            self.assertTrue(result["ok"])
+            self.assertGreaterEqual(time.time() - started, 0.15)
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        for index in range(30):
+            self.assertTrue(
+                self.audit.emit("backup.created", details={"n": index, "pad": "z" * 30})
+            )
+        self.assertTrue(path.is_file())
+        self.assertTrue(Path(str(path) + ".1").is_file())
 
 
 if __name__ == "__main__":

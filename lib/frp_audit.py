@@ -72,20 +72,76 @@ def _redact(value):
 
 def _atomic_append(path: Path, line: str):
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise AuditError("audit log path must be a regular file (refusing symlink)")
+    parent = path.parent
+    if parent.is_symlink():
+        raise AuditError("audit log parent must not be a symlink")
     if not path.exists():
-        path.touch()
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_APPEND
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(str(path), flags, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            os.write(fd, line.encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        try:
+            os.chmod(path.parent, 0o700)
+        except OSError:
+            pass
+        return
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if mode & 0o077:
         os.chmod(path, 0o600)
-        os.chmod(path.parent, 0o700)
-    else:
-        mode = stat.S_IMODE(path.stat().st_mode)
-        if mode & 0o077:
-            os.chmod(path, 0o600)
-    fd = os.open(str(path), os.O_WRONLY | os.O_APPEND, 0o600)
+    flags = os.O_WRONLY | os.O_APPEND
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(str(path), flags, 0o600)
     try:
         os.write(fd, line.encode("utf-8"))
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def _audit_lock_path(path: Path) -> Path:
+    return path.parent / (path.name + ".lock")
+
+
+def _with_audit_lock(path: Path, fn):
+    """Inter-process lock covering rotate + append. Bounded wait; never hangs forever."""
+    lock_path = _audit_lock_path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    timeout = float(os.environ.get("FRP_AUDIT_LOCK_TIMEOUT", "5"))
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        import fcntl
+        import time
+
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise AuditError("timed out waiting for audit log lock")
+                time.sleep(0.02)
+        return fn()
+    finally:
+        try:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def emit(event, actor="local-root", details=None, fail_closed=False, **fields):
@@ -103,14 +159,19 @@ def emit(event, actor="local-root", details=None, fail_closed=False, **fields):
         record["details"] = _redact(details)
     record = _redact(record)
     try:
-        rotate_if_needed(
-            max_bytes=int(os.environ.get("FRP_AUDIT_ROTATE_BYTES", str(5 * 1024 * 1024))),
-            keep=int(os.environ.get("FRP_AUDIT_ROTATE_KEEP", "5")),
-        )
-        payload = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
-        if len(payload.encode("utf-8")) > MAX_RECORD_BYTES:
-            raise AuditError("audit record too large")
-        _atomic_append(audit_path(), payload + "\n")
+        path = audit_path()
+
+        def _write():
+            rotate_if_needed(
+                max_bytes=int(os.environ.get("FRP_AUDIT_ROTATE_BYTES", str(5 * 1024 * 1024))),
+                keep=int(os.environ.get("FRP_AUDIT_ROTATE_KEEP", "5")),
+            )
+            payload = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+            if len(payload.encode("utf-8")) > MAX_RECORD_BYTES:
+                raise AuditError("audit record too large")
+            _atomic_append(path, payload + "\n")
+
+        _with_audit_lock(path, _write)
         return True
     except Exception as exc:
         if fail_closed:
@@ -171,6 +232,8 @@ def sys_stderr_warn(message):
 
 def rotate_if_needed(max_bytes=5 * 1024 * 1024, keep=5):
     path = audit_path()
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise AuditError("audit log path must be a regular file (refusing symlink)")
     if not path.is_file() or path.stat().st_size < max_bytes:
         return
     keep = max(int(keep), 1)
@@ -178,10 +241,18 @@ def rotate_if_needed(max_bytes=5 * 1024 * 1024, keep=5):
     # Never create .keep+1 (query only reads .1 .. .keep).
     oldest = Path(f"{path}.{keep}")
     if oldest.exists() or oldest.is_symlink():
-        oldest.unlink()
+        if oldest.is_symlink() or oldest.is_file():
+            oldest.unlink()
+        else:
+            raise AuditError("refusing to rotate over unexpected path")
     for index in range(keep - 1, 0, -1):
         src = Path(f"{path}.{index}")
-        if src.exists() or src.is_symlink():
+        if src.is_symlink():
+            src.unlink()
+            continue
+        if src.exists():
+            if not src.is_file():
+                raise AuditError("refusing to rotate non-regular rotated log")
             src.replace(Path(f"{path}.{index + 1}"))
     path.replace(Path(f"{path}.1"))
     path.touch()

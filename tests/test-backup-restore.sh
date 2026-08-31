@@ -271,4 +271,103 @@ grep -q 'RECOVERY_REQUIRED' "$WORKDIR/rbhealth.stderr" || fail "restore recovery
 [[ -f "$HEALTH/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "restore pending missing"
 pass "RESTORE_ROLLBACK_FAILURE"
 
+# Symlink / existing-file backup output must refuse without clobbering.
+SAFE_TREE="$WORKDIR/safe-tree"
+seed_state "$SAFE_TREE" symlink-safe
+export FRP_DEPLOY_TEST_ROOT="$SAFE_TREE"
+VICTIM="$WORKDIR/victim-secret.txt"
+printf 'do-not-clobber\n' >"$VICTIM"
+SYMLINK_OUT="$WORKDIR/backup-as-symlink.tar.gz"
+ln -s "$VICTIM" "$SYMLINK_OUT"
+if python3 "$ROOT/tools/frp-backup" "$SYMLINK_OUT" \
+  >"$WORKDIR/sym.stdout" 2>"$WORKDIR/sym.stderr"; then
+  fail "backup through symlink output should refuse"
+fi
+grep -qi 'symlink\|refuse\|overwrite' "$WORKDIR/sym.stderr" "$WORKDIR/sym.stdout" \
+  || fail "symlink output diagnostic"
+[[ "$(cat "$VICTIM")" == "do-not-clobber" ]] || fail "symlink backup clobbered victim"
+pass "BACKUP_REFUSES_SYMLINK_OUTPUT"
+
+EXISTING_OUT="$WORKDIR/already-exists.tar.gz"
+printf 'preexisting\n' >"$EXISTING_OUT"
+if python3 "$ROOT/tools/frp-backup" "$EXISTING_OUT" \
+  >"$WORKDIR/exist.stdout" 2>"$WORKDIR/exist.stderr"; then
+  fail "backup over existing regular file should refuse"
+fi
+grep -qi 'refuse\|overwrite\|exist' "$WORKDIR/exist.stderr" "$WORKDIR/exist.stdout" \
+  || fail "existing file diagnostic"
+[[ "$(cat "$EXISTING_OUT")" == "preexisting" ]] || fail "existing backup file mutated"
+pass "BACKUP_REFUSES_EXISTING_OUTPUT"
+
+LINK_PARENT="$WORKDIR/link-parent"
+REAL_PARENT="$WORKDIR/real-parent"
+mkdir -p "$REAL_PARENT"
+ln -s "$REAL_PARENT" "$LINK_PARENT"
+if python3 "$ROOT/tools/frp-backup" "$LINK_PARENT/server.tar.gz" \
+  >"$WORKDIR/lparent.stdout" 2>"$WORKDIR/lparent.stderr"; then
+  fail "backup through symlink parent should refuse"
+fi
+grep -qi 'symlink' "$WORKDIR/lparent.stderr" "$WORKDIR/lparent.stdout" \
+  || fail "symlink parent diagnostic"
+[[ ! -e "$REAL_PARENT/server.tar.gz" ]] || fail "symlink parent write leaked"
+pass "BACKUP_REFUSES_SYMLINK_PARENT"
+
+# Restore refuses when control locks module is unavailable.
+python3 - "$ROOT" "$BACKUP" <<'PY' || fail "restore locks-unavailable abort"
+import importlib.machinery
+import importlib.util
+import sys
+from pathlib import Path
+from unittest import mock
+
+root = Path(sys.argv[1])
+archive = sys.argv[2]
+restore_path = root / "tools" / "frp-restore"
+loader = importlib.machinery.SourceFileLoader(
+    "frp_restore_under_test", str(restore_path)
+)
+spec = importlib.util.spec_from_loader(loader.name, loader)
+assert spec is not None and spec.loader is not None, restore_path
+mod = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = mod
+loader.exec_module(mod)
+
+real_load = mod._load_module
+
+def fake_load(name, filename):
+    if filename == "frp_control_locks.py" or name == "frp_control_locks":
+        return None
+    return real_load(name, filename)
+
+buf_err = []
+def fake_error(msg):
+    buf_err.append(str(msg))
+    print(msg, file=sys.stderr)
+
+with mock.patch.object(mod, "_load_module", side_effect=fake_load), \
+     mock.patch.object(mod, "error", side_effect=fake_error), \
+     mock.patch.object(sys, "argv", ["frp-restore", archive]):
+    code = mod.main()
+assert code == 1, code
+assert any("frp_control_locks" in m for m in buf_err), buf_err
+print("RESTORE_LOCKS_UNAVAILABLE_OK")
+PY
+pass "RESTORE_LOCKS_MODULE_REQUIRED"
+
+# Archive input that is a symlink must be refused without following.
+ARCHIVE_VICTIM="$WORKDIR/real-archive.tar.gz"
+cp "$BACKUP" "$ARCHIVE_VICTIM"
+ARCHIVE_LINK="$WORKDIR/archive-link.tar.gz"
+ln -s "$ARCHIVE_VICTIM" "$ARCHIVE_LINK"
+export FRP_DEPLOY_TEST_ROOT="$SAFE_TREE"
+BEFORE_CFG="$(sha256sum "$SAFE_TREE/etc/frp-auto-deploy/config.json" | awk '{print $1}')"
+if python3 "$ROOT/tools/frp-restore" "$ARCHIVE_LINK" \
+  >"$WORKDIR/asyml.stdout" 2>"$WORKDIR/asyml.stderr"; then
+  fail "restore of symlink archive should refuse"
+fi
+grep -qi 'symlink' "$WORKDIR/asyml.stderr" || fail "symlink archive diagnostic"
+[[ "$(sha256sum "$SAFE_TREE/etc/frp-auto-deploy/config.json" | awk '{print $1}')" == "$BEFORE_CFG" ]] \
+  || fail "symlink archive restore mutated state"
+pass "RESTORE_REFUSES_SYMLINK_ARCHIVE"
+
 echo "BACKUP_RESTORE_TEST=PASS"

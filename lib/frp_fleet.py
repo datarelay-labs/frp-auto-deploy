@@ -178,7 +178,15 @@ def server_health_summary(cfg, state):
     out['allocator'] = unit_label(
         'frp-port-allocator', '/etc/systemd/system/frp-port-allocator.service'
     )
-    mode = str(cfg.get('deployment_mode') or 'direct').strip().lower()
+    mode_raw = cfg.get('deployment_mode')
+    try:
+        from frp_frontend import normalize_deployment_mode
+        if mode_raw is None or (isinstance(mode_raw, str) and not str(mode_raw).strip()):
+            mode = 'direct'
+        else:
+            mode = normalize_deployment_mode(mode_raw)
+    except Exception:
+        mode = 'INVALID'
     if mode == 'single443':
         out['frontend'] = unit_label(
             'frp-frontend', '/etc/systemd/system/frp-frontend.service'
@@ -208,15 +216,24 @@ def group_summary_counts(state):
     for _gid, group in groups.items():
         if not isinstance(group, dict):
             continue
-        gtype = CREG.group_record_type(group)
+        try:
+            gtype = CREG.group_record_type(group)
+        except ValueError:
+            continue
         if gtype == 'manual':
             manual += 1
         elif gtype == 'dynamic':
             dynamic += 1
     ungrouped = 0
     for _mid, client in (state.get('clients') or {}).items():
-        if isinstance(client, dict) and CREG.client_is_ungrouped(state, client):
-            ungrouped += 1
+        if not isinstance(client, dict):
+            continue
+        try:
+            if CREG.client_is_ungrouped(state, client):
+                ungrouped += 1
+        except ValueError:
+            # Corrupt membership must not inflate ungrouped counts.
+            continue
     return {'manual': manual, 'dynamic': dynamic, 'ungrouped': ungrouped}
 
 

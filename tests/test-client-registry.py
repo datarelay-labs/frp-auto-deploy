@@ -19,14 +19,25 @@ def fail(name, detail=''):
 def test_source_ip():
     if creg.request_source_ip('203.0.113.10', {'X-Forwarded-For': '1.2.3.4'}) != '203.0.113.10':
         fail('direct ignores XFF')
+    if creg.request_source_ip('203.0.113.10', {'X-Real-IP': '1.2.3.4'}) != '203.0.113.10':
+        fail('direct ignores X-Real-IP')
     if creg.request_source_ip('127.0.0.1', {'X-Forwarded-For': '198.51.100.9'}) != '198.51.100.9':
         fail('loopback trusts XFF')
+    if creg.request_source_ip('127.0.0.1', {'X-Real-IP': '198.51.100.11'}) != '198.51.100.11':
+        fail('loopback trusts X-Real-IP')
+    if creg.request_source_ip(
+        '127.0.0.1',
+        {'X-Forwarded-For': '198.51.100.9', 'X-Real-IP': '203.0.113.1'},
+    ) != '198.51.100.9':
+        fail('XFF preferred over X-Real-IP')
     if creg.request_source_ip('::1', {'X-Forwarded-For': '2001:db8::1'}) != '2001:db8::1':
         fail('v6 loopback trusts XFF')
     if creg.request_source_ip('127.0.0.1', {'X-Forwarded-For': 'not-an-ip'}) != '127.0.0.1':
         fail('malformed XFF ignored')
     if creg.request_source_ip('::ffff:127.0.0.1', {'X-Forwarded-For': '203.0.113.8'}) != '203.0.113.8':
         fail('mapped loopback')
+    if creg.request_source_ip('10.0.0.5', {'X-Forwarded-For': '198.51.100.9'}) != '10.0.0.5':
+        fail('non-loopback private peer ignores XFF')
     pass_('SOURCE_IP_TRUST_BOUNDARY')
 
 
@@ -209,6 +220,91 @@ def test_tags():
     pass_('CLIENT_TAG_VALIDATION_AND_MATCHING')
 
 
+def test_validate_machine_id():
+    linux = 'aabbccddeeff00112233445566778899'
+    if creg.validate_machine_id(linux) != linux:
+        fail('linux hex32')
+    windows_like = 'DESKTOP-ABC1234.user-01:v1'
+    if creg.validate_machine_id(windows_like) != windows_like:
+        fail('windows-like')
+    maxed = 'A' + ('b' * 127)
+    if len(maxed) != 128:
+        fail('fixture length')
+    if creg.validate_machine_id(maxed) != maxed:
+        fail('max 128')
+    try:
+        creg.validate_machine_id('A' + ('b' * 128))  # 129
+        fail('129 accepted')
+    except ValueError:
+        pass
+    for bad in ('has\rreturn', 'has\nline', 'has\x00nul', 'a/b', 'a\\b', '', None, ' '):
+        try:
+            creg.validate_machine_id(bad)
+            fail('bad machine_id accepted', repr(bad))
+        except ValueError:
+            pass
+    pass_('VALIDATE_MACHINE_ID')
+
+
+def test_enroll_rejects_oversized_machine_id():
+    import hashlib
+    import hmac
+    import importlib.util
+    import json
+    import tempfile
+    import time
+
+    spec = importlib.util.spec_from_file_location(
+        'frp_port_allocator', ROOT / 'server' / 'frp-port-allocator.py'
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        registry = root / 'registry.json'
+        token = root / 'server_token'
+        enrollments = root / 'enrollments'
+        enrollments.mkdir()
+        token.write_text('tok\n')
+        cfg_path = root / 'config.json'
+        cfg_path.write_text(json.dumps({
+            'public_ip': '203.0.113.10',
+            'control_port': 443,
+            'port_start': 6000,
+            'port_end': 6100,
+            'registry_file': str(registry),
+            'enrollments_dir': str(enrollments),
+            'token_file': str(token),
+        }) + '\n')
+        mod.atomic_write_json(registry, mod.empty_registry())
+        mod.port_is_available = lambda port: True
+        alloc = mod.Allocator(str(cfg_path))
+        eid = 'aabbccddeeff0099'
+        secret = 'f' * 64
+        now = int(time.time())
+        (enrollments / (eid + '.json')).write_text(json.dumps({
+            'id': eid,
+            'secret': secret,
+            'expires_at': now + 600,
+            'bound_machine_id': None,
+            'used_at': None,
+        }) + '\n')
+        oversized = 'x' * 129
+        body = json.dumps({
+            'machine_id': oversized,
+            'hostname': 'too-long',
+            'services': [],
+        }, separators=(',', ':')).encode()
+        ts = str(now)
+        sig = hmac.new(
+            secret.encode(), (ts + '\n' + body.decode()).encode(), hashlib.sha256
+        ).hexdigest()
+        code, result = alloc.enroll(eid, ts, sig, body)
+        if code != 400:
+            fail('oversized machine_id enroll code', '%s %s' % (code, result))
+        pass_('ENROLL_REJECTS_OVERSIZED_MACHINE_ID')
+
+
 def main():
     test_source_ip()
     test_display_and_match()
@@ -216,6 +312,8 @@ def main():
     test_seed_does_not_overwrite()
     test_tags()
     test_groups()
+    test_validate_machine_id()
+    test_enroll_rejects_oversized_machine_id()
     print('CLIENT_REGISTRY_HELPERS=PASS')
 
 

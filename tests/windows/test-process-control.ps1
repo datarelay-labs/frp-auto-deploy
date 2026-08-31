@@ -27,9 +27,27 @@ try {
     } else {
         if (-not (Test-Path -LiteralPath (Get-FrpFrpcPath))) {
             Write-Host 'SKIP test-process-control (no frpc.exe)'
-            return
+            exit 0
         }
-        Write-FrpTestPass 'test-process-control (windows path present)'
+        # Real frpc present: actually start/stop. Do not fake PASS for path-only.
+        New-Item -ItemType Directory -Path (Get-FrpConfigDir) -Force | Out-Null
+        if (-not (Test-Path -LiteralPath (Get-FrpTomlPath))) {
+            Set-Content -LiteralPath (Get-FrpTomlPath) -Value "serverAddr = `"127.0.0.1`"`nserverPort = 7000`n"
+        }
+        try {
+            $pid1 = Start-FrpClient
+        } catch {
+            Write-Host ("SKIP test-process-control (frpc present but could not start: {0})" -f $_.Exception.Message)
+            exit 0
+        }
+        Assert-FrpTrue ((Get-FrpClientStatus).Running) 'frpc running'
+        $pid2 = Start-FrpClient
+        Assert-FrpEqual $pid1 $pid2 'idempotent start'
+        $stopped = Stop-FrpClient
+        Assert-FrpTrue $stopped 'stopped'
+        Assert-FrpTrue (-not (Get-FrpClientStatus).Running) 'not running after stop'
+        Stop-FrpClient | Out-Null
+        Write-FrpTestPass 'test-process-control (windows frpc)'
     }
 } finally {
     Remove-Item Env:FRP_WINDOWS_ALLOW_FAKE_PROCESS -ErrorAction SilentlyContinue

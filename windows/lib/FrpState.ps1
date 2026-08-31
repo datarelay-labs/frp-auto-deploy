@@ -130,14 +130,28 @@ function Test-FrpIdentityKeyAcl {
     }
 }
 
+function Test-FrpMachineId {
+    param([Parameter(Mandatory = $true)][string]$Id)
+    if ([string]::IsNullOrWhiteSpace($Id)) { return $false }
+    if ($Id.Length -lt 16 -or $Id.Length -gt 128) { return $false }
+    if ($Id -match "[\r\n\x00/\\]") { return $false }
+    # Mirror Linux canonical validator: leading alnum, then alnum/._:-
+    if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._:-]*$') { return $false }
+    return $true
+}
+
 function Get-FrpOrCreateClientId {
     Initialize-FrpDirectories
     $path = Get-FrpClientIdPath
     if (Test-Path -LiteralPath $path) {
         $id = ([System.IO.File]::ReadAllText($path)).Trim()
-        if ($id.Length -ge 16) { return $id }
+        if (Test-FrpMachineId -Id $id) { return $id }
+        throw ("ERROR: persisted client-id is invalid (length/charset); refuse to reuse: {0}" -f $path)
     }
     $id = New-FrpClientId
+    if (-not (Test-FrpMachineId -Id $id)) {
+        throw 'ERROR: generated client-id failed validation'
+    }
     $tmp = "$path.tmp"
     [System.IO.File]::WriteAllText($tmp, $id + "`n")
     Restrict-FrpFileAcl -Path $tmp

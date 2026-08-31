@@ -433,6 +433,24 @@ def restart_services(root: Path, allow_hook: bool = True) -> None:
     subprocess.run(["systemctl", "restart", *units], check=True)
 
 
+def resolve_archive_input(raw: str) -> Path:
+    """Resolve archive path without following a final-component symlink."""
+    path = Path(raw)
+    absolute = path if path.is_absolute() else (Path.cwd() / path)
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current = current / part
+        try:
+            if current.is_symlink():
+                raise RestoreError("backup archive path contains a symlink")
+        except OSError as exc:
+            raise RestoreError("backup archive path is not accessible") from exc
+    resolved = path.resolve(strict=False)
+    if not resolved.is_file() or resolved.is_symlink():
+        raise RestoreError("backup archive is missing or is a symlink")
+    return resolved
+
+
 def validate_to_temp(archive: Path, parent: Path | None = None) -> tuple[tempfile.TemporaryDirectory, Path]:
     temp = tempfile.TemporaryDirectory(prefix="frp-restore-", dir=str(parent) if parent else None)
     extracted = Path(temp.name)
@@ -459,6 +477,61 @@ def make_snapshot(root: Path) -> Path:
     return snapshot
 
 
+def _semantic_prevalidate_candidate(extracted: Path) -> None:
+    """Validate registry/config semantics BEFORE mutating live state."""
+    payload = extracted / "payload"
+    registry_path = payload / "var/lib/frp-auto-deploy/registry.json"
+    config_path = payload / "etc/frp-auto-deploy/config.json"
+    try:
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RestoreError("backup control-state JSON is invalid") from exc
+    if not isinstance(registry, dict) or registry.get("schema_version") != 2:
+        raise RestoreError("backup registry schema is invalid")
+    if not isinstance(config, dict):
+        raise RestoreError("backup server configuration is invalid")
+
+    frontend = _load_module("frp_frontend", "frp_frontend.py")
+    if frontend is None:
+        raise RestoreError("frp_frontend.py is unavailable for restore validation")
+    try:
+        mode = frontend.normalize_deployment_mode(config.get("deployment_mode"))
+        frontend.normalize_transport(config.get("frp_transport"), mode)
+    except ValueError as exc:
+        raise RestoreError(f"backup deployment mode/transport is invalid: {exc}") from exc
+
+    creg = _load_module("frp_client_registry", "frp_client_registry.py")
+    if creg is None:
+        raise RestoreError("frp_client_registry.py is unavailable for restore validation")
+    try:
+        if hasattr(creg, "validate_registry_state"):
+            creg.validate_registry_state(registry, config)
+        elif registry.get("schema_version") != 2:
+            raise RestoreError("backup registry schema is invalid")
+    except ValueError as exc:
+        raise RestoreError(f"backup registry failed validation: {exc}") from exc
+
+    toml_path = payload / "etc/frp/frps.toml"
+    if not toml_path.is_file() or "bindPort" not in toml_path.read_text(
+        encoding="utf-8", errors="replace"
+    ):
+        raise RestoreError("backup frps.toml is missing bindPort")
+    for rel in (
+        "etc/frp-auto-deploy/pki/ca.crt",
+        "etc/frp-auto-deploy/pki/ca.key",
+        "etc/frp-auto-deploy/pki/server.crt",
+        "etc/frp-auto-deploy/pki/server.key",
+    ):
+        path = payload / rel
+        if not path.is_file() or path.stat().st_size == 0:
+            raise RestoreError(f"backup PKI file is missing or empty: {rel}")
+    if mode == "single443":
+        frontend_conf = payload / "etc/frp-auto-deploy/frontend.conf"
+        if not frontend_conf.is_file():
+            raise RestoreError("single443 backup is missing frontend.conf")
+
+
 def main() -> int:
     if len(sys.argv) != 2 or sys.argv[1] in {"-h", "--help"}:
         print("Usage: frp-restore BACKUP.tar.gz")
@@ -467,21 +540,25 @@ def main() -> int:
     if os.geteuid() != 0 and not test_root:
         error("run with sudo")
         return 1
-    archive = Path(sys.argv[1]).resolve()
-    if not archive.is_file() or archive.is_symlink():
-        error("backup archive is missing or is a symlink")
+    try:
+        archive = resolve_archive_input(sys.argv[1])
+    except RestoreError as exc:
+        error(str(exc))
         return 1
     root = Path(test_root or "/")
 
     candidate_temp = None
     rollback_temp = None
     locks = _load_module("frp_control_locks", "frp_control_locks.py")
+    if locks is None:
+        error("frp_control_locks.py is unavailable")
+        return 1
     try:
         candidate_temp, candidate = validate_to_temp(archive)
+        _semantic_prevalidate_candidate(candidate)
         timeout = float(os.environ.get("FRP_RESTORE_LOCK_TIMEOUT", "30"))
-        lock_cm = locks.acquire_control_locks(root, timeout=timeout) if locks is not None else None
-        if lock_cm is not None:
-            lock_cm.__enter__()
+        lock_cm = locks.acquire_control_locks(root, timeout=timeout)
+        lock_cm.__enter__()
         try:
             snapshot = make_snapshot(root)
             _write_txn(root, snapshot)
@@ -507,8 +584,7 @@ def main() -> int:
                 raise RestoreError(f"restore failed; previous state was restored: {restore_exc}")
             _clear_txn(root)
         finally:
-            if lock_cm is not None:
-                lock_cm.__exit__(None, None, None)
+            lock_cm.__exit__(None, None, None)
         print("WARNING: the restored backup contained private keys, authentication tokens, and enrollment secrets.")
         print(f"Restore completed. Pre-restore snapshot: {snapshot}")
         _audit_emit("restore.completed", details={"snapshot": snapshot.name})

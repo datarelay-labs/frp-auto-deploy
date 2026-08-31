@@ -292,9 +292,13 @@ def port(v):
 frp = port(cfg.get('frp_control_listen_port')) or port(cfg.get('control_port'))
 alloc = port(cfg.get('allocator_listen_port')) or port(cfg.get('listen_port'))
 frontend = None
-mode = str(cfg.get('deployment_mode') or 'direct').strip().lower().replace('-', '').replace('_', '')
+raw = cfg.get('deployment_mode')
+mode = str(raw if raw is not None else 'direct').strip().lower().replace('-', '').replace('_', '')
+# Fail closed on unknown modes: do not invent 'direct' for frontend listen probes.
 if mode in ('single443', 'enterprise', 'enterprisesingle443'):
     frontend = port(cfg.get('frp_control_public_port')) or port(cfg.get('control_port'))
+elif mode not in ('direct', ''):
+    mode = None
 if frp:
     print('listen_frp=%s' % frp)
 if alloc:

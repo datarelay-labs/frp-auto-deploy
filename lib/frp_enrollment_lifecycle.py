@@ -601,10 +601,42 @@ def load_audit_emit():
     return None
 
 
+def scan_malformed_enrollment_files(enrollments_dir, bootstrap_dir):
+    """Report corrupt JSON that collect_logical_enrollments silently skips.
+
+    Collect/list/purge intentionally ignore unreadable files so one bad file
+    cannot abort housekeeping. Operators still need a clear surface for these
+    records — doctor WARN (and any list tooling that calls this helper).
+    """
+    findings = []
+    bootstrap_dir = Path(bootstrap_dir)
+    enrollments_dir = Path(enrollments_dir)
+    if bootstrap_dir.is_dir():
+        for path in sorted(bootstrap_dir.glob('*.json')):
+            rec = _load_json(path)
+            if not isinstance(rec, dict):
+                findings.append((
+                    'malformed_bootstrap',
+                    str(path.name),
+                    'malformed bootstrap ticket JSON',
+                ))
+    if enrollments_dir.is_dir():
+        for path in sorted(enrollments_dir.glob('*.json')):
+            rec = _load_json(path)
+            if not isinstance(rec, dict):
+                findings.append((
+                    'malformed_enrollment',
+                    str(path.name),
+                    'malformed enrollment JSON',
+                ))
+    return findings
+
+
 def doctor_scan_enrollment_lifecycle(enrollments_dir, bootstrap_dir, retention_days, now=None):
     """Read-only lifecycle diagnostics for doctor."""
     now = int(now if now is not None else time.time())
     findings = []
+    findings.extend(scan_malformed_enrollment_files(enrollments_dir, bootstrap_dir))
     rows = collect_logical_enrollments(enrollments_dir, bootstrap_dir, now)
     cutoff = now - (int(retention_days) * SECONDS_PER_DAY)
 
@@ -613,7 +645,6 @@ def doctor_scan_enrollment_lifecycle(enrollments_dir, bootstrap_dir, retention_d
         for path in Path(bootstrap_dir).glob('*.json'):
             rec = _load_json(path)
             if not isinstance(rec, dict):
-                findings.append(('orphan_bootstrap_ticket', str(path.name), 'malformed bootstrap ticket JSON'))
                 continue
             eid = str(rec.get('enrollment_id') or '').strip().lower()
             if eid:
@@ -627,7 +658,6 @@ def doctor_scan_enrollment_lifecycle(enrollments_dir, bootstrap_dir, retention_d
         for path in Path(enrollments_dir).glob('*.json'):
             rec = _load_json(path)
             if not isinstance(rec, dict):
-                findings.append(('malformed_enrollment', str(path.name), 'malformed enrollment JSON'))
                 continue
             eid = str(rec.get('id') or path.stem).strip().lower()
             if eid not in enrollment_map:

@@ -82,7 +82,23 @@ def _load_client_registry():
     raise RuntimeError('missing frp_client_registry.py')
 
 
+def _load_lib_module(name, filename):
+    candidates = [
+        Path(__file__).resolve().parent / filename,
+        Path(__file__).resolve().parent.parent / 'lib' / filename,
+        Path('/usr/local/lib/frp-auto-deploy') / filename,
+    ]
+    for path in candidates:
+        if path.is_file():
+            spec = importlib.util.spec_from_file_location(name, path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+    return None
+
+
 CREG = _load_client_registry()
+FRONTEND = _load_lib_module('frp_frontend', 'frp_frontend.py')
 
 
 def _load_enrollment_lifecycle():
@@ -507,22 +523,21 @@ def cfg_allocator_listen_port(cfg):
 
 
 def cfg_deployment_mode(cfg):
-    raw = str(cfg.get('deployment_mode') or 'direct').strip().lower()
-    compact = raw.replace('-', '').replace('_', '')
-    if compact in ('single443', 'enterprise', 'enterprisesingle443'):
-        return 'single443'
-    return 'direct'
+    """Fail closed on unknown deployment_mode — never silently become direct."""
+    if FRONTEND is None:
+        raise RuntimeError('frp_frontend.py is unavailable')
+    raw = cfg.get('deployment_mode')
+    if raw is None or (isinstance(raw, str) and not str(raw).strip()):
+        return 'direct'
+    return FRONTEND.normalize_deployment_mode(raw)
 
 
 def cfg_frp_transport(cfg):
-    explicit = str(cfg.get('frp_transport') or '').strip().lower()
-    if explicit == 'wss':
-        return 'wss'
-    if explicit == 'tcp':
-        return 'tcp'
-    if cfg_deployment_mode(cfg) == 'single443':
-        return 'wss'
-    return 'tcp'
+    """Fail closed on unknown frp_transport — empty inherits from mode."""
+    if FRONTEND is None:
+        raise RuntimeError('frp_frontend.py is unavailable')
+    mode = cfg_deployment_mode(cfg)
+    return FRONTEND.normalize_transport(cfg.get('frp_transport'), mode)
 
 
 def coerce_port(value):
@@ -575,54 +590,10 @@ def require_registry_v2(state):
 def validate_registry_invariants(state, cfg=None):
     """Fail closed on severe registry corruption. Do not silently repair."""
     state = require_registry_v2(state)
-    seen_ports = {}
-    port_start = None
-    port_end = None
-    protected = set()
-    if cfg:
-        try:
-            port_start = int(cfg.get('port_start'))
-            port_end = int(cfg.get('port_end'))
-        except (TypeError, ValueError):
-            port_start = None
-            port_end = None
-        for key in ('allocator_listen_port', 'frp_control_listen_port', 'listen_port'):
-            port = coerce_port(cfg.get(key))
-            if port is not None:
-                protected.add(port)
-    for item in state.get('reserved') or []:
-        port = coerce_port(item)
-        if port is not None:
-            seen_ports[port] = ('reserved', None)
-    for mid, client in (state.get('clients') or {}).items():
-        if not isinstance(client, dict):
-            raise RegistrySchemaError('REGISTRY_INVALID: client record is not an object')
-        status = client.get('mgmt_status')
-        if status is not None and status not in ('enrolled', 'legacy', 'revoked'):
-            raise RegistrySchemaError('REGISTRY_INVALID: invalid management identity status')
-        services = client.get('services') or {}
-        if not isinstance(services, dict):
-            raise RegistrySchemaError('REGISTRY_INVALID: client services must be a map')
-        seen_ids = set()
-        for sid, svc in services.items():
-            key = str(sid).strip().lower()
-            if key in seen_ids:
-                raise RegistrySchemaError('REGISTRY_INVALID: duplicate service id for client')
-            seen_ids.add(key)
-            if not isinstance(svc, dict):
-                raise RegistrySchemaError('REGISTRY_INVALID: service record is not an object')
-            port = coerce_port(svc.get('remote_port'))
-            if port is None:
-                continue
-            if port in seen_ports:
-                raise RegistrySchemaError('REGISTRY_INVALID: duplicate public port ownership')
-            seen_ports[port] = (mid, key)
-            if port_start is not None and port_end is not None:
-                if port < port_start or port > port_end:
-                    raise RegistrySchemaError('REGISTRY_INVALID: allocated port outside configured range')
-            if port in protected:
-                raise RegistrySchemaError('REGISTRY_INVALID: allocated port collides with a reserved control port')
-    return state
+    try:
+        return CREG.validate_registry_state(state, cfg)
+    except ValueError as exc:
+        raise RegistrySchemaError('REGISTRY_INVALID: %s' % exc) from exc
 
 
 def used_ports_from_state(state):
@@ -897,9 +868,9 @@ class Allocator:
         parsed = parse_bootstrap_ticket(raw_ticket if isinstance(raw_ticket, str) else '')
         machine_id = str(payload.get('machine_id', '') or '').strip()
         hostname = str(payload.get('hostname', '') or '').strip()
-        if not machine_id:
-            return 400, api_error('machine_id is required', 'ZERO_TOUCH_INPUT_INVALID')
-        if len(machine_id) > MACHINE_ID_MAX_LEN or any(c in machine_id for c in '\r\n/\\'):
+        try:
+            machine_id = CREG.validate_machine_id(machine_id)
+        except ValueError:
             return 400, api_error('invalid machine_id', 'ZERO_TOUCH_INPUT_INVALID')
         try:
             hostname = CREG.validate_hostname(hostname)
@@ -1281,9 +1252,9 @@ class Allocator:
 
         machine_id = str(payload.get('machine_id', '')).strip()
         hostname = str(payload.get('hostname', '')).strip()
-        if not machine_id:
-            return 400, api_error('machine_id is required', 'AUTH_FAILED')
-        if any(c in machine_id for c in '\r\n/\\'):
+        try:
+            machine_id = CREG.validate_machine_id(machine_id)
+        except ValueError:
             return 400, api_error('invalid machine_id', 'AUTH_FAILED')
         try:
             hostname = CREG.validate_hostname(hostname)

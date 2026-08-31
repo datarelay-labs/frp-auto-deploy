@@ -19,6 +19,7 @@ from pathlib import Path
 LABEL_MAX_LEN = 64
 NOTE_MAX_LEN = 1024
 HOSTNAME_MAX_LEN = 253
+MACHINE_ID_MAX_LEN = 128
 TAG_KEY_MAX_LEN = 64
 TAG_VALUE_MAX_LEN = 128
 SHORT_MACHINE_ID_LEN = 8
@@ -34,6 +35,8 @@ TAG_KEY_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
 TAG_VALUE_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:/@+ -]{0,127}$')
 GROUP_NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
 GROUP_ID_RE = re.compile(r'^grp_[0-9a-f]{8}$')
+# Linux /etc/machine-id (32 hex), Windows generated IDs, and bounded opaque IDs.
+MACHINE_ID_SAFE_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$')
 
 
 class ClientLookupError(Exception):
@@ -50,6 +53,28 @@ class GroupLookupError(Exception):
 
 def utc_now_iso():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+
+
+def validate_machine_id(value):
+    """Canonical machine/client identity validator for enroll, bootstrap, and mgmt.
+
+    Accepts legitimate Linux /etc/machine-id and Windows generated IDs while
+    rejecting path separators, control characters, and oversized keys.
+    """
+    if value is None:
+        raise ValueError('machine_id is required')
+    text = str(value).strip()
+    if not text:
+        raise ValueError('machine_id is required')
+    if len(text) > MACHINE_ID_MAX_LEN:
+        raise ValueError('machine_id exceeds maximum length')
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in text):
+        raise ValueError('machine_id contains control characters')
+    if any(ch in text for ch in '/\\'):
+        raise ValueError('machine_id contains path separators')
+    if not MACHINE_ID_SAFE_RE.fullmatch(text):
+        raise ValueError('machine_id contains unsafe characters')
+    return text
 
 
 def header_get(headers, name):
@@ -481,10 +506,14 @@ def system_group_meta(name):
 
 
 def group_record_type(group):
-    gtype = str((group or {}).get('type') or 'manual').strip().lower()
+    """Return group type. Unknown types raise — never silently become manual."""
+    raw = (group or {}).get('type')
+    if raw is None or (isinstance(raw, str) and not str(raw).strip()):
+        return 'manual'
+    gtype = str(raw).strip().lower()
     if gtype in ('manual', 'dynamic', 'system'):
         return gtype
-    return 'manual'
+    raise ValueError('unsupported group type: %s' % gtype)
 
 
 def normalize_match_tags(value):
@@ -511,31 +540,42 @@ def normalize_match_tags(value):
 
 
 def client_matches_dynamic_group(client, group):
-    try:
-        filters = normalize_match_tags((group or {}).get('match_tags'))
-    except ValueError:
-        return False
+    """Match dynamic membership. Invalid selectors raise (fail closed)."""
+    filters = normalize_match_tags((group or {}).get('match_tags'))
     if not filters:
-        return False
+        raise ValueError('dynamic group selector is empty')
     return client_matches_tags(client, list(filters.items()))
 
 
 def client_in_any_manual_group(state, client):
+    """True when the client has at least one persisted manual group_ids entry."""
     return bool(client_group_ids(client))
 
 
 def client_in_any_dynamic_group(state, client):
     for _gid, group in sorted_groups(state):
-        if group_record_type(group) == 'dynamic' and client_matches_dynamic_group(client, group):
-            return True
+        try:
+            gtype = group_record_type(group)
+        except ValueError:
+            continue
+        if gtype != 'dynamic':
+            continue
+        try:
+            if client_matches_dynamic_group(client, group):
+                return True
+        except ValueError:
+            # Corrupt dynamic selector must not silently exclude/include.
+            continue
     return False
 
 
 def client_is_ungrouped(state, client):
-    return (
-        not client_in_any_manual_group(state, client)
-        and not client_in_any_dynamic_group(state, client)
-    )
+    """System view: clients with no MANUAL group membership.
+
+    Dynamic membership is independent and must not remove a client from the
+    ungrouped operational view (Product Master).
+    """
+    return not client_in_any_manual_group(state, client)
 
 
 def client_matches_group_selector(state, client, selector):
@@ -547,12 +587,16 @@ def client_matches_group_selector(state, client, selector):
     group = groups.get(selector)
     if not isinstance(group, dict):
         return False
-    if group_record_type(group) == 'dynamic':
-        return client_matches_dynamic_group(client, group)
     try:
-        return validate_group_id(selector) in normalize_group_ids((client or {}).get('group_ids'))
+        gtype = group_record_type(group)
     except ValueError:
         return False
+    if gtype == 'dynamic':
+        try:
+            return client_matches_dynamic_group(client, group)
+        except ValueError:
+            return False
+    return validate_group_id(selector) in normalize_group_ids((client or {}).get('group_ids'))
 
 
 def client_group_memberships(state, client):
@@ -564,8 +608,13 @@ def client_group_memberships(state, client):
         if isinstance(group, dict):
             manual.append((gid, group))
     for gid, group in sorted_groups(state):
-        if group_record_type(group) == 'dynamic' and client_matches_dynamic_group(client, group):
-            dynamic.append((gid, group))
+        try:
+            if group_record_type(group) != 'dynamic':
+                continue
+            if client_matches_dynamic_group(client, group):
+                dynamic.append((gid, group))
+        except ValueError:
+            continue
     return manual, dynamic
 
 
@@ -713,10 +762,16 @@ def normalize_group_ids(value):
 
 
 def client_group_ids(client):
+    """Return normalized manual group_ids. Malformed membership raises."""
+    return normalize_group_ids((client or {}).get('group_ids'))
+
+
+def client_group_ids_or_corrupt(client):
+    """Read helper that surfaces corruption instead of inventing empty membership."""
     try:
-        return normalize_group_ids((client or {}).get('group_ids'))
-    except ValueError:
-        return []
+        return client_group_ids(client), None
+    except ValueError as exc:
+        return None, str(exc)
 
 
 def generate_group_id(existing_ids=None):
@@ -1048,3 +1103,126 @@ def load_server_registry(root=None):
         'clients': {},
     }
     return cfg, path, state
+
+
+def _coerce_port_value(value):
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if 1 <= value <= 65535 else None
+    text = str(value).strip()
+    if not text or not re.fullmatch(r'[0-9]+', text):
+        return None
+    port = int(text)
+    if 1 <= port <= 65535:
+        return port
+    return None
+
+
+def validate_registry_state(state, cfg=None):
+    """Canonical read-only registry validator. Never silently repairs.
+
+    Raises ValueError on the first severe invariant violation. Callers that need
+    multi-issue diagnostics (doctor) may catch and continue collecting.
+    """
+    if not isinstance(state, dict):
+        raise ValueError('registry is not a JSON object')
+    if state.get('schema_version') != 2:
+        raise ValueError('registry schema is not version 2')
+    clients = state.get('clients')
+    if clients is None:
+        clients = {}
+    if not isinstance(clients, dict):
+        raise ValueError('registry clients is not an object')
+    reserved = state.get('reserved')
+    if reserved is None:
+        reserved = []
+    if not isinstance(reserved, list):
+        raise ValueError('registry reserved list is invalid')
+    groups = state.get('groups')
+    if groups is None:
+        groups = {}
+    if not isinstance(groups, dict):
+        raise ValueError('registry groups must be an object')
+
+    for gid, group in groups.items():
+        gid_text = validate_group_id(gid)
+        if not isinstance(group, dict):
+            raise ValueError('group record %s is not an object' % gid_text)
+        validate_group_name(group.get('name'))
+        gtype = group_record_type(group)
+        if gtype == 'system':
+            raise ValueError('system groups must not be persisted: %s' % gid_text)
+        if gtype not in ('manual', 'dynamic'):
+            raise ValueError('unsupported group type on %s' % gid_text)
+        if gtype == 'dynamic':
+            filters = normalize_match_tags(group.get('match_tags'))
+            if not filters:
+                raise ValueError('dynamic group %s has empty selector' % gid_text)
+        description = group.get('description')
+        if description is not None:
+            validate_group_description(description)
+
+    port_start = port_end = None
+    protected = set()
+    if cfg:
+        port_start = _coerce_port_value(cfg.get('port_start'))
+        port_end = _coerce_port_value(cfg.get('port_end'))
+        for key in ('allocator_listen_port', 'frp_control_listen_port', 'listen_port'):
+            port = _coerce_port_value(cfg.get(key))
+            if port is not None:
+                protected.add(port)
+
+    seen_ports = {}
+    for item in reserved:
+        port = _coerce_port_value(item)
+        if port is None:
+            raise ValueError('reserved port entry is invalid')
+        if port in seen_ports:
+            raise ValueError('duplicate reserved port %s' % port)
+        seen_ports[port] = ('reserved', None)
+
+    for mid, client in clients.items():
+        validate_machine_id(mid)
+        if not isinstance(client, dict):
+            raise ValueError('client record is not an object')
+        if 'ssh_port' in client or 'https_port' in client:
+            raise ValueError('legacy SSH/HTTPS fields are present')
+        status = client.get('mgmt_status')
+        if status is not None and status not in ('enrolled', 'legacy', 'revoked'):
+            raise ValueError('invalid management identity status')
+        group_ids = client.get('group_ids')
+        if group_ids is not None:
+            normalized = normalize_group_ids(group_ids)
+            for gid in normalized:
+                if gid not in groups:
+                    raise ValueError('client references nonexistent group %s' % gid)
+                if group_record_type(groups[gid]) != 'manual':
+                    raise ValueError(
+                        'client group_ids must only reference manual groups (%s)' % gid
+                    )
+        services = client.get('services')
+        if services is None:
+            services = {}
+        if not isinstance(services, dict):
+            raise ValueError('client services must be a map')
+        seen_ids = set()
+        for sid, svc in services.items():
+            key = str(sid).strip().lower()
+            if key in seen_ids:
+                raise ValueError('duplicate service id %s' % key)
+            seen_ids.add(key)
+            if not isinstance(svc, dict):
+                raise ValueError('service record is not an object')
+            port = _coerce_port_value(svc.get('remote_port'))
+            if port is None:
+                continue
+            if port in seen_ports:
+                raise ValueError('duplicate public port ownership: %s' % port)
+            seen_ports[port] = (mid, key)
+            if port_start is not None and port_end is not None:
+                if port < port_start or port > port_end:
+                    raise ValueError('allocated port outside configured range: %s' % port)
+            if port in protected:
+                raise ValueError('allocated port collides with a reserved control port: %s' % port)
+    return state

@@ -783,11 +783,14 @@ curl -fsSL \
 - No automatic cloud firewall, security group, UFW, firewalld, iptables, or
   external NAT configuration
 - No automatic SSH account, password, or SSH key management
-- Windows client automation is not included
-+ Windows Client (experimental on `feature/windows-client`): see [docs/WINDOWS_CLIENT.md](docs/WINDOWS_CLIENT.md)
+- Windows client: implemented and CI-tested on the candidate branch; real-environment
+  validation is still pending (see [docs/WINDOWS_CLIENT.md](docs/WINDOWS_CLIENT.md)).
+  Windows Service install remains deferred
 - Some real-VM / SELinux / ARM64 / older OpenSSL combinations remain separately
   classified in the validation matrix
 - Project bootstrap scripts are checksummed, not cryptographically signed
+- Group / fleet Phase 3 features are implemented on the candidate branch and await
+  real E2E / release promotion (not claimed Stable)
 
 ---
 

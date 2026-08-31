@@ -256,6 +256,142 @@ else
   fail "deleted group redeem should fail closed"
 fi
 
+# Never-redeemed pending enrollment referencing a deleted group must fail closed.
+"$GSET" create pending-target >"$WORKDIR/pend_g.out" || fail "create pending-target"
+GID_PEND="$(python3 - "$REG" <<'PY'
+import json, sys
+state = json.load(open(sys.argv[1]))
+for gid, group in state['groups'].items():
+    if group.get('name') == 'pending-target':
+        print(gid)
+        break
+PY
+)"
+"$CREATE" --group pending-target --ttl 600 >"$WORKDIR/pend_enroll.out" || fail "create pending enrollment"
+PEND_EID="$(python3 - "$ENROLL" "$GID_PEND" <<'PY'
+import json, sys
+from pathlib import Path
+gid = sys.argv[2]
+for path in sorted(Path(sys.argv[1]).glob('*.json')):
+    record = json.load(path.open())
+    if record.get('used_at') or record.get('bound_machine_id'):
+        continue
+    if record.get('assigned_group_ids') == [gid]:
+        print(record['id'])
+        break
+else:
+    raise SystemExit('missing never-redeemed enrollment')
+PY
+)"
+"$GSET" delete pending-target >"$WORKDIR/pend_del.out" || fail "delete pending-target"
+if python3 - "$ROOT/server/frp-port-allocator.py" "$REG" "$ENROLL" "$PEND_EID" <<'PY'
+import hashlib, hmac, importlib.util, json, sys, time
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('alloc', sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+reg_path = Path(sys.argv[2])
+enroll_dir = Path(sys.argv[3])
+eid = sys.argv[4]
+record = json.load(open(enroll_dir / (eid + '.json')))
+assert not record.get('used_at') and not record.get('bound_machine_id')
+cfg = {'public_ip': '203.0.113.10', 'control_port': 443, 'port_start': 6000, 'port_end': 7000,
+       'registry_file': str(reg_path), 'enrollments_dir': str(enroll_dir),
+       'token_file': str(reg_path.parent / 'token')}
+cfg_path = reg_path.parent / 'alloc-pend.json'
+cfg_path.write_text(json.dumps(cfg) + '\n')
+mod.port_is_available = lambda port: True
+alloc = mod.Allocator(str(cfg_path))
+secret = record['secret']
+body = json.dumps({
+    'machine_id': 'ffffffff66666666ffffffff66666666',
+    'hostname': 'never-redeemed',
+    'services': [],
+}, separators=(',', ':')).encode()
+ts = str(int(time.time()))
+sig = hmac.new(secret.encode(), (ts + '\n' + body.decode()).encode(), hashlib.sha256).hexdigest()
+code, result = alloc.enroll(eid, ts, sig, body)
+raise SystemExit(0 if code == 403 else 1)
+PY
+then
+  pass "P3_2_NEVER_REDEEMED_DELETED_GROUP"
+else
+  fail "never-redeemed deleted group should fail closed"
+fi
+
+# Zero-touch pending enrollment with deleted assigned group fails on redeem.
+# Seed the enrollment side the same way issue_bootstrap_ticket persists groups.
+"$GSET" create zt-target >"$WORKDIR/zt_g.out" || fail "create zt-target"
+GID_ZT="$(python3 - "$REG" <<'PY'
+import json, sys
+state = json.load(open(sys.argv[1]))
+for gid, group in state['groups'].items():
+    if group.get('name') == 'zt-target':
+        print(gid)
+        break
+PY
+)"
+python3 - "$ROOT" "$REG" "$ENROLL" "$GID_ZT" <<'PY' || fail "seed zero-touch enrollment"
+import importlib.util, json, secrets, sys, time
+from pathlib import Path
+root = Path(sys.argv[1])
+reg_path = Path(sys.argv[2])
+enroll_dir = Path(sys.argv[3])
+gid = sys.argv[4]
+eid = 'ztdeleted000001'
+secret = 'e' * 64
+now = int(time.time())
+(enroll_dir / (eid + '.json')).write_text(json.dumps({
+    'id': eid,
+    'secret': secret,
+    'expires_at': now + 600,
+    'bound_machine_id': None,
+    'used_at': None,
+    'label': 'zt-del',
+    'type': 'zero-touch',
+    'assigned_group_ids': [gid],
+}, indent=2) + '\n')
+Path(reg_path.parent / 'zt-eid').write_text(eid + '\n')
+print('seeded')
+PY
+ZT_EID="$(cat "$TREE/var/lib/frp-auto-deploy/zt-eid")"
+"$GSET" delete zt-target >"$WORKDIR/zt_del.out" || fail "delete zt-target"
+if python3 - "$ROOT/server/frp-port-allocator.py" "$REG" "$ENROLL" "$ZT_EID" <<'PY'
+import hashlib, hmac, importlib.util, json, sys, time
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('alloc', sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+reg_path = Path(sys.argv[2])
+enroll_dir = Path(sys.argv[3])
+eid = sys.argv[4]
+record = json.load(open(enroll_dir / (eid + '.json')))
+assert record.get('type') == 'zero-touch'
+assert not record.get('used_at')
+cfg = {'public_ip': '203.0.113.10', 'control_port': 443, 'port_start': 6000, 'port_end': 7000,
+       'registry_file': str(reg_path), 'enrollments_dir': str(enroll_dir),
+       'token_file': str(reg_path.parent / 'token')}
+cfg_path = reg_path.parent / 'alloc-zt.json'
+cfg_path.write_text(json.dumps(cfg) + '\n')
+mod.port_is_available = lambda port: True
+alloc = mod.Allocator(str(cfg_path))
+secret = record['secret']
+body = json.dumps({
+    'machine_id': 'abababab77777777abababab77777777',
+    'hostname': 'zt-deleted-group',
+    'services': [],
+}, separators=(',', ':')).encode()
+ts = str(int(time.time()))
+sig = hmac.new(secret.encode(), (ts + '\n' + body.decode()).encode(), hashlib.sha256).hexdigest()
+code, result = alloc.enroll(eid, ts, sig, body)
+raise SystemExit(0 if code == 403 else 1)
+PY
+then
+  pass "P3_2_ZERO_TOUCH_DELETED_GROUP"
+else
+  fail "zero-touch deleted group should fail closed"
+fi
+
 # --- P3.3 System groups ---
 "$FRP_GROUPS" >"$WORKDIR/sys_list.out" || fail "show groups"
 grep -q 'system' "$WORKDIR/sys_list.out" || fail "system groups missing"
@@ -297,13 +433,112 @@ if grep -q 'aaaaaaaa' "$WORKDIR/dg_after.out"; then
 fi
 pass "P3_4_DYNAMIC_GROUPS"
 
-# ungrouped after dynamic
+# ungrouped after dynamic: dynamic membership must NOT remove ungrouped view.
+# bbbbbbbb has tags env=prod (matches prod-only / updated prod-seoul) but no
+# manual group_ids — must still appear. Manual member aaaaaaaa must not.
 "$FRP_GROUPS" ungrouped --clients >"$WORKDIR/ung.out" || fail "ungrouped clients"
 grep -q 'cccccccc' "$WORKDIR/ung.out" || fail "ungrouped should include c"
+grep -q 'bbbbbbbb' "$WORKDIR/ung.out" || fail "dynamic-only client must remain ungrouped"
 if grep -q 'aaaaaaaa' "$WORKDIR/ung.out"; then
   fail "manual member should not be ungrouped"
 fi
+"$CLIENTS" --group ungrouped >"$WORKDIR/ung_clients.out" || fail "clients --group ungrouped"
+grep -q 'bbbbbbbb' "$WORKDIR/ung_clients.out" || fail "clients filter missing dynamic-only b"
+grep -q 'cccccccc' "$WORKDIR/ung_clients.out" || fail "clients filter missing c"
+if grep -q 'aaaaaaaa' "$WORKDIR/ung_clients.out"; then
+  fail "clients filter included manual member a"
+fi
+python3 - "$WORKDIR/ung.out" "$WORKDIR/ung_clients.out" <<'PY' || fail "groups/clients ungrouped disagree"
+import re, sys
+def ids(path):
+    text = open(path).read()
+    found = set()
+    for mid in (
+        'aaaaaaaa11111111aaaaaaaa11111111',
+        'bbbbbbbb22222222bbbbbbbb22222222',
+        'cccccccc33333333cccccccc33333333',
+    ):
+        if mid in text or mid[:8] in text:
+            found.add(mid[:8])
+    return found
+g, c = ids(sys.argv[1]), ids(sys.argv[2])
+assert g == c == {'bbbbbbbb', 'cccccccc'}, (g, c)
+print('ungrouped agree')
+PY
+"$CTL" show fleet >"$WORKDIR/fleet_ung.out" 2>/dev/null \
+  || PYTHONPATH="$ROOT/lib${PYTHONPATH:+:$PYTHONPATH}" \
+     python3 "$ROOT/lib/frp_fleet.py" fleet >"$WORKDIR/fleet_ung.out" \
+  || fail "fleet overview"
+grep -E 'Ungrouped[[:space:]]+2' "$WORKDIR/fleet_ung.out" \
+  || fail "fleet ungrouped count should be 2 (b+c)"
+python3 - "$ROOT" "$REG" <<'PY' || fail "fleet/clients ungrouped count disagree"
+import importlib.util, json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+state = json.loads(Path(sys.argv[2]).read_text())
+spec = importlib.util.spec_from_file_location('fleet', root / 'lib/frp_fleet.py')
+# Ensure CREG importable
+sys.path.insert(0, str(root / 'lib'))
+fleet = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(fleet)
+counts = fleet.group_summary_counts(state)
+assert counts['ungrouped'] == 2, counts
+print('fleet count ok')
+PY
 pass "P3_3_UNGROUPED_WITH_DYNAMIC"
+
+# Ungrouped matrix: no manual/no dynamic, manual only, dynamic only,
+# manual+dynamic, tag change drops dynamic match but stays ungrouped.
+python3 - "$ROOT" "$REG" <<'PY' || fail "ungrouped matrix"
+import importlib.util, json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+reg_path = Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location('creg', root / 'lib/frp_client_registry.py')
+creg = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(creg)
+
+def check(name, state, mid, expect_ungrouped):
+    client = state['clients'][mid]
+    got = creg.client_is_ungrouped(state, client)
+    assert got is expect_ungrouped, (name, mid, got, expect_ungrouped)
+
+# Fresh isolated fixtures (do not mutate live phase3 registry semantics here).
+base_clients = {
+    'nomanual000000000000000000000001': {'tags': {}, 'group_ids': []},
+    'manualonly0000000000000000000002': {'tags': {}, 'group_ids': ['grp_aaaa0001']},
+    'dynamiconly000000000000000000003': {'tags': {'env': 'prod'}, 'group_ids': []},
+    'manualdyn00000000000000000000004': {
+        'tags': {'env': 'prod'}, 'group_ids': ['grp_aaaa0001'],
+    },
+    'tagchange00000000000000000000005': {'tags': {'env': 'prod'}, 'group_ids': []},
+}
+state = {
+    'schema_version': 2,
+    'groups': {
+        'grp_aaaa0001': {'name': 'manual-a', 'type': 'manual'},
+        'grp_bbbb0001': {
+            'name': 'dyn-prod', 'type': 'dynamic', 'match_tags': {'env': 'prod'},
+        },
+    },
+    'clients': dict(base_clients),
+}
+check('no-manual-no-dyn-match', state, 'nomanual000000000000000000000001', True)
+check('manual-only', state, 'manualonly0000000000000000000002', False)
+check('dynamic-only', state, 'dynamiconly000000000000000000003', True)
+check('manual+dynamic', state, 'manualdyn00000000000000000000004', False)
+check('dynamic-match-still-ungrouped', state, 'tagchange00000000000000000000005', True)
+# Tag change removes dynamic match; still ungrouped (no manual).
+state['clients']['tagchange00000000000000000000005']['tags'] = {'env': 'dev'}
+check('tag-change-no-manual', state, 'tagchange00000000000000000000005', True)
+# Sanity: live registry still treats b as ungrouped after dynamics exist.
+live = json.loads(reg_path.read_text())
+check('live-b-dynamic-only', live, 'bbbbbbbb22222222bbbbbbbb22222222', True)
+check('live-a-manual', live, 'aaaaaaaa11111111aaaaaaaa11111111', False)
+check('live-c-plain', live, 'cccccccc33333333cccccccc33333333', True)
+print('matrix ok')
+PY
+pass "P3_3_UNGROUPED_MATRIX"
 
 # --- P3.5 Filters ---
 "$CLIENTS" --group prod-seoul >"$WORKDIR/f1.out" || fail "filter dynamic group"
@@ -320,6 +555,7 @@ grep -q 'dynamic' "$WORKDIR/cg.out" || fail "dynamic type"
 pass "P3_5_FILTERS_UX"
 
 # Doctor: dynamic in client group_ids
+cp "$REG" "$WORKDIR/registry.before-doctor.json"
 python3 - "$REG" <<'PY'
 import json, sys
 state = json.load(open(sys.argv[1]))
@@ -339,6 +575,7 @@ status, msg, issues = mod.validate_registry(state)
 assert status == mod.FAIL, (status, msg, issues)
 assert any('dynamic group' in i for i in issues), issues
 PY
+cp "$WORKDIR/registry.before-doctor.json" "$REG"
 pass "DOCTOR_DYNAMIC_REF"
 
 # Group membership / assigned_group_ids survive revoke+purge; registry groups survive restore

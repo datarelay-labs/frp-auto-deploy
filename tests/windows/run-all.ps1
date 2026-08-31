@@ -18,41 +18,35 @@ function Get-FrpHostPowerShellExe {
     return 'pwsh'
 }
 
+function Test-FrpOutputSkipped {
+    param([object[]]$Output)
+    foreach ($line in @($Output)) {
+        $text = [string]$line
+        if ($text -match '^\s*SKIP(\s|$)') {
+            return $true
+        }
+    }
+    return $false
+}
+
 $hostExe = Get-FrpHostPowerShellExe
 Write-Host ("Host PowerShell engine : {0}" -f $hostExe)
 Write-Host ("Host PowerShell version: {0}" -f $PSVersionTable.PSVersion)
 Write-Host ("Host PSEdition         : {0}" -f $PSVersionTable.PSEdition)
 
+# Auto-discover test-*.ps1 so newly added suites cannot be omitted silently.
 $tests = @(
-    'test-crypto.ps1',
-    'test-token-decrypt.ps1',
-    'test-canonical-sign.ps1',
-    'test-config.ps1',
-    'test-security.ps1',
-    'test-tls-hostname-negative.ps1',
-    'test-persistence.ps1',
-    'test-dpapi-identity-roundtrip.ps1',
-    'test-process-control.ps1',
-    'test-zero-touch-command.ps1',
-    'test-rdp-service.ps1',
-    'test-zero-service.ps1',
-    'test-install-start-failure.ps1',
-    'test-partial-resume.ps1',
-    'test-update-rollback.ps1',
-    'test-pid-ownership.ps1',
-    'test-acl-fail-closed.ps1',
-    'test-multi-service.ps1',
-    'test-ca-pinning.ps1',
-    'test-clock-skew.ps1',
-    'test-uninstall.ps1',
-    'test-support-bundle.ps1',
-    'test-logs-redaction.ps1',
-    'test-identity-acl-diagnostic.ps1',
-    'test-cross-language.ps1'
+    Get-ChildItem -LiteralPath $root -Filter 'test-*.ps1' -File |
+        Sort-Object Name |
+        ForEach-Object { $_.Name }
 )
-
+if ($tests.Count -lt 1) {
+    Write-Host 'FAIL: no test-*.ps1 files discovered'
+    exit 1
+}
 
 Write-Host '=== frp-auto-deploy Windows client tests ==='
+Write-Host ("Discovered {0} test script(s)" -f $tests.Count)
 foreach ($t in $tests) {
     $path = Join-Path $root $t
     Write-Host ""
@@ -73,6 +67,9 @@ foreach ($t in $tests) {
             $tail = (($output | Out-String) -split "`r?`n" | Where-Object { $_.Trim().Length -gt 0 } | Select-Object -Last 12) -join ' | '
             Write-Host ("::error file=tests/windows/{0}::FAIL {0} exit={1} :: {2}" -f $t, $code, $tail)
             $failed++
+        } elseif (Test-FrpOutputSkipped -Output $output) {
+            Write-Host "SKIP counted for $t"
+            $skipped++
         } else {
             $passed++
         }
@@ -84,6 +81,6 @@ foreach ($t in $tests) {
 }
 
 Write-Host ''
-Write-Host ("Summary: passed={0} failed={1}" -f $passed, $failed)
+Write-Host ("Summary: passed={0} failed={1} skipped={2}" -f $passed, $failed, $skipped)
 if ($failed -gt 0) { exit 1 }
 exit 0

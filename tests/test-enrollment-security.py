@@ -33,6 +33,18 @@ def fail(name, detail=''):
     raise SystemExit(1)
 
 
+def test_request_source_ip_loopback_only():
+    """X-Forwarded-For / X-Real-IP are trusted only for loopback TCP peers."""
+    creg = MOD.CREG
+    if creg.request_source_ip('198.51.100.1', {'X-Forwarded-For': '203.0.113.9'}) != '198.51.100.1':
+        fail('non-loopback peer must ignore XFF')
+    if creg.request_source_ip('127.0.0.1', {'X-Forwarded-For': '203.0.113.9'}) != '203.0.113.9':
+        fail('loopback peer must trust XFF')
+    if creg.request_source_ip('10.1.2.3', {'X-Real-IP': '203.0.113.9'}) != '10.1.2.3':
+        fail('non-loopback peer must ignore X-Real-IP')
+    pass_('XFF_TRUST_LOOPBACK_ONLY')
+
+
 def hmac_hex(secret, message):
     return hmac.new(secret.encode(), message.encode(), hashlib.sha256).hexdigest()
 
@@ -198,6 +210,8 @@ def main():
         pass_('wrong machine-id reuse rejected')
     finally:
         env.cleanup()
+
+    test_request_source_ip_loopback_only()
 
     print()
     print('ENROLLMENT_SECURITY_TEST=PASS')

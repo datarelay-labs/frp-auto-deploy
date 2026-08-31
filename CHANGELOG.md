@@ -2,8 +2,16 @@
 
 ## Unreleased (integration/pre-main-e2e)
 
-Pre-main integration branch. **Not merged to main.** No version bump
-(`PROJECT_VERSION` / `FRP_VERSION` unchanged at 2.1.1 / 0.70.1).
+Pre-main integration / hardening candidate. **Not merged to main.** No version bump
+(`PROJECT_VERSION` / `FRP_VERSION` unchanged at **2.1.1** / **0.70.1**).
+Do **not** claim Stable for unreleased candidate work.
+
+Truthfulness (finding 34):
+
+- Phase 3 Groups: implemented on candidate; awaiting real E2E / release promotion
+- Windows client: implemented + CI-tested; real-environment validation pending
+- Windows Service: still deferred
+- Phase 4 Safe Fleet Operations: not started
 
 - Phase 3 groups integrated with fleet, retention, clock-skew, and audit paths
 - Clock-skew tolerant enrollment/management (challenge + `GET /time` offset)
@@ -15,6 +23,9 @@ Pre-main integration branch. **Not merged to main.** No version bump
 - Installed-artifact regression coverage (client/server bootstrap under
   isolated roots) and production `/home/aella/` path-leakage scan
 - Official bundles include uninstall helper, `frpcli`, lifecycle, and fleet modules
+- Pre-E2E hardening: retention malformed-JSON visibility, systemd unit static
+  verify, single443 negative-path coverage, XFF loopback-only trust tests,
+  deployment_mode fail-closed cleanups
 
 ## 2.1.1 — 2026-08-30
 

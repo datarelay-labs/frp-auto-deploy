@@ -158,6 +158,40 @@ def _hold_lock_hook() -> None:
 DEFAULT_BACKUP_DIR = Path("var/lib/frp-auto-deploy/backups")
 
 
+def _path_has_symlink_component(path: Path) -> bool:
+    """True if any path component is a symlink (lexical walk, no resolve)."""
+    absolute = Path(path)
+    if not absolute.is_absolute():
+        absolute = Path.cwd() / absolute
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current = current / part
+        try:
+            if current.is_symlink():
+                return True
+        except OSError:
+            return True
+    return False
+
+
+def resolve_backup_output(raw: str) -> Path:
+    """Resolve backup output without following a final-component symlink.
+
+    ``Path.resolve()`` before ``is_symlink()`` would dereference an output
+    symlink and defeat the overwrite guard. Check lexically first.
+    """
+    path = Path(raw)
+    if _path_has_symlink_component(path):
+        fail("refusing backup output path that contains a symlink")
+    # No symlink components: resolve is safe and yields a stable absolute path.
+    resolved = path.resolve(strict=False)
+    if resolved.exists() and not resolved.is_file():
+        fail("backup output path exists and is not a regular file")
+    if resolved.exists():
+        fail("refusing to overwrite an existing backup output file")
+    return resolved
+
+
 def create_backup(root: Path, output: Path, *, manage_parent: bool = False) -> None:
     if os.environ.get("FRP_BACKUP_ALREADY_LOCKED") == "1":
         _hold_lock_hook()
@@ -187,8 +221,12 @@ def _stage_backup(
         os.chmod(parent, 0o700)
         if os.geteuid() == 0:
             os.chown(parent, 0, 0)
-    if output.is_symlink():
+    # Defense in depth: refuse symlink / existing file even if caller skipped
+    # resolve_backup_output (e.g. default path race or internal snapshot).
+    if output.is_symlink() or _path_has_symlink_component(output):
         fail("refusing to overwrite a symlink")
+    if output.exists():
+        fail("refusing to overwrite an existing backup output file")
 
     with tempfile.TemporaryDirectory(prefix=".frp-backup-", dir=str(output.parent)) as tmp_name:
         stage = Path(tmp_name)
@@ -257,9 +295,11 @@ def main() -> int:
     now = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     default = root / DEFAULT_BACKUP_DIR / f"server-backup-{now}.tar.gz"
     if len(sys.argv) == 2:
-        output = Path(sys.argv[1]).resolve()
+        output = resolve_backup_output(sys.argv[1])
         manage_parent = False
     else:
+        if default.exists() or default.is_symlink():
+            fail("refusing to overwrite an existing default backup path")
         output = default
         manage_parent = True
     create_backup(root, output, manage_parent=manage_parent)

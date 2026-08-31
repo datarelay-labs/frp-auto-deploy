@@ -192,12 +192,18 @@ mode = str(cfg.get('deployment_mode') or 'direct').strip().lower()
 compact = mode.replace('-', '').replace('_', '')
 if compact in ('single443', 'enterprise', 'enterprisesingle443'):
     mode = 'single443'
-else:
+elif compact in ('direct', ''):
     mode = 'direct'
+else:
+    print('deployment_mode_error=' + shlex.quote('invalid deployment_mode'))
+    mode = 'INVALID'
 print('deployment_mode=' + shlex.quote(mode))
 transport = str(cfg.get('frp_transport') or '').strip().lower()
 if not transport:
     transport = 'wss' if mode == 'single443' else 'tcp'
+elif transport not in ('tcp', 'wss'):
+    print('frp_transport_error=' + shlex.quote('invalid frp_transport'))
+    transport = 'INVALID'
 print('frp_transport=' + shlex.quote(transport))
 bind = str(cfg.get('frp_control_bind_addr') or cfg.get('listen_host') or '')
 if bind:

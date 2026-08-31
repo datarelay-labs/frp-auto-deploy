@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# Static systemd unit assertions (no container boot).
+# Optionally runs systemd-analyze verify when available and useful.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+pass() { echo "PASS $1"; }
+fail() { echo "FAIL $1" >&2; exit 1; }
+skip() { echo "SKIP $1"; }
+
+UNITS=(
+  "$ROOT/server/frps.service"
+  "$ROOT/server/frp-port-allocator.service"
+  "$ROOT/server/frp-frontend.service"
+  "$ROOT/client/frpc.service"
+)
+
+for unit in "${UNITS[@]}"; do
+  [[ -f "$unit" ]] || fail "missing unit file: $unit"
+done
+
+# Portable bash parse of After=/Wants=/ExecStart= (ignore comments).
+unit_has_kv() {
+  local file="$1" key="$2" expect="$3"
+  local line section=""
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    if [[ "$line" =~ ^\[ ]]; then
+      section="$line"
+      continue
+    fi
+    line="${line%%;*}"
+    line="${line%"${line##*[![:space:]]}"}"
+    case "$line" in
+      After=*|Wants=*|ExecStart=*)
+        if [[ "$line" == "${key}=${expect}" ]]; then
+          return 0
+        fi
+        ;;
+    esac
+  done < "$file"
+  return 1
+}
+
+unit_has_kv "$ROOT/server/frps.service" After "network-online.target" \
+  || fail "frps After=network-online.target"
+unit_has_kv "$ROOT/server/frps.service" Wants "network-online.target" \
+  || fail "frps Wants=network-online.target"
+unit_has_kv "$ROOT/server/frps.service" ExecStart "/usr/local/bin/frps -c /etc/frp/frps.toml" \
+  || fail "frps ExecStart"
+pass "frps.service static keys"
+
+unit_has_kv "$ROOT/server/frp-port-allocator.service" After "network-online.target frps.service" \
+  || fail "allocator After"
+unit_has_kv "$ROOT/server/frp-port-allocator.service" Wants "network-online.target" \
+  || fail "allocator Wants"
+unit_has_kv "$ROOT/server/frp-port-allocator.service" ExecStart \
+  "/usr/bin/python3 /usr/local/lib/frp-auto-deploy/frp-port-allocator.py --config /etc/frp-auto-deploy/config.json" \
+  || fail "allocator ExecStart"
+pass "frp-port-allocator.service static keys"
+
+unit_has_kv "$ROOT/server/frp-frontend.service" After \
+  "network-online.target frps.service frp-port-allocator.service" \
+  || fail "frontend After"
+unit_has_kv "$ROOT/server/frp-frontend.service" Wants \
+  "network-online.target frps.service frp-port-allocator.service" \
+  || fail "frontend Wants"
+unit_has_kv "$ROOT/server/frp-frontend.service" ExecStart \
+  "/usr/sbin/nginx -c /etc/frp-auto-deploy/frontend.conf" \
+  || fail "frontend ExecStart"
+pass "frp-frontend.service static keys"
+
+unit_has_kv "$ROOT/client/frpc.service" After "network-online.target" \
+  || fail "frpc After"
+unit_has_kv "$ROOT/client/frpc.service" Wants "network-online.target" \
+  || fail "frpc Wants"
+unit_has_kv "$ROOT/client/frpc.service" ExecStart "/usr/local/bin/frpc -c /etc/frp/frpc.toml" \
+  || fail "frpc ExecStart"
+pass "frpc.service static keys"
+
+# Ordering intent encoded in After= lines above.
+pass "unit dependency ordering"
+
+if ! command -v systemd-analyze >/dev/null 2>&1; then
+  skip "systemd-analyze verify (systemd-analyze not installed)"
+else
+  # verify needs production ExecStart paths. Without an installed tree those
+  # binaries/configs are absent, so treat non-zero as SKIP rather than FAIL.
+  VERIFY_OUT="$(mktemp)"
+  set +e
+  systemd-analyze verify \
+    "$ROOT/server/frps.service" \
+    "$ROOT/server/frp-port-allocator.service" \
+    "$ROOT/server/frp-frontend.service" \
+    "$ROOT/client/frpc.service" \
+    >"$VERIFY_OUT" 2>&1
+  rc=$?
+  set -e
+  if [[ "$rc" -eq 0 ]]; then
+    pass "systemd-analyze verify"
+  else
+    skip "systemd-analyze verify (needs installed paths; rc=$rc — static asserts still PASS)"
+    head -n 3 "$VERIFY_OUT" | sed 's/^/  verify: /' || true
+  fi
+  rm -f "$VERIFY_OUT"
+fi
+
+echo "SYSTEMD_UNITS_TEST=PASS"

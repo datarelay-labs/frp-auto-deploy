@@ -132,6 +132,140 @@ def test_502_html_is_not_a_ca():
     pass_('FRONTEND_CA_ENDPOINT')
 
 
+def test_allowlist_negative_path_static():
+    """Static conf: default deny + exact allowlist (no slash/case widening)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        pki = frp_pki.ensure_pki(str(Path(tmp) / 'pki'), '203.0.113.10')
+        conf, _ = render_conf(tmp, '203.0.113.10', 443, 6099, pki)
+        if 'location / {' not in conf or 'return 404;' not in conf:
+            fail('default deny missing')
+        allow = 'location ~ ^/(ca\\.crt|healthz|enroll|enroll/challenge|bootstrap/redeem|time)$ {'
+        if allow not in conf:
+            fail('exact allowlist regex missing', conf)
+        # Anchored $ means trailing-slash / case / double-slash variants are not matched.
+        # Assert the regex stays end-anchored and does not add those alternates.
+        if not allow.startswith('location ~ ^/') or '$ {' not in allow:
+            fail('allowlist lost start/end anchors')
+        for bad_alt in ('enroll/', 'ENROLL', '//enroll', 'Enroll', 'healthz/'):
+            token = '|' + bad_alt + '|'
+            token_end = '|' + bad_alt + ')$'
+            token_start = '^/(' + bad_alt + '|'
+            if token in allow or token_end in allow or token_start in allow:
+                fail('allowlist widened', bad_alt)
+        if ('location = "%s"' % frp_frontend.FRP_WEBSOCKET_PATH) not in conf:
+            fail('exact WSS path location missing')
+        # Wrong WS path must not appear as its own location.
+        if 'location = "/~!FRP"' in conf or 'location = "/ws"' in conf:
+            fail('wrong WS path accidentally allowlisted')
+        if 'proxy_ssl_verify off' in conf:
+            fail('TLS verify weakened')
+        pass_('SINGLE443_NEGATIVE_PATH_STATIC')
+
+
+def _frontend_request(host, port, path, ca_path, method='GET', headers=None, timeout=2.0):
+    """HTTPS request via loopback SNI helper; returns (status_code, body)."""
+    import ssl as ssl_mod
+
+    ctx = ssl_mod.create_default_context(cafile=str(ca_path))
+    if hasattr(ssl_mod, 'TLSVersion'):
+        ctx.minimum_version = ssl_mod.TLSVersion.TLSv1_2
+    conn = frp_doctor.LoopbackHTTPSConnection(host, int(port), timeout=timeout, context=ctx)
+    try:
+        conn.request(method, path, headers=headers or {})
+        resp = conn.getresponse()
+        body = resp.read(4096)
+        return int(resp.status), body
+    finally:
+        conn.close()
+
+
+def test_live_negative_paths():
+    """Live nginx: /, unknown, /enroll/, case, //enroll, wrong method, WS negatives."""
+    bin_path = nginx_bin()
+    if bin_path is None:
+        print('SKIP SINGLE443_NEGATIVE_PATH_LIVE (nginx not installed)')
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        public_host = '203.0.113.10'
+        alloc_port = free_port()
+        frontend_port = free_port()
+        pki = frp_pki.ensure_pki(str(Path(tmp) / 'pki'), public_host)
+        cfg_path = write_allocator_cfg(tmp, alloc_port, pki, public_host)
+        proc = subprocess.Popen(
+            [sys.executable, str(ROOT / 'server' / 'frp-port-allocator.py'), '--config', str(cfg_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        nginx_proc = None
+        try:
+            wait_https('https://127.0.0.1:%s/healthz' % alloc_port, pki['ca_crt'])
+            temp_root = Path(tmp) / 'nginx-temp'
+            for name in ('body', 'proxy', 'fastcgi', 'uwsgi', 'scgi'):
+                (temp_root / name).mkdir(parents=True, exist_ok=True)
+            _conf, dest = render_conf(tmp, public_host, frontend_port, alloc_port, pki)
+            nginx_proc = subprocess.Popen(
+                [bin_path, '-c', str(dest)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                result = frp_doctor.https_loopback_get(
+                    public_host, frontend_port, '/healthz', pki['ca_crt'], timeout=1,
+                )
+                if result.get('ok'):
+                    break
+                time.sleep(0.05)
+            else:
+                fail('frontend not ready for negative-path probes')
+
+            def expect_404(path, method='GET', headers=None, label=None):
+                status, _body = _frontend_request(
+                    public_host, frontend_port, path, pki['ca_crt'],
+                    method=method, headers=headers,
+                )
+                if status != 404:
+                    fail(label or path, 'status=%s' % status)
+
+            expect_404('/', label='root /')
+            expect_404('/unknown', label='unknown path')
+            expect_404('/enroll/', label='trailing slash /enroll/')
+            expect_404('/ENROLL', label='case /ENROLL')
+            expect_404('//enroll', label='double slash //enroll')
+            expect_404('/enroll/challenge/', label='trailing slash challenge')
+            # Wrong method on default-deny path.
+            expect_404('/', method='POST', label='POST /')
+            expect_404('/nope', method='PUT', label='PUT /nope')
+            # Wrong WS path → default deny 404.
+            expect_404('/~!FRP', label='wrong WS case')
+            expect_404('/ws', label='wrong WS /ws')
+            expect_404('/~!frp/extra', label='wrong WS suffix')
+
+            # Exact WS path without Upgrade still hits the WS location (not 404).
+            # With no frps listener this is typically 502; never a successful allowlist 200.
+            status, _body = _frontend_request(
+                public_host, frontend_port, frp_frontend.FRP_WEBSOCKET_PATH, pki['ca_crt'],
+                method='GET', headers={},
+            )
+            if status == 404:
+                fail('missing Upgrade wrongly default-denied (want WS location)', status)
+            if status == 200:
+                fail('WS path without Upgrade returned 200', status)
+            pass_('SINGLE443_NEGATIVE_PATH_LIVE')
+        finally:
+            if nginx_proc is not None and nginx_proc.poll() is None:
+                nginx_proc.terminate()
+                try:
+                    nginx_proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    nginx_proc.kill()
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+
 def write_allocator_cfg(tmp, listen_port, pki, public_host='203.0.113.10'):
     cfg = {
         'public_host': public_host,
@@ -352,8 +486,10 @@ def test_doctor_frontend_502_fails_overall():
 def main():
     test_backend_identity_ip_and_dns()
     test_502_html_is_not_a_ca()
+    test_allowlist_negative_path_static()
     test_doctor_frontend_502_fails_overall()
     test_live_frontend_proxy()
+    test_live_negative_paths()
     print()
     print('FRONTEND_PROXY_TEST=PASS')
 

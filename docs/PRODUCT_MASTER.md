@@ -1650,15 +1650,15 @@ Client lifecycle (`pause` / `resume` / `restart` / `test` / `logs` /
 
 # 56. Phase 3 — Group & Fleet Management
 
-**Status: IMPLEMENTED / Pending Main E2E**
+**Status: IMPLEMENTED on candidate / Pending real E2E & release** (not Stable).
 
 | Sub-phase | Scope | Status |
 |-----------|-------|--------|
-| P3.1 | Manual Group | IMPLEMENTED / Pending Main E2E |
-| P3.2 | Enrollment Group Assignment | IMPLEMENTED / Pending Main E2E |
-| P3.3 | System Groups (`all`, `ungrouped`) | IMPLEMENTED / Pending Main E2E |
-| P3.4 | Dynamic Groups (tag AND selectors) | IMPLEMENTED / Pending Main E2E |
-| P3.5 | Filters & UX (`--group`, `--tag`, `--status`) | IMPLEMENTED / Pending Main E2E |
+| P3.1 | Manual Group | IMPLEMENTED / Pending real E2E & release |
+| P3.2 | Enrollment Group Assignment | IMPLEMENTED / Pending real E2E & release |
+| P3.3 | System Groups (`all`, `ungrouped`) | IMPLEMENTED / Pending real E2E & release |
+| P3.4 | Dynamic Groups (tag AND selectors) | IMPLEMENTED / Pending real E2E & release |
+| P3.5 | Filters & UX (`--group`, `--tag`, `--status`) | IMPLEMENTED / Pending real E2E & release |
 
 목표:
 
@@ -1714,20 +1714,20 @@ AND only (OR/NOT deferred)
 # 56b. Pre-Main E2E capabilities (integrated, not on main)
 
 다음 항목은 통합 브랜치에서 구현·검증되었으나 **main merge를 주장하지 않는다**.
-상태: **IMPLEMENTED / Pending Main E2E**.
+상태: **IMPLEMENTED / Pending real E2E & release** (not Stable).
 
 | Capability | Scope | Status |
 |------------|-------|--------|
 | Clock-Skew Auth | Enrollment challenge, `GET /time`, `management_time_offset_sec`; ±300s window unchanged; TLS still uses OS clock | IMPLEMENTED / Pending Main E2E |
 | Client Lifecycle | `pause` / `resume` / `restart` / `test` / `logs` / `support-bundle` / `uninstall`; `frpcli` alias; pause persists across reboot | IMPLEMENTED / Pending Main E2E |
 | Server Fleet Visibility | `show fleet`, `show ports`, mgmt-stale / build-drift filters, role-aware `test` / `logs` / `support-bundle`, audit export | IMPLEMENTED / Pending Main E2E |
-| Phase 3 Groups | Manual / dynamic / system groups + enrollment assignment + filters | IMPLEMENTED / Pending Main E2E |
+| Phase 3 Groups | Manual / dynamic / system groups + enrollment assignment + filters | IMPLEMENTED / Pending real E2E & release |
 
 ---
 
 # 57. Phase 4 — Safe Fleet Operations
 
-**Status: FUTURE**
+**Status: NOT STARTED** (PLANNED / FUTURE — no implementation on candidate)
 
 Group을 활용한 rollout.
 
@@ -1764,21 +1764,21 @@ Production Group
 
 # 59. Phase 6 — Additional Platform Support
 
-**Status: DEFERRED / DEMAND DRIVEN**
+**Status:** Windows Client core is **IMPLEMENTED + CI-tested** on candidate;
+**real-environment validation pending**. Windows Service remains **deferred**.
+Other platforms stay demand-driven.
 
 실제 사용자 요구가 확인되면 검토:
 
 ### Windows Client
 
-- PowerShell bootstrap
-- persistent identity
-- `frpc.exe`
-- RDP preset
-- SSH
-- HTTP/HTTPS
-- Custom TCP
-- LAN gateway
-- Windows Service integration
+- PowerShell bootstrap — implemented (CI-tested; real-env validation pending)
+- persistent identity — implemented
+- `frpc.exe` — implemented
+- RDP preset — implemented
+- SSH / HTTP / HTTPS / Custom TCP — implemented
+- LAN gateway — implemented
+- Windows Service integration — **still deferred**
 
 ### ARM64
 
@@ -2139,13 +2139,13 @@ doctor clients --group production
 | Phase 0 | FRP Deployment Foundation | STABLE |
 | Phase 1 | Secure Management Foundation | STABLE |
 | Phase 2 | Multi-Service & Operational CLI | STABLE / MAIN |
-| Phase 3 | Manual/Dynamic Group & Filters | **IMPLEMENTED / Pending Main E2E** |
+| Phase 3 | Manual/Dynamic Group & Filters | **IMPLEMENTED / Pending real E2E & release** (not Stable) |
 | — | Clock-Skew Auth | **IMPLEMENTED / Pending Main E2E** |
 | — | Client Lifecycle | **IMPLEMENTED / Pending Main E2E** |
 | — | Server Fleet Visibility | **IMPLEMENTED / Pending Main E2E** |
-| Phase 4 | Safe Fleet Operations | PLANNED |
+| Phase 4 | Safe Fleet Operations | **NOT STARTED** |
 | Phase 5 | Pilot/Production Rollout | FUTURE |
-| Phase 6 | Windows/Additional Platforms | DEFERRED / DEMAND DRIVEN |
+| Phase 6 | Windows Client | **IMPLEMENTED + CI-tested / real-env validation pending**; Service **deferred** |
 | Phase 7 | UDP/Additional Protocols | DEFERRED |
 
 ---
