@@ -125,8 +125,8 @@ try {
     # PowerShell signs; Python verifies
     $id = New-FrpEcdsaIdentity
     $sig = Protect-FrpSignMessage -PrivatePem $id.PrivatePem -Message $msg
-    $pubFile = Join-Path $crossDir 'ps-pub.pem'
-    $sigFile = Join-Path $crossDir 'ps-sig.b64'
+    $pubFile = Join-Path ([System.IO.Path]::GetTempPath()) ('frp-ps-pub-' + [guid]::NewGuid().ToString('N') + '.pem')
+    $sigFile = Join-Path ([System.IO.Path]::GetTempPath()) ('frp-ps-sig-' + [guid]::NewGuid().ToString('N') + '.b64')
     $utf8NoBom = New-Object System.Text.UTF8Encoding $false
     [System.IO.File]::WriteAllText($pubFile, $id.PublicPem, $utf8NoBom)
     # PS 5.1 native argv mangles '+' in base64; pass signature via file instead.
@@ -142,5 +142,7 @@ try {
     Write-FrpTestPass 'test-cross-language'
 } finally {
     Remove-Item Env:FRP_ENROLL_SECRET -ErrorAction SilentlyContinue
+    if ($pubFile) { Remove-Item -LiteralPath $pubFile -Force -ErrorAction SilentlyContinue }
+    if ($sigFile) { Remove-Item -LiteralPath $sigFile -Force -ErrorAction SilentlyContinue }
     Remove-FrpWindowsTestRoot
 }
