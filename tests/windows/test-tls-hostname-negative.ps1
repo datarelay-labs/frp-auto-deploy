@@ -2,6 +2,30 @@
 . (Join-Path $PSScriptRoot 'common.ps1')
 . (Join-Path $PSScriptRoot '_import.ps1')
 
+function Invoke-FrpOpenSslOk {
+    # PS 5.1 + $ErrorActionPreference=Stop treats native stderr (even on exit 0)
+    # as terminating when redirected. Capture stderr safely and assert LASTEXITCODE.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$OpenSslArgs
+    )
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $output = $null
+    $code = -1
+    try {
+        $output = & openssl @OpenSslArgs 2>&1
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+    if ($null -eq $code) { $code = 0 }
+    if ($code -ne 0) {
+        $text = ($output | Out-String).Trim()
+        throw ("openssl failed (exit {0}): {1}" -f $code, $text)
+    }
+}
+
 try {
     $tlsPath = Join-Path $script:WindowsLib 'FrpTls.ps1'
     $tlsSrc = Get-Content -LiteralPath $tlsPath -Raw
@@ -38,40 +62,40 @@ try {
     $extIp = Join-Path $work 'ip.ext'
     $extWild = Join-Path $work 'wild.ext'
 
-    & openssl genrsa -out $caKey 2048 2>$null | Out-Null
-    & openssl req -new -x509 -key $caKey -out $caCrt -days 2 -subj '/CN=FRP Test CA' 2>$null | Out-Null
+    Invoke-FrpOpenSslOk -OpenSslArgs @('genrsa', '-out', $caKey, '2048')
+    Invoke-FrpOpenSslOk -OpenSslArgs @('req', '-new', '-x509', '-key', $caKey, '-out', $caCrt, '-days', '2', '-subj', '/CN=FRP Test CA')
 
-    & openssl genrsa -out $goodKey 2048 2>$null | Out-Null
-    & openssl req -new -key $goodKey -out $goodCsr -subj '/CN=correct.example.test' 2>$null | Out-Null
+    Invoke-FrpOpenSslOk -OpenSslArgs @('genrsa', '-out', $goodKey, '2048')
+    Invoke-FrpOpenSslOk -OpenSslArgs @('req', '-new', '-key', $goodKey, '-out', $goodCsr, '-subj', '/CN=correct.example.test')
     Set-Content -LiteralPath $extGood -Value @"
 subjectAltName=DNS:correct.example.test,DNS:www.correct.example.test
 extendedKeyUsage=serverAuth
 "@
-    & openssl x509 -req -in $goodCsr -CA $caCrt -CAkey $caKey -CAcreateserial -out $goodCrt -days 2 -extfile $extGood 2>$null | Out-Null
+    Invoke-FrpOpenSslOk -OpenSslArgs @('x509', '-req', '-in', $goodCsr, '-CA', $caCrt, '-CAkey', $caKey, '-CAcreateserial', '-out', $goodCrt, '-days', '2', '-extfile', $extGood)
 
-    & openssl genrsa -out $badKey 2048 2>$null | Out-Null
-    & openssl req -new -key $badKey -out $badCsr -subj '/CN=wrong.example.test' 2>$null | Out-Null
+    Invoke-FrpOpenSslOk -OpenSslArgs @('genrsa', '-out', $badKey, '2048')
+    Invoke-FrpOpenSslOk -OpenSslArgs @('req', '-new', '-key', $badKey, '-out', $badCsr, '-subj', '/CN=wrong.example.test')
     Set-Content -LiteralPath $extBad -Value @"
 subjectAltName=DNS:wrong.example.test
 extendedKeyUsage=serverAuth
 "@
-    & openssl x509 -req -in $badCsr -CA $caCrt -CAkey $caKey -CAcreateserial -out $badCrt -days 2 -extfile $extBad 2>$null | Out-Null
+    Invoke-FrpOpenSslOk -OpenSslArgs @('x509', '-req', '-in', $badCsr, '-CA', $caCrt, '-CAkey', $caKey, '-CAcreateserial', '-out', $badCrt, '-days', '2', '-extfile', $extBad)
 
-    & openssl genrsa -out $ipKey 2048 2>$null | Out-Null
-    & openssl req -new -key $ipKey -out $ipCsr -subj '/CN=127.0.0.1' 2>$null | Out-Null
+    Invoke-FrpOpenSslOk -OpenSslArgs @('genrsa', '-out', $ipKey, '2048')
+    Invoke-FrpOpenSslOk -OpenSslArgs @('req', '-new', '-key', $ipKey, '-out', $ipCsr, '-subj', '/CN=127.0.0.1')
     Set-Content -LiteralPath $extIp -Value @"
 subjectAltName=IP:127.0.0.1
 extendedKeyUsage=serverAuth
 "@
-    & openssl x509 -req -in $ipCsr -CA $caCrt -CAkey $caKey -CAcreateserial -out $ipCrt -days 2 -extfile $extIp 2>$null | Out-Null
+    Invoke-FrpOpenSslOk -OpenSslArgs @('x509', '-req', '-in', $ipCsr, '-CA', $caCrt, '-CAkey', $caKey, '-CAcreateserial', '-out', $ipCrt, '-days', '2', '-extfile', $extIp)
 
-    & openssl genrsa -out $wildKey 2048 2>$null | Out-Null
-    & openssl req -new -key $wildKey -out $wildCsr -subj '/CN=wildcard.example.test' 2>$null | Out-Null
+    Invoke-FrpOpenSslOk -OpenSslArgs @('genrsa', '-out', $wildKey, '2048')
+    Invoke-FrpOpenSslOk -OpenSslArgs @('req', '-new', '-key', $wildKey, '-out', $wildCsr, '-subj', '/CN=wildcard.example.test')
     Set-Content -LiteralPath $extWild -Value @"
 subjectAltName=DNS:*.example.test
 extendedKeyUsage=serverAuth
 "@
-    & openssl x509 -req -in $wildCsr -CA $caCrt -CAkey $caKey -CAcreateserial -out $wildCrt -days 2 -extfile $extWild 2>$null | Out-Null
+    Invoke-FrpOpenSslOk -OpenSslArgs @('x509', '-req', '-in', $wildCsr, '-CA', $caCrt, '-CAkey', $caKey, '-CAcreateserial', '-out', $wildCrt, '-days', '2', '-extfile', $extWild)
 
     $goodCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($goodCrt)
     $badCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($badCrt)

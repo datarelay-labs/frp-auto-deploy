@@ -158,11 +158,36 @@ function Test-FrpIsEnrolled {
     return $true
 }
 
+function Initialize-FrpDpapi {
+    # Shared DPAPI availability gate for Save/Read-FrpIdentityKey.
+    # Windows hosts must have System.Security ProtectedData types; fail closed otherwise.
+    if ((Test-Path variable:script:FrpDpapiReady) -and $script:FrpDpapiReady) {
+        return $true
+    }
+    if (-not (Test-FrpIsWindowsHost)) {
+        return $false
+    }
+    try {
+        Add-Type -AssemblyName System.Security -ErrorAction Stop | Out-Null
+    } catch {
+        throw ('ERROR: System.Security assembly unavailable; DPAPI required on Windows: {0}' -f $_.Exception.Message)
+    }
+    try {
+        $null = [System.Security.Cryptography.DataProtectionScope]::LocalMachine
+        $null = [System.Security.Cryptography.DataProtectionScope]::CurrentUser
+        $null = [System.Security.Cryptography.ProtectedData]
+    } catch {
+        throw ('ERROR: DPAPI types unavailable; cannot persist identity key on Windows: {0}' -f $_.Exception.Message)
+    }
+    $script:FrpDpapiReady = $true
+    return $true
+}
+
 function Save-FrpIdentityKey {
     param([Parameter(Mandatory = $true)][string]$PrivatePem)
     Initialize-FrpDirectories
     $stateDir = Get-FrpStateDir
-    if (Test-FrpIsWindowsHost) {
+    if (Initialize-FrpDpapi) {
         $path = Join-Path $stateDir 'client-identity.key.dpapi'
         $bytes = [System.Text.Encoding]::UTF8.GetBytes($PrivatePem)
         $scope = [System.Security.Cryptography.DataProtectionScope]::LocalMachine
@@ -177,6 +202,7 @@ function Save-FrpIdentityKey {
         Restrict-FrpFileAcl -Path $path
         return $path
     }
+    # Non-Windows test hosts only. Production Windows never reaches here (Initialize-FrpDpapi fails closed).
     Write-Warning 'DPAPI unavailable; storing identity key as a plain file under the test root. Do not use this mode on production Windows hosts.'
     $path = Join-Path $stateDir 'client-identity.key'
     $tmp = "$path.tmp"
@@ -192,7 +218,7 @@ function Read-FrpIdentityKey {
     $dpapi = Join-Path $stateDir 'client-identity.key.dpapi'
     $plain = Join-Path $stateDir 'client-identity.key'
     if ((Test-Path -LiteralPath $dpapi) -and (Test-FrpIsWindowsHost)) {
-        Add-Type -AssemblyName System.Security -ErrorAction SilentlyContinue | Out-Null
+        [void](Initialize-FrpDpapi)
         $protected = [System.IO.File]::ReadAllBytes($dpapi)
         try {
             $bytes = [System.Security.Cryptography.ProtectedData]::Unprotect(

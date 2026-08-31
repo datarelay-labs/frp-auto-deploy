@@ -427,7 +427,9 @@ def main(argv=None):
         if not secret:
             print('ERROR: FRP_ENROLL_SECRET is not set', file=sys.stderr)
             return 1
-        payload = sys.stdin.read()
+        # Byte-safe stdin: PS 5.1 native pipes may not match locale text decoding.
+        # Crypto payload is ASCII/UTF-8; decode explicitly after reading raw bytes.
+        payload = sys.stdin.buffer.read().decode('utf-8')
         if args.cmd == 'encrypt-token':
             sys.stdout.write(encrypt_token_pbkdf2(payload, secret))
         else:

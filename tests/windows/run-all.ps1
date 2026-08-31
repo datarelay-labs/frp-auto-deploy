@@ -31,6 +31,7 @@ $tests = @(
     'test-security.ps1',
     'test-tls-hostname-negative.ps1',
     'test-persistence.ps1',
+    'test-dpapi-identity-roundtrip.ps1',
     'test-process-control.ps1',
     'test-zero-touch-command.ps1',
     'test-rdp-service.ps1',
