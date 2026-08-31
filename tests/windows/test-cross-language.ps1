@@ -87,6 +87,8 @@ $gen = Join-Path $crossDir 'generate_python_vectors.py'
 $verify = Join-Path $crossDir 'verify_ps_signature.py'
 $vectorsPath = Join-Path $crossDir 'vectors.json'
 
+$pubFile = $null
+$sigFile = $null
 try {
     Assert-FrpTrue (Test-Path -LiteralPath $gen) 'generator exists'
     $python = Get-FrpPythonExe
