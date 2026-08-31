@@ -1794,6 +1794,8 @@ def check_server(report, paths, facts, skip_network):
                 )
 
     bootstrap_abs = '/var/lib/frp-auto-deploy/bootstrap'
+    enrollments_abs = '/var/lib/frp-auto-deploy/enrollments'
+    retention_days = 30
     if cfg:
         configured = str(cfg.get('bootstrap_dir') or '').strip()
         enrollments = str(cfg.get('enrollments_dir') or '').strip()
@@ -1803,52 +1805,71 @@ def check_server(report, paths, facts, skip_network):
             parent = enrollments.rsplit('/', 1)[0]
             if parent:
                 bootstrap_abs = parent + '/bootstrap'
-    if paths.is_dir(bootstrap_abs):
-        now = int(time.time())
-        active = 0
-        expired = 0
+        if enrollments.startswith('/'):
+            enrollments_abs = enrollments
         try:
-            for entry in sorted(paths.p(bootstrap_abs).glob('*.json')):
-                try:
-                    rec = json.loads(entry.read_text(encoding='utf-8'))
-                except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-                    expired += 1
-                    continue
-                if not isinstance(rec, dict):
-                    expired += 1
-                    continue
-                try:
-                    exp = int(rec.get('expires_at') or 0)
-                except (TypeError, ValueError):
-                    expired += 1
-                    continue
-                if exp >= now:
-                    active += 1
-                else:
-                    expired += 1
-        except OSError:
-            active = 0
-            expired = 0
-        if expired >= 50:
+            elc = None
+            for candidate in (
+                Path(__file__).resolve().parent / 'frp_enrollment_lifecycle.py',
+                Path('/usr/local/lib/frp-auto-deploy/frp_enrollment_lifecycle.py'),
+            ):
+                if candidate.is_file():
+                    import importlib.util
+                    spec = importlib.util.spec_from_file_location('frp_enrollment_lifecycle', str(candidate))
+                    elc = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(elc)
+                    break
+            if elc is not None:
+                retention_days = elc.retention_days_from_config(cfg)
+                findings = elc.doctor_scan_enrollment_lifecycle(
+                    enrollments_abs, bootstrap_abs, retention_days
+                )
+                severity = {
+                    'invalid_pairing': FAIL,
+                    'duplicate_pairing': FAIL,
+                    'orphan_bootstrap_ticket': WARN,
+                    'orphan_paired_enrollment': WARN,
+                    'malformed_enrollment': WARN,
+                    'malformed_terminal_timestamp': WARN,
+                    'retention_overdue': WARN,
+                }
+                for kind, eid, detail in findings:
+                    report.add(
+                        'enrollment_lifecycle_%s_%s' % (kind, eid),
+                        severity.get(kind, WARN),
+                        '%s: %s' % (kind.replace('_', ' '), detail),
+                        'enrollment_id=%s' % eid,
+                        'doctor does not delete enrollment metadata',
+                        'state',
+                    )
+                if not findings:
+                    report.add(
+                        'enrollment_lifecycle', PASS,
+                        'enrollment lifecycle records are consistent',
+                        'retention_days=%s' % retention_days,
+                        '',
+                        'state',
+                    )
+            else:
+                report.add(
+                    'enrollment_lifecycle', INFO,
+                    'enrollment lifecycle diagnostics unavailable',
+                    '',
+                    '',
+                    'state',
+                )
+        except Exception as exc:
             report.add(
-                'bootstrap_tickets', WARN,
-                'stale expired bootstrap ticket records were not cleaned up',
-                'active=%s expired=%s' % (active, expired),
-                'expired tickets are removed when a new ticket is created or redeemed; doctor does not delete them',
-                'state',
-            )
-        else:
-            report.add(
-                'bootstrap_tickets', INFO,
-                'active unexpired bootstrap tickets: %s' % active,
-                'expired=%s' % expired if expired else '',
+                'enrollment_lifecycle', WARN,
+                'enrollment lifecycle diagnostics failed',
+                str(exc),
                 '',
                 'state',
             )
     else:
         report.add(
-            'bootstrap_tickets', INFO,
-            'active unexpired bootstrap tickets: 0',
+            'enrollment_lifecycle', INFO,
+            'enrollment lifecycle diagnostics skipped (no server config)',
             '',
             '',
             'state',
