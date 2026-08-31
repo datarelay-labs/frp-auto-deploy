@@ -197,11 +197,8 @@ function Invoke-FrpEnroll {
     if ($copy.ContainsKey('response_hmac')) { $copy.Remove('response_hmac') }
     $canonical = Get-FrpCanonicalJson -Object $copy
     $expected = Get-FrpHmacHex -Secret $EnrollmentSecret -Message $canonical
-    if (-not $received -or -not [string]::Equals($received, $expected, [StringComparison]::OrdinalIgnoreCase)) {
-        # Constant-time-ish compare
-        if ($received -ne $expected) {
-            throw 'ERROR: allocator response HMAC verification failed'
-        }
+    if (-not $received -or -not (Test-FrpFixedTimeEquals -Left $received -Right $expected -IgnoreCase)) {
+        throw 'ERROR: allocator response HMAC verification failed'
     }
     if (-not $data.token_ciphertext) {
         throw 'ERROR: allocator response is missing token_ciphertext'
@@ -245,6 +242,9 @@ function Get-FrpDefaultServices {
             }
         )
     }
+    if ([string]::IsNullOrWhiteSpace($SshUser)) {
+        throw 'ERROR: non-windows default SSH service requires explicit -SshUser / ssh_user (no default root)'
+    }
     $ssh = [pscustomobject]@{
         id         = 'ssh'
         name       = 'SSH'
@@ -253,9 +253,75 @@ function Get-FrpDefaultServices {
         local_ip   = '127.0.0.1'
         local_port = 22
         enabled    = $true
-        ssh_user   = $(if ($SshUser) { $SshUser } else { 'root' })
+        ssh_user   = $SshUser
     }
     return @($ssh)
+}
+
+function Complete-FrpZeroTouchPostEnroll {
+    param(
+        [switch]$SkipStart,
+        [switch]$SkipDownload,
+        [object]$Services
+    )
+    $enabledCount = Get-FrpEnabledServiceCount -Services $Services
+    if (-not $Services) {
+        try {
+            $st = Read-FrpClientState
+            $Services = $st.services
+            $enabledCount = Get-FrpEnabledServiceCount -Services $Services
+            if ($st.management_only -eq $true) { $enabledCount = 0 }
+        } catch { }
+    }
+
+    Set-FrpInstallStatus -Status 'enrolled_incomplete'
+
+    if ($env:FRP_WINDOWS_FAIL_AFTER_ENROLL -eq '1') {
+        throw 'ERROR: simulated failure after enroll (FRP_WINDOWS_FAIL_AFTER_ENROLL=1)'
+    }
+
+    if (-not $SkipDownload) {
+        if ($env:FRP_WINDOWS_SKIP_DOWNLOAD -eq '1') {
+            Write-Host 'Skipping FRP download (FRP_WINDOWS_SKIP_DOWNLOAD=1)'
+        } else {
+            Install-FrpWindowsBinary | Out-Null
+        }
+    }
+
+    # Install tools copy into ProgramData from package windows/tools
+    if ($script:FrpWindowsSrcRoot) {
+        $srcClient = Join-Path $script:FrpWindowsSrcRoot 'tools/FrpClient.ps1'
+        $srcCmd = Join-Path $script:FrpWindowsSrcRoot 'tools/frp-client.cmd'
+        if (Test-Path -LiteralPath $srcClient) {
+            Copy-Item -LiteralPath $srcClient -Destination (Join-Path (Get-FrpToolsDir) 'FrpClient.ps1') -Force
+        }
+        if (Test-Path -LiteralPath $srcCmd) {
+            Copy-Item -LiteralPath $srcCmd -Destination (Join-Path (Get-FrpToolsDir) 'frp-client.cmd') -Force
+        }
+    }
+
+    if ($enabledCount -le 0) {
+        Write-Host 'Management-only enrollment: no public services; skipping frpc start.'
+        Set-FrpInstallStatus -Status 'management_only'
+        Write-Host ''
+        Write-Host 'Enrollment complete (management-only). Use frp-client info for details.'
+        Write-Host 'ENROLL ONCE / RUN MANY TIMES: later starts use existing identity and ports.'
+        return 0
+    }
+
+    if ($env:FRP_WINDOWS_FAIL_BEFORE_START -eq '1') {
+        throw 'ERROR: simulated failure before start (FRP_WINDOWS_FAIL_BEFORE_START=1)'
+    }
+
+    if (-not $SkipStart) {
+        Start-FrpClient | Out-Null
+    }
+
+    Set-FrpInstallStatus -Status 'installed'
+    Write-Host ''
+    Write-Host 'Enrollment complete. Use frp-client info for connection details.'
+    Write-Host 'ENROLL ONCE / RUN MANY TIMES: later starts use existing identity and ports.'
+    return 0
 }
 
 function Invoke-FrpZeroTouch {
@@ -268,11 +334,23 @@ function Invoke-FrpZeroTouch {
         [string]$SshUser,
         [string]$Hostname,
         [switch]$SkipStart,
-        [switch]$SkipDownload
+        [switch]$SkipDownload,
+        [switch]$UseLocalDefaults
     )
 
     try {
         if (Test-FrpIsEnrolled) {
+            if (Test-FrpCanResumeInstall) {
+                Write-Host 'Resuming incomplete install (same identity and ports; ticket not re-redeemed)...'
+                return (Complete-FrpZeroTouchPostEnroll -SkipStart:$SkipStart -SkipDownload:$SkipDownload)
+            }
+            if (Test-FrpIsInstallComplete) {
+                Write-Host 'ERROR: this machine is already enrolled.'
+                Write-Host 'ENROLL ONCE: refuse re-ticket path. Use: frp-client start'
+                Write-Host 'To replace this install, uninstall locally first (server reservations are preserved).'
+                return 2
+            }
+            # Legacy enrolled installs without install_status: treat as complete / refuse re-ticket
             Write-Host 'ERROR: this machine is already enrolled.'
             Write-Host 'ENROLL ONCE: refuse re-ticket path. Use: frp-client start'
             Write-Host 'To replace this install, uninstall locally first (server reservations are preserved).'
@@ -304,11 +382,15 @@ function Invoke-FrpZeroTouch {
         $redeem = Invoke-FrpBootstrapRedeem -AllocatorUrl $AllocatorUrl -Ticket $BootstrapTicket `
             -MachineId $machineId -Hostname $Hostname
 
-        # Prefer ticket-provided services; else defaults / -ServicesJson
-        $services = $redeem.Services
-        if (-not $services -or @($services).Count -eq 0) {
+        # Ticket redeem is authoritative. Empty services = management-only.
+        # Get-FrpDefaultServices is only for explicit local guided UX.
+        $services = @($redeem.Services)
+        if ($UseLocalDefaults) {
+            $services = Get-FrpDefaultServices -Platform $Platform -ServicesJson $ServicesJson -SshUser $SshUser
+        } elseif (-not [string]::IsNullOrWhiteSpace($ServicesJson) -and @($services).Count -eq 0) {
             $services = Get-FrpDefaultServices -Platform $Platform -ServicesJson $ServicesJson -SshUser $SshUser
         }
+        # else: keep ticket services as-is (including empty)
 
         Write-Host 'Generating management identity...'
         $id = New-FrpEcdsaIdentity
@@ -327,9 +409,13 @@ function Invoke-FrpZeroTouch {
         $merged = Merge-FrpAllocatedPorts -LocalServices $services -AllocatedList $enroll.Services
         $hostId = ($machineId.Substring(0, [Math]::Min(12, $machineId.Length)))
 
+        $enabledCount = Get-FrpEnabledServiceCount -Services $merged
+        $initialStatus = $(if ($enabledCount -le 0) { 'enrolled_incomplete' } else { 'enrolled_incomplete' })
+
         Save-FrpClientState -AllocatorUrl $AllocatorUrl -FrpServer $enroll.FrpServer `
             -FrpServerPort $enroll.FrpServerPort -Hostname $Hostname -MachineId $machineId `
-            -HostId $hostId -Services $merged -Transport $enroll.FrpTransport | Out-Null
+            -HostId $hostId -Services $merged -Transport $enroll.FrpTransport `
+            -InstallStatus $initialStatus | Out-Null
 
         New-FrpClientToml -ServerAddr $enroll.FrpServer -ServerPort $enroll.FrpServerPort `
             -Token $token -HostId $hostId -Services $merged -Transport $enroll.FrpTransport | Out-Null
@@ -337,38 +423,7 @@ function Invoke-FrpZeroTouch {
         # Wipe plaintext token from local variable ASAP
         $token = $null
 
-        if (-not $SkipDownload) {
-            if ($env:FRP_WINDOWS_SKIP_DOWNLOAD -eq '1') {
-                Write-Host 'Skipping FRP download (FRP_WINDOWS_SKIP_DOWNLOAD=1)'
-            } else {
-                Install-FrpWindowsBinary | Out-Null
-            }
-        }
-
-        # Install tools copy into ProgramData from package windows/tools
-        if ($script:FrpWindowsSrcRoot) {
-            $srcClient = Join-Path $script:FrpWindowsSrcRoot 'tools/FrpClient.ps1'
-            $srcCmd = Join-Path $script:FrpWindowsSrcRoot 'tools/frp-client.cmd'
-            if (Test-Path -LiteralPath $srcClient) {
-                Copy-Item -LiteralPath $srcClient -Destination (Join-Path (Get-FrpToolsDir) 'FrpClient.ps1') -Force
-            }
-            if (Test-Path -LiteralPath $srcCmd) {
-                Copy-Item -LiteralPath $srcCmd -Destination (Join-Path (Get-FrpToolsDir) 'frp-client.cmd') -Force
-            }
-        }
-
-        if (-not $SkipStart) {
-            try {
-                Start-FrpClient | Out-Null
-            } catch {
-                Write-Warning $_.Exception.Message
-            }
-        }
-
-        Write-Host ''
-        Write-Host 'Enrollment complete. Use frp-client info for connection details.'
-        Write-Host 'ENROLL ONCE / RUN MANY TIMES: later starts use existing identity and ports.'
-        return 0
+        return (Complete-FrpZeroTouchPostEnroll -SkipStart:$SkipStart -SkipDownload:$SkipDownload -Services $merged)
     } finally {
         Clear-FrpSecretEnv
     }

@@ -710,6 +710,31 @@ function Unprotect-FrpTokenPbkdf2 {
     return [FrpCryptoNative]::DecryptTokenPbkdf2($Ciphertext, $Secret, $Iterations)
 }
 
+function Test-FrpFixedTimeEquals {
+    <#
+    .SYNOPSIS
+      Constant-time string compare (same length required; XOR aggregate).
+    #>
+    param(
+        [string]$Left,
+        [string]$Right,
+        [switch]$IgnoreCase
+    )
+    if ($null -eq $Left -or $null -eq $Right) { return $false }
+    $a = [string]$Left
+    $b = [string]$Right
+    if ($IgnoreCase) {
+        $a = $a.ToLowerInvariant()
+        $b = $b.ToLowerInvariant()
+    }
+    if ($a.Length -ne $b.Length) { return $false }
+    $diff = 0
+    for ($i = 0; $i -lt $a.Length; $i++) {
+        $diff = $diff -bor ([int][char]$a[$i] -bxor [int][char]$b[$i])
+    }
+    return ($diff -eq 0)
+}
+
 function Get-FrpHmacHex {
     param([Parameter(Mandatory = $true)][string]$Secret, [Parameter(Mandatory = $true)][string]$Message)
     Initialize-FrpCryptoTypes

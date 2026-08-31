@@ -1,4 +1,4 @@
-# test-rdp-service.ps1
+# test-rdp-service.ps1 — RDP defaults via Get-FrpDefaultServices (explicit local guided helper only)
 . (Join-Path $PSScriptRoot 'common.ps1')
 . (Join-Path $PSScriptRoot '_import.ps1')
 try {

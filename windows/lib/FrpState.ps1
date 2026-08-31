@@ -20,13 +20,9 @@ function Initialize-FrpDirectories {
         }
     }
     if (Test-FrpIsWindowsHost) {
-        try {
-            Restrict-FrpDirectoryAcl -Path (Get-FrpStateDir)
-            Restrict-FrpDirectoryAcl -Path (Get-FrpConfigDir)
-            Restrict-FrpDirectoryAcl -Path (Get-FrpCertsDir)
-        } catch {
-            # ACL hardening is best-effort on locked-down hosts.
-        }
+        Restrict-FrpDirectoryAcl -Path (Get-FrpStateDir)
+        Restrict-FrpDirectoryAcl -Path (Get-FrpConfigDir)
+        Restrict-FrpDirectoryAcl -Path (Get-FrpCertsDir)
     }
 }
 
@@ -34,25 +30,35 @@ function Restrict-FrpDirectoryAcl {
     param([Parameter(Mandatory = $true)][string]$Path)
     if (-not (Test-FrpIsWindowsHost)) { return }
     if (-not (Test-Path -LiteralPath $Path)) { return }
-    $acl = Get-Acl -LiteralPath $Path
-    $acl.SetAccessRuleProtection($true, $false)
-    foreach ($rule in @($acl.Access)) {
-        try { [void]$acl.RemoveAccessRule($rule) } catch { }
+    if ($env:FRP_WINDOWS_FAIL_ACL -eq '1') {
+        throw 'ERROR: simulated ACL failure (FRP_WINDOWS_FAIL_ACL=1)'
     }
-    $inherit = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
-    $prop = [System.Security.AccessControl.PropagationFlags]::None
-    $rights = [System.Security.AccessControl.FileSystemRights]::FullControl
-    $type = [System.Security.AccessControl.AccessControlType]::Allow
-    foreach ($id in @('NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators')) {
-        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($id, $rights, $inherit, $prop, $type)
-        $acl.AddAccessRule($rule)
+    try {
+        $acl = Get-Acl -LiteralPath $Path
+        $acl.SetAccessRuleProtection($true, $false)
+        foreach ($rule in @($acl.Access)) {
+            try { [void]$acl.RemoveAccessRule($rule) } catch { }
+        }
+        $inherit = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+        $prop = [System.Security.AccessControl.PropagationFlags]::None
+        $rights = [System.Security.AccessControl.FileSystemRights]::FullControl
+        $type = [System.Security.AccessControl.AccessControlType]::Allow
+        foreach ($id in @('NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators')) {
+            $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($id, $rights, $inherit, $prop, $type)
+            $acl.AddAccessRule($rule)
+        }
+        Set-Acl -LiteralPath $Path -AclObject $acl
+    } catch {
+        throw ("ERROR: failed to restrict directory ACL: {0}" -f $Path)
     }
-    Set-Acl -LiteralPath $Path -AclObject $acl
 }
 
 function Restrict-FrpFileAcl {
     param([Parameter(Mandatory = $true)][string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) { return }
+    if ($env:FRP_WINDOWS_FAIL_ACL -eq '1') {
+        throw 'ERROR: simulated ACL failure (FRP_WINDOWS_FAIL_ACL=1)'
+    }
     if (Test-FrpIsWindowsHost) {
         try {
             $acl = Get-Acl -LiteralPath $Path
@@ -67,7 +73,9 @@ function Restrict-FrpFileAcl {
                 $acl.AddAccessRule($rule)
             }
             Set-Acl -LiteralPath $Path -AclObject $acl
-        } catch { }
+        } catch {
+            throw ("ERROR: failed to restrict ACL on sensitive path: {0}" -f $Path)
+        }
         return
     }
     # Linux / test host: chmod 600 best-effort
@@ -195,6 +203,24 @@ function ConvertTo-FrpServiceMap {
         }
         return $map
     }
+    # ConvertFrom-Json object map: { rdp = {...}; ssh = {...} }
+    if ($Services -is [System.Management.Automation.PSCustomObject] -or ($Services.PSObject -and $Services.PSObject.Properties)) {
+        $props = @($Services.PSObject.Properties | Where-Object { $_.MemberType -match 'NoteProperty|Property' })
+        $looksLikeMap = $false
+        if ($props.Count -gt 0) {
+            $first = $props[0].Value
+            if ($null -ne $first -and -not ($first -is [string]) -and -not ($first -is [ValueType])) {
+                $looksLikeMap = $true
+            }
+        }
+        if ($looksLikeMap) {
+            foreach ($p in $props) {
+                $rec = ConvertTo-FrpServiceRecord -Item $p.Value -DefaultId ([string]$p.Name)
+                $map[$rec.id] = $rec
+            }
+            return $map
+        }
+    }
     foreach ($item in @($Services)) {
         $rec = ConvertTo-FrpServiceRecord -Item $item -DefaultId $null
         $map[$rec.id] = $rec
@@ -279,7 +305,8 @@ function Save-FrpClientState {
         [Parameter(Mandatory = $true)]$Services,
         [string]$Transport = 'tcp',
         [string]$ProjectVersion,
-        [string]$FrpVersion
+        [string]$FrpVersion,
+        [string]$InstallStatus
     )
     Initialize-FrpDirectories
     $transport = ([string]$Transport).Trim().ToLowerInvariant()
@@ -314,6 +341,7 @@ function Save-FrpClientState {
         project_version  = $(if ($ProjectVersion) { $ProjectVersion } else { Get-FrpProjectVersion })
         frp_version      = $(if ($FrpVersion) { $FrpVersion } else { Get-FrpUpstreamVersion })
         platform         = 'windows'
+        install_status   = $(if ($InstallStatus) { $InstallStatus } elseif (-not $enabledAny) { 'management_only' } else { 'installed' })
     }
     $path = Get-FrpStatePath
     $json = Get-FrpCanonicalJson -Object $state
@@ -334,6 +362,64 @@ function Read-FrpClientState {
     }
     $raw = [System.IO.File]::ReadAllText($path)
     return ($raw | ConvertFrom-Json)
+}
+
+
+
+function Get-FrpInstallStatus {
+    if (-not (Test-Path -LiteralPath (Get-FrpStatePath))) { return $null }
+    try {
+        $state = Read-FrpClientState
+        return [string]$state.install_status
+    } catch {
+        return $null
+    }
+}
+
+function Set-FrpInstallStatus {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('enrolling', 'enrolled_incomplete', 'installed', 'management_only')]
+        [string]$Status
+    )
+    $path = Get-FrpStatePath
+    if (-not (Test-Path -LiteralPath $path)) {
+        throw 'ERROR: client-state.json is missing; cannot set install_status'
+    }
+    $state = Read-FrpClientState
+    $ht = ConvertTo-FrpPlainObject $state
+    $ht['install_status'] = $Status
+    if ($Status -eq 'management_only') {
+        $ht['management_only'] = $true
+    }
+    $pretty = ($ht | ConvertTo-Json -Depth 8)
+    $tmp = "$path.tmp"
+    [System.IO.File]::WriteAllText($tmp, $pretty + "`n")
+    Restrict-FrpFileAcl -Path $tmp
+    Move-Item -LiteralPath $tmp -Destination $path -Force
+    Restrict-FrpFileAcl -Path $path
+}
+
+function Test-FrpIsInstallComplete {
+    $status = Get-FrpInstallStatus
+    return ($status -eq 'installed' -or $status -eq 'management_only')
+}
+
+function Test-FrpCanResumeInstall {
+    if (-not (Test-FrpIsEnrolled)) { return $false }
+    $status = Get-FrpInstallStatus
+    return ($status -eq 'enrolled_incomplete')
+}
+
+function Get-FrpEnabledServiceCount {
+    param($Services)
+    if ($null -eq $Services) { return 0 }
+    $map = ConvertTo-FrpServiceMap -Services $Services
+    $n = 0
+    foreach ($sid in $map.Keys) {
+        if ($map[$sid].enabled -ne $false) { $n++ }
+    }
+    return $n
 }
 
 function Merge-FrpAllocatedPorts {

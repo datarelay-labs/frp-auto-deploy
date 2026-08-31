@@ -146,42 +146,72 @@ function Invoke-FrpClientUpdate {
     Initialize-FrpDirectories
     $backupRoot = Join-Path (Get-FrpBackupDir) ("update-" + (Get-Date -Format 'yyyyMMddHHmmss'))
     New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
-    foreach ($rel in @('bin\frpc.exe', 'config\frpc.toml', 'state\client-state.json', 'version')) {
-        $src = Join-Path (Get-FrpWindowsRoot) $rel
+    $snapshotMap = [ordered]@{
+        'frpc.exe'          = (Get-FrpFrpcPath)
+        'frpc.toml'         = (Get-FrpTomlPath)
+        'client-state.json' = (Get-FrpStatePath)
+        'version'           = (Get-FrpVersionPath)
+    }
+    foreach ($name in @($snapshotMap.Keys)) {
+        $src = $snapshotMap[$name]
         if (Test-Path -LiteralPath $src) {
-            $dst = Join-Path $backupRoot (Split-Path -Leaf $rel)
-            Copy-Item -LiteralPath $src -Destination $dst -Force
+            Copy-Item -LiteralPath $src -Destination (Join-Path $backupRoot $name) -Force
         }
     }
+    $wasRunning = $false
     try {
-        $wasRunning = $false
         $st = Get-FrpClientStatus
         if ($st.Running) {
             $wasRunning = $true
             Stop-FrpClient | Out-Null
         }
         Install-FrpWindowsBinary -DownloadUrl $url -ExpectedSha256 $sha | Out-Null
-        # Preserve identity/ports: do not touch state or toml
+        if ($env:FRP_WINDOWS_FAIL_AFTER_BINARY_REPLACE -eq '1') {
+            throw 'ERROR: simulated failure after binary replace (FRP_WINDOWS_FAIL_AFTER_BINARY_REPLACE=1)'
+        }
+        # Preserve identity/ports: do not rewrite state or toml here.
+        if ($env:FRP_WINDOWS_FAIL_AFTER_METADATA_WRITE -eq '1') {
+            throw 'ERROR: simulated failure after metadata write (FRP_WINDOWS_FAIL_AFTER_METADATA_WRITE=1)'
+        }
         if ($wasRunning) {
+            if ($env:FRP_WINDOWS_FAIL_BEFORE_RESTART -eq '1') {
+                throw 'ERROR: simulated failure before restart (FRP_WINDOWS_FAIL_BEFORE_RESTART=1)'
+            }
             Start-FrpClient | Out-Null
         }
         Write-Host 'Update complete (identity and port reservations preserved).'
         return 0
     } catch {
         Write-Host ("ERROR: update failed: {0}" -f $_.Exception.Message)
-        Write-Host 'Attempting rollback from backup...'
+        Write-Host 'Attempting full rollback from backup...'
+        $rollbackOk = $true
         try {
-            $bakExe = Join-Path $backupRoot 'frpc.exe'
-            if (Test-Path -LiteralPath $bakExe) {
-                Copy-Item -LiteralPath $bakExe -Destination (Get-FrpFrpcPath) -Force
+            foreach ($name in @('frpc.exe', 'frpc.toml', 'client-state.json', 'version')) {
+                $bak = Join-Path $backupRoot $name
+                if (-not (Test-Path -LiteralPath $bak)) { continue }
+                $dest = $snapshotMap[$name]
+                $destDir = Split-Path -Parent $dest
+                if (-not (Test-Path -LiteralPath $destDir)) {
+                    New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+                }
+                Copy-Item -LiteralPath $bak -Destination $dest -Force
             }
-            Write-Host 'Rollback restored frpc.exe (best effort).'
+            if ($wasRunning) {
+                Start-FrpClient | Out-Null
+            }
+            Write-Host 'Rollback restored snapshotted files and prior run state.'
         } catch {
-            Write-Host 'ERROR: rollback failed'
+            $rollbackOk = $false
+            Write-Host ("ERROR: rollback failed: {0}" -f $_.Exception.Message)
+            Write-Host 'RECOVERY_REQUIRED=YES'
+        }
+        if (-not $rollbackOk) {
+            Write-Host 'RECOVERY_REQUIRED=YES'
         }
         return 1
     }
 }
+
 
 function Invoke-FrpClientUninstall {
     Write-Host 'LOCAL SOFTWARE REMOVED, SERVER RESERVATIONS PRESERVED'

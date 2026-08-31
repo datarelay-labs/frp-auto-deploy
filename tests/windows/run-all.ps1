@@ -11,15 +11,23 @@ $tests = @(
     'test-canonical-sign.ps1',
     'test-config.ps1',
     'test-security.ps1',
+    'test-tls-hostname-negative.ps1',
     'test-persistence.ps1',
     'test-process-control.ps1',
     'test-zero-touch-command.ps1',
     'test-rdp-service.ps1',
+    'test-zero-service.ps1',
+    'test-install-start-failure.ps1',
+    'test-partial-resume.ps1',
+    'test-update-rollback.ps1',
+    'test-pid-ownership.ps1',
+    'test-acl-fail-closed.ps1',
     'test-multi-service.ps1',
     'test-ca-pinning.ps1',
     'test-uninstall.ps1',
     'test-cross-language.ps1'
 )
+
 
 Write-Host '=== frp-auto-deploy Windows client tests ==='
 foreach ($t in $tests) {
