@@ -800,8 +800,12 @@ Server:
 sudo frpctl show version
 sudo frpctl show status
 sudo frpctl show clients
+sudo frpctl show fleet
+sudo frpctl show ports
 sudo frpctl show enrollments
 sudo frpctl doctor
+sudo frpctl test
+sudo frpctl support-bundle
 ```
 
 Client:
