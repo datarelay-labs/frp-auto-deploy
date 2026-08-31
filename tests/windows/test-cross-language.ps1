@@ -126,10 +126,13 @@ try {
     $id = New-FrpEcdsaIdentity
     $sig = Protect-FrpSignMessage -PrivatePem $id.PrivatePem -Message $msg
     $pubFile = Join-Path $crossDir 'ps-pub.pem'
+    $sigFile = Join-Path $crossDir 'ps-sig.b64'
     $utf8NoBom = New-Object System.Text.UTF8Encoding $false
     [System.IO.File]::WriteAllText($pubFile, $id.PublicPem, $utf8NoBom)
+    # PS 5.1 native argv mangles '+' in base64; pass signature via file instead.
+    [System.IO.File]::WriteAllText($sigFile, $sig, $utf8NoBom)
     & $python $verify --pubkey-pem $pubFile --body $v.body --ts $v.ts --nonce $v.nonce `
-        --machine-id $v.machine_id --sig-b64 $sig
+        --machine-id $v.machine_id --sig-file $sigFile
     if ($LASTEXITCODE -ne 0) { throw 'Python verify of PS signature failed' }
 
     # Canonical sample
