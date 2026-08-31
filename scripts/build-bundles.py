@@ -66,7 +66,10 @@ files=[
  'tools/frp-restore',
  'tools/frp-update',
  'tools/frp-upstream',
+ 'tools/frp-groups',
+ 'tools/frp-group-set',
  'tools/frpctl',
+ 'tools/frpcli',
 ]
 
 lines=['#!/usr/bin/env bash','set -euo pipefail','TMP="$(mktemp -d)"','trap \'rm -rf "$TMP"\' EXIT']
@@ -98,6 +101,7 @@ client_files=[
  'lib/frp_ctl_repl.py',
  'lib/frp-client-lifecycle.sh',
  'lib/frp_client_lifecycle.py',
+ 'uninstall-client.sh',
  'tools/frp-client',
  'tools/frpctl',
  'tools/frpcli',

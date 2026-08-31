@@ -71,12 +71,45 @@ echo 'Server-side reservations remain.'
 echo 'Use an explicit server release command if ports should be freed.'
 echo
 
+frp_u_project_frpc_pids() {
+  local cfg bin pid cmdline exe
+  cfg="$(frp_u_path /etc/frp/frpc.toml)"
+  bin="$(frp_u_path /usr/local/bin/frpc)"
+  for pid in $(pgrep -x frpc 2>/dev/null || true); do
+    [[ -r "/proc/${pid}/cmdline" ]] || continue
+    cmdline="$(tr '\0' ' ' <"/proc/${pid}/cmdline" 2>/dev/null || true)"
+    if [[ "$cmdline" == *frpc* && "$cmdline" == *"$cfg"* ]]; then
+      if [[ -r "/proc/${pid}/exe" ]]; then
+        exe="$(readlink -f "/proc/${pid}/exe" 2>/dev/null || true)"
+        if [[ -n "$exe" && "$exe" != "$bin" && "$exe" != *'/frpc' ]]; then
+          continue
+        fi
+      fi
+      printf '%s\n' "$pid"
+    fi
+  done
+}
+
+frp_u_kill_project_frpc() {
+  local pid
+  while read -r pid; do
+    [[ -n "$pid" ]] || continue
+    kill "$pid" 2>/dev/null || true
+  done < <(frp_u_project_frpc_pids)
+  sleep 0.2
+  while read -r pid; do
+    [[ -n "$pid" ]] || continue
+    kill -9 "$pid" 2>/dev/null || true
+  done < <(frp_u_project_frpc_pids)
+}
+
 if [[ "$SKIP_SYSTEMD" != "1" ]] && command -v systemctl >/dev/null 2>&1; then
   systemctl stop frpc 2>/dev/null || true
   systemctl disable frpc 2>/dev/null || true
 fi
+# Prefer unit stop; never pkill -x frpc globally (unrelated frpc must survive).
 if [[ "$SKIP_SYSTEMD" != "1" ]]; then
-  pkill -x frpc 2>/dev/null || true
+  frp_u_kill_project_frpc
 fi
 
 frp_u_rm_file "$(frp_u_path /etc/systemd/system/frpc.service)"
@@ -90,6 +123,7 @@ if [[ -d "$libdir" && ! -L "$libdir" ]]; then
   frp_u_rm_file "${libdir}/frp-client-common.sh"
   frp_u_rm_file "${libdir}/frp-client-lifecycle.sh"
   frp_u_rm_file "${libdir}/frp_client_lifecycle.py"
+  frp_u_rm_file "${libdir}/uninstall-client.sh"
   if [[ ! -f "$(frp_u_path /etc/frp-auto-deploy/config.json)" ]]; then
     frp_u_rm_file "${libdir}/frp_mgmt_auth.py"
     frp_u_rm_file "${libdir}/frp-common.sh"
