@@ -341,4 +341,105 @@ assert any('dynamic group' in i for i in issues), issues
 PY
 pass "DOCTOR_DYNAMIC_REF"
 
+# Group membership / assigned_group_ids survive revoke+purge; registry groups survive restore
+REVOKE="$ROOT/tools/frp-enrollment-revoke"
+PURGE="$ROOT/tools/frp-enrollment-purge"
+export FRP_ENROLLMENT_PURGE_YES=1
+python3 - "$ROOT" "$TREE" "$REG" "$ENROLL" <<'PY' || fail "group retention enroll"
+import hashlib, hmac, importlib.util, json, sys, time
+from pathlib import Path
+
+root = Path(sys.argv[1])
+tree = Path(sys.argv[2])
+reg_path = Path(sys.argv[3])
+enroll_dir = Path(sys.argv[4])
+spec = importlib.util.spec_from_file_location('alloc', root / 'server/frp-port-allocator.py')
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+state = json.loads(reg_path.read_text())
+gid = None
+for candidate, group in (state.get('groups') or {}).items():
+    if group.get('type', 'manual') == 'manual':
+        gid = candidate
+        break
+assert gid, 'need a manual group'
+
+eid = 'aabbccddeeff0099'
+secret = 'd' * 64
+now = int(time.time())
+(enroll_dir / (eid + '.json')).write_text(json.dumps({
+    'id': eid,
+    'secret': secret,
+    'expires_at': now + 600,
+    'bound_machine_id': None,
+    'used_at': None,
+    'assigned_group_ids': [gid],
+}, indent=2) + '\n')
+
+cfg = {
+    'public_ip': '203.0.113.10',
+    'control_port': 443,
+    'port_start': 6000,
+    'port_end': 7000,
+    'registry_file': str(reg_path),
+    'enrollments_dir': str(enroll_dir),
+    'token_file': str(reg_path.parent / 'token-ret'),
+}
+(reg_path.parent / 'token-ret').write_text('tok\n')
+cfg_path = reg_path.parent / 'alloc-ret.json'
+cfg_path.write_text(json.dumps(cfg) + '\n')
+mod.port_is_available = lambda port: True
+alloc = mod.Allocator(str(cfg_path))
+
+mid = 'retgrpclient00000000000000000001'
+body = json.dumps({
+    'machine_id': mid,
+    'hostname': 'ret-host',
+    'services': [],
+}, separators=(',', ':')).encode()
+payload, err = alloc.issue_enroll_challenge(eid)
+assert not err, err
+message = '%s\n%s\n%s' % (payload['challenge_id'], payload['nonce'], body.decode())
+sig = hmac.new(secret.encode(), message.encode(), hashlib.sha256).hexdigest()
+headers = {
+    'X-Enrollment-Challenge-ID': payload['challenge_id'],
+    'X-Enrollment-Challenge-Nonce': payload['nonce'],
+}
+code, result = alloc.enroll(eid, '', sig, body, headers=headers)
+assert code == 200, (code, result)
+state = json.loads(reg_path.read_text())
+assert gid in state['clients'][mid]['group_ids']
+assert 'last_mgmt_seen_at' not in state['clients'][mid], 'enrollment must not set last_mgmt_seen_at'
+Path(tree / 'var/lib/frp-auto-deploy' / 'retention-gid').write_text(gid + '\n')
+Path(tree / 'var/lib/frp-auto-deploy' / 'retention-mid').write_text(mid + '\n')
+print('ok')
+PY
+GID_RET="$(cat "$TREE/var/lib/frp-auto-deploy/retention-gid")"
+MID_RET="$(cat "$TREE/var/lib/frp-auto-deploy/retention-mid")"
+python3 "$PURGE" enrollment aabbccddeeff0099 >/dev/null || fail "purge completed enrollment with groups"
+[[ ! -f "$ENROLL/aabbccddeeff0099.json" ]] || fail "enrollment file should be purged"
+python3 - "$REG" "$GID_RET" "$MID_RET" <<'PY' || fail "group_ids survive purge"
+import json, sys
+state = json.load(open(sys.argv[1]))
+assert sys.argv[2] in state['clients'][sys.argv[3]]['group_ids']
+assert sys.argv[2] in state['groups']
+PY
+# Simulate backup/restore of registry (exact JSON round-trip)
+cp "$REG" "$WORKDIR/registry.backup.json"
+python3 - "$REG" <<'PY'
+import json, sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps({'schema_version': 2, 'clients': {}, 'groups': {}}) + '\n')
+PY
+cp "$WORKDIR/registry.backup.json" "$REG"
+python3 - "$REG" "$GID_RET" "$MID_RET" <<'PY' || fail "group_ids survive restore"
+import json, sys
+state = json.load(open(sys.argv[1]))
+assert sys.argv[2] in state['groups']
+assert sys.argv[2] in state['clients'][sys.argv[3]]['group_ids']
+print('restored ok')
+PY
+pass "GROUP_RETENTION_LIFECYCLE"
+
 echo "ALL PHASE3 GROUP TESTS PASSED"

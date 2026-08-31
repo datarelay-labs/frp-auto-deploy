@@ -25,12 +25,14 @@ auth.token = `"$token`"
     $rc = Invoke-FrpSupportBundle -Anonymize
     Assert-FrpTrue ($rc -eq 0) 'support-bundle exit 0'
 
-    $zips = Get-ChildItem -LiteralPath $env:TEMP -Filter 'frp-support-bundle-*.zip' |
+    $tempRoot = [System.IO.Path]::GetTempPath()
+    if ([string]::IsNullOrWhiteSpace($tempRoot)) { $tempRoot = '/tmp' }
+    $zips = Get-ChildItem -LiteralPath $tempRoot -Filter 'frp-support-bundle-*.zip' |
         Sort-Object LastWriteTime -Descending
     Assert-FrpTrue ($zips.Count -gt 0) 'zip created'
     $zip = $zips[0].FullName
 
-    $extract = Join-Path $env:TEMP ("frp-bundle-scan-" + [guid]::NewGuid().ToString('n'))
+    $extract = Join-Path $tempRoot ("frp-bundle-scan-" + [guid]::NewGuid().ToString('n'))
     New-Item -ItemType Directory -Path $extract | Out-Null
     Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
 

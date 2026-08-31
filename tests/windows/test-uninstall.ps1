@@ -24,11 +24,13 @@ try {
     Assert-FrpTrue ($rc2 -eq 0) 'second uninstall exit 0'
 
     # Tools source still documents the message and fail-closed stop
+    $lifecycle = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'windows\lib\FrpLifecycle.ps1') -Raw
     $client = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'windows\tools\FrpClient.ps1') -Raw
-    Assert-FrpTrue ($client -match 'SERVER RESERVATIONS PRESERVED') 'uninstall message in tool'
-    Assert-FrpTrue ($client -match 'administrator releases them') 'port release wording'
-    Assert-FrpTrue ($client -match 'refusing to remove credentials') 'fail-closed stop gate'
-    Assert-FrpTrue ($client -match 'Remaining items') 'lists remaining on Remove-Item failure'
+    Assert-FrpTrue ($lifecycle -match 'SERVER RESERVATIONS PRESERVED') 'uninstall message in lifecycle'
+    Assert-FrpTrue ($lifecycle -match 'administrator releases them') 'port release wording'
+    Assert-FrpTrue ($lifecycle -match 'refusing to remove credentials') 'fail-closed stop gate'
+    Assert-FrpTrue ($lifecycle -match 'Remaining items') 'lists remaining on Remove-Item failure'
+    Assert-FrpTrue ($client -match 'uninstall') 'tool still exposes uninstall command'
 
     Write-FrpTestPass 'test-uninstall'
 } finally {

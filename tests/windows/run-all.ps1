@@ -24,6 +24,7 @@ $tests = @(
     'test-acl-fail-closed.ps1',
     'test-multi-service.ps1',
     'test-ca-pinning.ps1',
+    'test-clock-skew.ps1',
     'test-uninstall.ps1',
     'test-support-bundle.ps1',
     'test-cross-language.ps1'

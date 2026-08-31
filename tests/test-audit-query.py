@@ -137,5 +137,48 @@ class AuditQueryE2ETests(unittest.TestCase):
             self.audit.query(since="1s")
 
 
+    def test_real_group_audit_events_group_filter(self):
+        """Canonical emitters use group_id=; --group must match that schema."""
+        gid = "grp_cafef00d"
+        self.assertTrue(
+            self.audit.emit(
+                "group.created",
+                actor="test",
+                group_id=gid,
+                group_name="audit-filter-group",
+            )
+        )
+        self.assertTrue(
+            self.audit.emit(
+                "group.member_added",
+                actor="test",
+                group_id=gid,
+                group_name="audit-filter-group",
+                client_id="aabbccddeeff0011",
+            )
+        )
+        self.assertTrue(
+            self.audit.emit(
+                "group.member_removed",
+                actor="test",
+                group_id="grp_other001",
+                group_name="other",
+                client_id="aabbccddeeff0011",
+            )
+        )
+        by_group = self.audit.query(group=gid)
+        self.assertTrue(by_group)
+        events = {r["event"] for r in by_group}
+        self.assertIn("group.created", events)
+        self.assertIn("group.member_added", events)
+        self.assertNotIn("group.member_removed", events)
+        self.assertTrue(all(
+            str(r.get("group_id") or (r.get("details") or {}).get("group_id") or "") == gid
+            for r in by_group
+        ))
+        table = self.audit.format_audit_table(by_group)
+        self.assertIn("group.member_added", table)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -59,6 +59,26 @@ EOF
 cat >"$SERVER/var/lib/frp-auto-deploy/registry.json" <<'EOF'
 {
   "schema_version": 2,
+  "groups": {
+    "grp_aaaa1111": {
+      "name": "fleet-manual",
+      "type": "manual",
+      "description": "manual fixture",
+      "created_at": "2026-01-01T00:00:00Z"
+    },
+    "grp_bbbb2222": {
+      "name": "fleet-manual-2",
+      "type": "manual",
+      "description": "second manual",
+      "created_at": "2026-01-01T00:00:00Z"
+    },
+    "grp_cccc3333": {
+      "name": "fleet-dynamic",
+      "type": "dynamic",
+      "match_tags": {"env": "prod"},
+      "created_at": "2026-01-01T00:00:00Z"
+    }
+  },
   "clients": {
     "11111111111111111111111111111111": {
       "hostname": "recent-host",
@@ -68,6 +88,8 @@ cat >"$SERVER/var/lib/frp-auto-deploy/registry.json" <<'EOF'
       "reported_project_version": "2.1.1",
       "reported_frp_version": "0.70.1",
       "build_reported_at": "2099-01-01T00:00:00Z",
+      "group_ids": ["grp_aaaa1111"],
+      "tags": {"env": "prod"},
       "services": {
         "ssh": {
           "remote_port": 6000,
@@ -186,6 +208,11 @@ grep -q 'FRP Fleet Overview' "$WORKDIR/fleet.out" || fail "fleet header"
 grep -q 'Mgmt recent' "$WORKDIR/fleet.out" || fail "fleet mgmt recent"
 grep -q 'Mgmt stale' "$WORKDIR/fleet.out" || fail "fleet mgmt stale"
 grep -q 'not FRP tunnel activity' "$WORKDIR/fleet.out" || fail "fleet mgmt note"
+grep -q 'Groups' "$WORKDIR/fleet.out" || fail "fleet groups section"
+grep -E 'Manual[[:space:]]+2' "$WORKDIR/fleet.out" || fail "fleet manual group count"
+grep -E 'Dynamic[[:space:]]+1' "$WORKDIR/fleet.out" || fail "fleet dynamic group count"
+grep -E 'Ungrouped[[:space:]]+4' "$WORKDIR/fleet.out" || fail "fleet ungrouped count"
+grep -q 'system views all/ungrouped' "$WORKDIR/fleet.out" || fail "fleet system group note"
 
 run_ctl show ports >"$WORKDIR/ports.out" || fail "show ports"
 grep -q 'Public Port Inventory' "$WORKDIR/ports.out" || fail "ports header"

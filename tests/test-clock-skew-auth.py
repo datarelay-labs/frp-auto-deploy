@@ -284,6 +284,95 @@ def test_management_offset_refresh(env):
     pass_('MANAGEMENT_OFFSET_REFRESH')
 
 
+def test_group_assignment_with_clock_skew():
+    env = Env()
+    try:
+        state = env.allocator.load_registry()
+        gid = 'grp_abcd1234'
+        state.setdefault('groups', {})[gid] = {
+            'name': 'skew-group',
+            'type': 'manual',
+            'created_at': '2026-01-01T00:00:00Z',
+        }
+        env.allocator.save_registry(state)
+        enroll_path = env.enrollments / f'{env.eid}.json'
+        record = json.loads(enroll_path.read_text(encoding='utf-8'))
+        record['assigned_group_ids'] = [gid]
+        enroll_path.write_text(json.dumps(record, indent=2) + '\n', encoding='utf-8')
+        code, result = env.challenge_enroll()
+        if code != 200:
+            fail('GROUP_CLOCK_SKEW_ENROLL', result)
+        state = env.allocator.load_registry()
+        client = state['clients']['machine-skew']
+        if gid not in (client.get('group_ids') or []):
+            fail('GROUP_CLOCK_SKEW_ASSIGN', client)
+        if client.get('last_mgmt_seen_at'):
+            fail('GROUP_CLOCK_SKEW_MGMT_SEEN_ON_ENROLL', client)
+        pass_('GROUP_CLOCK_SKEW_ENROLLMENT')
+    finally:
+        env.cleanup()
+
+
+def test_last_mgmt_seen_and_build_report_paths():
+    env = Env()
+    try:
+        code, result = env.challenge_enroll(include_pub=True)
+        if code != 200:
+            fail('mgmt_seen enroll', result)
+        state = env.allocator.load_registry()
+        client = state['clients']['machine-skew']
+        if client.get('last_mgmt_seen_at'):
+            fail('enrollment must not set last_mgmt_seen_at', client)
+        # Seed an older build report, then update via identity-auth management
+        client['reported_project_version'] = '1.0.0'
+        client['build_reported_at'] = '2020-01-01T00:00:00Z'
+        env.allocator.save_registry(state)
+
+        # Failed auth must not refresh last_mgmt_seen_at
+        body = env.body(include_pub=False)
+        bad_headers = {
+            'X-Mgmt-Auth': '1',
+            'X-Timestamp': str(int(time.time())),
+            'X-Mgmt-Nonce': MGMT.new_nonce(),
+            'X-Mgmt-Signature': 'not-a-real-signature',
+        }
+        bad_code, _ = env.allocator.enroll('', '', '', body, headers=bad_headers)
+        if bad_code == 200:
+            fail('bad sig accepted')
+        state = env.allocator.load_registry()
+        if state['clients']['machine-skew'].get('last_mgmt_seen_at'):
+            fail('failed auth refreshed last_mgmt_seen_at')
+
+        # Clock-skew reject must not refresh
+        skew_headers, _ts, _n = env.signed_headers(body, ts=int(time.time()) + 3600)
+        skew_code, skew_result = env.allocator.enroll(
+            '', skew_headers['X-Timestamp'], '', body, headers=skew_headers
+        )
+        if skew_code == 200:
+            fail('clock skew accepted', skew_result)
+        state = env.allocator.load_registry()
+        if state['clients']['machine-skew'].get('last_mgmt_seen_at'):
+            fail('clock-skew reject refreshed last_mgmt_seen_at')
+
+        # Successful identity-auth updates last_mgmt_seen_at and build metadata
+        body2 = json.loads(body.decode())
+        body2['reported_project_version'] = '9.9.9'
+        body2['reported_frp_version'] = '0.70.1'
+        body2_bytes = json.dumps(body2, separators=(',', ':')).encode()
+        ok_code, ok_result = env.enroll_signed(body=body2_bytes)
+        if ok_code != 200:
+            fail('identity management', ok_result)
+        state = env.allocator.load_registry()
+        client = state['clients']['machine-skew']
+        if not client.get('last_mgmt_seen_at'):
+            fail('successful mgmt must set last_mgmt_seen_at', client)
+        if client.get('reported_project_version') != '9.9.9':
+            fail('build report not updated on management', client)
+        pass_('LAST_MGMT_SEEN_AND_BUILD_REPORT')
+    finally:
+        env.cleanup()
+
+
 def main():
     test_clock_sync_helpers()
     test_malformed_json_handling()
@@ -320,6 +409,8 @@ def main():
             test_management_offset_refresh(env7)
         finally:
             env7.cleanup()
+        test_group_assignment_with_clock_skew()
+        test_last_mgmt_seen_and_build_report_paths()
     finally:
         env.cleanup()
     print('CLOCK_SKEW_AUTH_TESTS=PASS')
