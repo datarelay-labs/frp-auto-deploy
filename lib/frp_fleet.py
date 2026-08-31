@@ -196,6 +196,30 @@ def server_health_summary(cfg, state):
     return out
 
 
+def group_summary_counts(state):
+    """Count persisted manual/dynamic groups and ungrouped clients.
+
+    System views ``all`` / ``ungrouped`` are virtual and must not inflate the
+    manual group count.
+    """
+    groups = CREG.ensure_groups_map(state)
+    manual = 0
+    dynamic = 0
+    for _gid, group in groups.items():
+        if not isinstance(group, dict):
+            continue
+        gtype = CREG.group_record_type(group)
+        if gtype == 'manual':
+            manual += 1
+        elif gtype == 'dynamic':
+            dynamic += 1
+    ungrouped = 0
+    for _mid, client in (state.get('clients') or {}).items():
+        if isinstance(client, dict) and CREG.client_is_ungrouped(state, client):
+            ungrouped += 1
+    return {'manual': manual, 'dynamic': dynamic, 'ungrouped': ungrouped}
+
+
 def fleet_summary():
     cfg, _reg_path, state = load_context()
     clients = state.get('clients') or {}
@@ -240,6 +264,7 @@ def fleet_summary():
     available = max(0, total_ports - allocated)
     enroll = enrollment_counts(cfg)
     health = server_health_summary(cfg, state)
+    groups = group_summary_counts(state)
 
     lines = ['FRP Fleet Overview', '==================', '']
     lines.extend([
@@ -249,6 +274,11 @@ def fleet_summary():
         '  Mgmt stale            %d' % mgmt_stale,
         '  Mgmt unknown          %d' % mgmt_unknown,
         '  Revoked               %d' % revoked,
+        '',
+        'Groups',
+        '  Manual                %d' % groups['manual'],
+        '  Dynamic               %d' % groups['dynamic'],
+        '  Ungrouped             %d' % groups['ungrouped'],
         '',
         'Services',
         '  Total                 %d' % services_total,
@@ -277,6 +307,8 @@ def fleet_summary():
     lines.append('')
     lines.append('Note: Mgmt recent/stale reflects last authenticated management')
     lines.append('communication (LAST MGMT SEEN), not FRP tunnel activity.')
+    lines.append('Note: Manual/Dynamic counts are persisted groups only;')
+    lines.append('system views all/ungrouped are not counted as manual groups.')
     return '\n'.join(lines) + '\n'
 
 

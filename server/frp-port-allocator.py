@@ -1380,8 +1380,15 @@ class Allocator:
                         source_ip=source_ip,
                         seen_at=now_iso,
                     )
-                    CREG.apply_mgmt_seen(client, seen_at=now_iso)
-                    CREG.apply_build_report(client, payload, seen_at=now_iso)
+                    # last_mgmt_seen_at: only successful authenticated management
+                    # (identity auth). Enrollment-only and failed auth must not refresh it.
+                    if identity_auth:
+                        CREG.apply_mgmt_seen(client, seen_at=now_iso)
+                        CREG.apply_build_report(client, payload, seen_at=now_iso)
+                    else:
+                        # Seed build metadata on first enrollment when provided;
+                        # subsequent updates happen on identity-auth management calls.
+                        CREG.apply_build_report(client, payload, seen_at=now_iso)
                     CREG.seed_admin_metadata(
                         client,
                         label=(record or {}).get('label'),

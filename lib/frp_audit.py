@@ -270,8 +270,10 @@ def query(
                     continue
             if group:
                 g = str(group).lower()
-                top_g = str(row.get("group", "")).lower()
-                nested_g = str(details.get("group", "")).lower()
+                top_g = str(row.get("group", "") or row.get("group_id", "")).lower()
+                nested_g = str(
+                    details.get("group", "") or details.get("group_id", "")
+                ).lower()
                 if top_g != g and nested_g != g:
                     continue
             matched.append((ts or datetime(1970, 1, 1, tzinfo=timezone.utc), row))
