@@ -1,6 +1,100 @@
 # Changelog
 
+## Unreleased (integration/pre-main-e2e)
+
+Pre-main integration branch. **Not merged to main.** No version bump
+(`PROJECT_VERSION` / `FRP_VERSION` unchanged at 2.1.1 / 0.70.1).
+
+- Phase 3 groups integrated with fleet, retention, clock-skew, and audit paths
+- Clock-skew tolerant enrollment/management (challenge + `GET /time` offset)
+- Client lifecycle: `pause` / `resume` / `restart` / `test` / `logs` /
+  `support-bundle` / `uninstall` (`frpcli` alias); pause persists across reboot
+- Server fleet visibility: `show fleet` / `show ports`, mgmt-stale and
+  build-drift filters, role-aware diagnostics and redacted support bundles
+- Enrollment retention housekeeping; audit query/export hardening
+- Installed-artifact regression coverage (client/server bootstrap under
+  isolated roots) and production `/home/aella/` path-leakage scan
+- Official bundles include uninstall helper, `frpcli`, lifecycle, and fleet modules
+
 ## 2.1.1 — 2026-08-30
+
+Stable release. FRP remains pinned at **0.70.1**.
+
+- First-class `create zero-touch` in `frpctl` (guided SSH-only and multi-service
+  workflows, including remote LAN targets)
+- Zero-touch guided menu shows SSH only / Configure services / Back;
+  Management-only remains available to the backend but is hidden from the
+  guided menu
+- CLI discoverability and Tab completion behavior retained (first-press
+  candidates, no command dispatch on Back)
+- `frpctl` verb/resource grammar, enrollment listing without secrets, and
+  CLIENT ID as the canonical selector (continued from post-2.1.0 main work)
+- Same-version client/server updates compare verified bundle SHA256, not only
+  `PROJECT_VERSION`
+- Legacy clients without persisted release metadata fail closed on remote
+  update until a one-time verified bridge (`docs/FRP_UPGRADE.md`)
+- Server install/rerun and project-update migrate official project-managed
+  `client_installer_url` values to the current release-line canonical installer
+  (`v2.1.1` on stable; `main` on explicit dev). Custom, third-party, look-alike,
+  and explicit `FRP_CLIENT_INSTALLER_URL` overrides are preserved
+- Manual enrollment and legacy one-line client creation continue to use the
+  same persisted installer URL release-line semantics
+
+### Compatibility
+
+Already enrolled 2.1.0 clients remain compatible. After a server project update
+from 2.1.0, newly generated Zero-touch / enrollment installer commands use the
+`v2.1.1` bootstrap URL when the persisted URL was an official managed ref.
+
+## Unreleased (feature/group-management)
+
+- Manual Group Management (P3.1): immutable GROUP ID (`grp_…`), mutable name,
+  multiple membership via client `group_ids`, server-owned metadata only
+- Enrollment Group Assignment (P3.2): `create enrollment|zero-touch --group`
+  (repeatable, manual groups only); enrollment `assigned_group_ids`; merge on
+  enroll; fail closed when assigned group deleted
+- System Groups (P3.3): virtual `all` / `ungrouped` views (not persisted)
+- Dynamic Groups (P3.4): `create group --dynamic --match-tag KEY=VALUE` (AND);
+  computed membership from server-owned tags; no persisted dynamic `group_ids`
+- Filters & UX (P3.5): `show clients --group`, repeated `--tag`, `--status`
+  (`online`/`offline`/`unknown`); `show client … groups` shows manual vs dynamic
+- CLI: `show groups` / `show group` / `show client … groups` /
+  `create group [--dynamic --match-tag]` / `set group name|description|match-tag` /
+  `remove group [match-tag KEY]` /
+  `add client … group` / `remove client … group` / `remove group` /
+  `show clients --group [--tag …] [--status …]`
+- Doctor: dynamic selectors, dynamic group in client `group_ids`, pending
+  enrollment group references
+- Audit events `group.*`; old registries/backups without groups remain readable
+
+## Unreleased (post-2.1.1 / feature/windows-client)
+
+- Enrollment retention hardening: terminal records (`expired`, `completed`,
+  `revoked`) retained for `enrollment_retention_days` (default 30), then
+  pair-aware automatic cleanup; `purge enrollment` / `purge enrollments
+  --older-than` for manual housekeeping; audit log retention unchanged
+- Clock-skew tolerant authentication: server-issued enrollment challenges,
+  `GET /time` sync, stored `management_time_offset_sec`, and server-relative
+  management timestamps (±300 s replay window unchanged; client OS clock not
+  modified)
+- Client lifecycle: `frpctl pause|resume|restart|test|logs|support-bundle|uninstall` (canonical); `frpcli` friendly alias
+- Pause is persistent across reboot; update/apply do not auto-resume remote access
+- Support bundles use deterministic redaction; uninstall preserves server records and port reservations
+- Windows: `frpctl.cmd` / `frpcli.cmd` wrappers; uninstall wording uses **release** (not revoke) for ports
+
+- Server fleet visibility: `show fleet`, `show ports`, management-stale/build-drift filters, audit export
+- Server diagnostics: role-aware `test`, `logs`, `support-bundle`; LAST MGMT SEEN on authenticated requests
+- Mgmt stale / build drift are read-only visibility; they do not imply tunnel offline or auto-cleanup
+
+- Windows TLS: enforce hostname/IP SAN verification on the pinned-.NET path (no `-or $true` bypass)
+- Windows zero-service tickets stay management-only (no automatic RDP)
+- `release` clears port reservations but keeps the management client record; `revoke` remains identity-only
+- Mutation CLIs require immutable CLIENT ID (label/hostname shortcuts are read-only)
+- Windows install fails closed on `frpc` start failure when services exist; partial enroll resumes without re-ticket
+- Windows update rolls back managed files and process state; PID stop checks exe ownership; secret ACL fail-closed
+- Installer URL setters reject non-HTTPS values; SSH helper no longer defaults to `root`
+
+## 2.1.0 — 2026-08-29
 
 Stable release. FRP remains pinned at **0.70.1**.
 

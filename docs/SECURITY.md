@@ -317,7 +317,11 @@ from root.
 ```
 
 Also consider enrollments, bootstrap tickets, and `mgmt-nonces.json`. Store
-backups mode `600`. Losing the private CA means existing clients cannot
+backups mode `600`. **Backups contain secrets** (CA private key, FRP token,
+registry MAC material, enrollment secrets). Treat backup archives as
+highly sensitive — encrypt at rest when stored off-host, restrict access to
+operators who already have root on the FRP server, and never attach raw
+backups to support tickets. Losing the private CA means existing clients cannot
 validate a replacement allocator until trust is re-established (typically
 re-enrollment).
 
@@ -359,6 +363,10 @@ management keys, FRP tokens, Enrollment Codes, Bootstrap Tickets, or raw
 Authorization headers. Support bundles are written with restrictive permissions
 (`0600` on Linux) and deterministic JSON/TOML redaction — not ad-hoc `grep`.
 
+`frpctl pause` stops outbound remote access without deleting identity or
+server-side reservations. Pause state is local and persists across reboot;
+`update` / `apply` / `doctor` must not auto-resume.
+
 `frpctl uninstall` removes local software only. It does not revoke management
 identity or release public port reservations on the server.
 
@@ -366,6 +374,8 @@ identity or release public port reservations on the server.
 
 Server-side `show fleet`, `show ports`, management-stale filters, and audit export
 are read-only. They aggregate local registry/state only — no remote client probes.
+Audit export redacts credential-like fields; do not log tokens or private keys
+into `audit.jsonl`.
 
 `last_mgmt_seen_at` is updated only after successful authenticated management
 requests (server clock). Failed auth, replay, or revoked identity must not refresh it.

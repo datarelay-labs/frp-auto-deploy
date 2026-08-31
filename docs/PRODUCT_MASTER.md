@@ -1541,6 +1541,11 @@ Stable release에 포함되고 검증됨.
 
 `main`에는 구현되었으나 아직 다음 Stable release에 포함되지 않음.
 
+### Pending Main E2E
+
+통합 브랜치에서 구현·로컬 E2E까지 완료되었으나 `main` merge 전.
+Stable/Main으로 승격하지 않는다.
+
 ### IN PROGRESS
 
 branch 또는 development 작업 중.
@@ -1634,7 +1639,10 @@ branch 또는 development 작업 중.
 - contextual help
 - shell-safe parser
 - Zero-touch UX 개선
-- client lifecycle: pause, resume, restart, test, logs, support-bundle, uninstall (`frpcli` alias)
+
+Client lifecycle (`pause` / `resume` / `restart` / `test` / `logs` /
+`support-bundle` / `uninstall`, `frpcli` alias) is tracked separately as
+**IMPLEMENTED / Pending Main E2E** (not claimed as Stable/Main merge).
 
 남은 작업은 Stable/Main 상태를 릴리즈 시점마다 재분류한다.
 
@@ -1642,15 +1650,15 @@ branch 또는 development 작업 중.
 
 # 56. Phase 3 — Group & Fleet Management
 
-**Status: IN PROGRESS (feature/group-management — pending main integration)**
+**Status: IMPLEMENTED / Pending Main E2E**
 
 | Sub-phase | Scope | Status |
 |-----------|-------|--------|
-| P3.1 | Manual Group | IMPLEMENTED / pending integration |
-| P3.2 | Enrollment Group Assignment | IMPLEMENTED / pending integration |
-| P3.3 | System Groups (`all`, `ungrouped`) | IMPLEMENTED / pending integration |
-| P3.4 | Dynamic Groups (tag AND selectors) | IMPLEMENTED / pending integration |
-| P3.5 | Filters & UX (`--group`, `--tag`, `--status`) | IMPLEMENTED / pending integration |
+| P3.1 | Manual Group | IMPLEMENTED / Pending Main E2E |
+| P3.2 | Enrollment Group Assignment | IMPLEMENTED / Pending Main E2E |
+| P3.3 | System Groups (`all`, `ungrouped`) | IMPLEMENTED / Pending Main E2E |
+| P3.4 | Dynamic Groups (tag AND selectors) | IMPLEMENTED / Pending Main E2E |
+| P3.5 | Filters & UX (`--group`, `--tag`, `--status`) | IMPLEMENTED / Pending Main E2E |
 
 목표:
 
@@ -1700,6 +1708,20 @@ Selector MVP:
 ```text
 AND only (OR/NOT deferred)
 ```
+
+---
+
+# 56b. Pre-Main E2E capabilities (integrated, not on main)
+
+다음 항목은 통합 브랜치에서 구현·검증되었으나 **main merge를 주장하지 않는다**.
+상태: **IMPLEMENTED / Pending Main E2E**.
+
+| Capability | Scope | Status |
+|------------|-------|--------|
+| Clock-Skew Auth | Enrollment challenge, `GET /time`, `management_time_offset_sec`; ±300s window unchanged; TLS still uses OS clock | IMPLEMENTED / Pending Main E2E |
+| Client Lifecycle | `pause` / `resume` / `restart` / `test` / `logs` / `support-bundle` / `uninstall`; `frpcli` alias; pause persists across reboot | IMPLEMENTED / Pending Main E2E |
+| Server Fleet Visibility | `show fleet`, `show ports`, mgmt-stale / build-drift filters, role-aware `test` / `logs` / `support-bundle`, audit export | IMPLEMENTED / Pending Main E2E |
+| Phase 3 Groups | Manual / dynamic / system groups + enrollment assignment + filters | IMPLEMENTED / Pending Main E2E |
 
 ---
 
@@ -2110,8 +2132,17 @@ show clients --tag env=prod
 doctor clients --group production
 ```
 
-같은 LE / MAIN |
-| Phase 3 | Manual/Dynamic Group & Filters | **IN PROGRESS** (feature branch) |
+## Roadmap status summary
+
+| Phase | Scope | Status |
+|-------|-------|--------|
+| Phase 0 | FRP Deployment Foundation | STABLE |
+| Phase 1 | Secure Management Foundation | STABLE |
+| Phase 2 | Multi-Service & Operational CLI | STABLE / MAIN |
+| Phase 3 | Manual/Dynamic Group & Filters | **IMPLEMENTED / Pending Main E2E** |
+| — | Clock-Skew Auth | **IMPLEMENTED / Pending Main E2E** |
+| — | Client Lifecycle | **IMPLEMENTED / Pending Main E2E** |
+| — | Server Fleet Visibility | **IMPLEMENTED / Pending Main E2E** |
 | Phase 4 | Safe Fleet Operations | PLANNED |
 | Phase 5 | Pilot/Production Rollout | FUTURE |
 | Phase 6 | Windows/Additional Platforms | DEFERRED / DEMAND DRIVEN |
