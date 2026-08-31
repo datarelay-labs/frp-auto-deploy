@@ -58,15 +58,21 @@ foreach ($t in $tests) {
     Write-Host ""
     Write-Host "--- $t ---"
     try {
-        & $hostExe -NoProfile -File $path
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "FAIL $t (exit $LASTEXITCODE)"
+        $output = & $hostExe -NoProfile -File $path 2>&1
+        $code = $LASTEXITCODE
+        if ($null -eq $code) { $code = 0 }
+        $output | ForEach-Object { Write-Host $_ }
+        if ($code -ne 0) {
+            Write-Host "FAIL $t (exit $code)"
+            $tail = (($output | Out-String) -split "`r?`n" | Where-Object { $_.Trim().Length -gt 0 } | Select-Object -Last 12) -join ' | '
+            Write-Host ("::error file=tests/windows/{0}::FAIL {0} exit={1} :: {2}" -f $t, $code, $tail)
             $failed++
         } else {
             $passed++
         }
     } catch {
         Write-Host "FAIL $t : $($_.Exception.Message)"
+        Write-Host ("::error file=tests/windows/{0}::FAIL {0} exception :: {1}" -f $t, $_.Exception.Message)
         $failed++
     }
 }
