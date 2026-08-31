@@ -88,6 +88,37 @@ def load_allocator():
     )
 
 
+def load_creg():
+    return load_module(
+        'frp_client_registry',
+        'lib/frp_client_registry.py',
+        '/usr/local/lib/frp-auto-deploy/frp_client_registry.py',
+    )
+
+
+def resolve_enrollment_group_ids(cfg, group_queries):
+    if not group_queries:
+        return []
+    creg = load_creg()
+    if creg is None:
+        fail('client registry module is missing')
+    reg_path = remap(str(cfg.get('registry_file') or '/var/lib/frp-auto-deploy/registry.json'))
+    state = json.loads(reg_path.read_text()) if reg_path.is_file() else {
+        'schema_version': 2,
+        'clients': {},
+        'groups': {},
+    }
+    try:
+        return creg.resolve_group_ids_for_assignment(state, group_queries)
+    except (creg.GroupLookupError, ValueError) as exc:
+        if isinstance(exc, creg.GroupLookupError) and exc.matches:
+            sys.stderr.write('ERROR: multiple groups matched.\n\n')
+            sys.stderr.write(creg.format_group_candidate_table(exc.matches))
+        else:
+            sys.stderr.write('ERROR: %s\n' % exc)
+        raise SystemExit(1)
+
+
 def fingerprint_from_cert(path):
     pki = load_frp_pki()
     if pki is None:
@@ -142,7 +173,7 @@ def atomic_write_json(path, data, mode=0o600):
         pass
 
 
-def write_enrollment(enroll_dir, enrollment_id, secret, ttl, note, label=''):
+def write_enrollment(enroll_dir, enrollment_id, secret, ttl, note, label='', assigned_group_ids=None):
     now = int(time.time())
     record = {
         'id': enrollment_id,
@@ -155,6 +186,8 @@ def write_enrollment(enroll_dir, enrollment_id, secret, ttl, note, label=''):
         'note': note,
         'label': label,
     }
+    if assigned_group_ids:
+        record['assigned_group_ids'] = list(assigned_group_ids)
     path = enroll_dir / (enrollment_id + '.json')
     atomic_write_json(path, record, 0o600)
     return record, path
@@ -226,6 +259,13 @@ def parse_args(argv=None):
         choices=('linux', 'windows'),
         default='linux',
         help='Client platform for zero-touch one-line command (default: linux)',
+    )
+    p.add_argument(
+        '--group',
+        action='append',
+        default=[],
+        metavar='GROUP',
+        help='manual group to assign at enrollment (repeatable; GROUP ID or unique name)',
     )
     p.add_argument(
         '--rdp',
@@ -736,11 +776,19 @@ def main(argv=None):
     if len(note) > 1024:
         fail('note must be at most 1024 characters')
 
+    assigned_group_ids = resolve_enrollment_group_ids(cfg, a.group)
+
     if not a.one_line:
         enrollment_id = secrets.token_hex(8)
         secret = secrets.token_hex(32)
         record, _path = write_enrollment(
-            enroll_dir, enrollment_id, secret, ttl, note, label=client_name
+            enroll_dir,
+            enrollment_id,
+            secret,
+            ttl,
+            note,
+            label=client_name,
+            assigned_group_ids=assigned_group_ids,
         )
         print_manual(cfg, record, ttl, public_host, control_public, allocator, ca_fp, installer)
         return 0
@@ -806,7 +854,13 @@ def main(argv=None):
 
     try:
         ticket, _enroll_record, ticket_record = alloc_mod.issue_bootstrap_ticket(
-            enroll_dir, bootstrap_dir, services, ttl, note, label=client_name
+            enroll_dir,
+            bootstrap_dir,
+            services,
+            ttl,
+            note,
+            label=client_name,
+            assigned_group_ids=assigned_group_ids,
         )
     except Exception as exc:
         fail('failed to issue bootstrap ticket: %s' % exc)
@@ -853,7 +907,13 @@ def main(argv=None):
                 spec = importlib.util.spec_from_file_location('frp_audit', str(path))
                 audit = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(audit)
-                audit.try_emit('enrollment.created', details={'label': client_name})
+                audit.try_emit(
+                    'enrollment.created',
+                    details={
+                        'label': client_name,
+                        'assigned_group_ids': assigned_group_ids or None,
+                    },
+                )
                 break
     except Exception:
         pass

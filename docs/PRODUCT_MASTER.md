@@ -1602,7 +1602,15 @@ branch 또는 development 작업 중.
 
 # 56. Phase 3 — Group & Fleet Management
 
-**Status: PLANNED — NEXT MAJOR PRODUCT FEATURE**
+**Status: IN PROGRESS (feature/group-management — pending main integration)**
+
+| Sub-phase | Scope | Status |
+|-----------|-------|--------|
+| P3.1 | Manual Group | IMPLEMENTED / pending integration |
+| P3.2 | Enrollment Group Assignment | IMPLEMENTED / pending integration |
+| P3.3 | System Groups (`all`, `ungrouped`) | IMPLEMENTED / pending integration |
+| P3.4 | Dynamic Groups (tag AND selectors) | IMPLEMENTED / pending integration |
+| P3.5 | Filters & UX (`--group`, `--tag`, `--status`) | IMPLEMENTED / pending integration |
 
 목표:
 
@@ -1650,8 +1658,12 @@ env=prod
 Selector MVP:
 
 ```text
-AND
-`lled Rollout
+AND only (OR/NOT deferred)
+```
+
+---
+
+# 57. Phase 4 — Safe Fleet Operations
 
 **Status: FUTURE**
 
@@ -2059,7 +2071,7 @@ doctor clients --group production
 ```
 
 같은 LE / MAIN |
-| Phase 3 | Manual/Dynamic Group & Filters | **PLANNED — NEXT** |
+| Phase 3 | Manual/Dynamic Group & Filters | **IN PROGRESS** (feature branch) |
 | Phase 4 | Safe Fleet Operations | PLANNED |
 | Phase 5 | Pilot/Production Rollout | FUTURE |
 | Phase 6 | Windows/Additional Platforms | DEFERRED / DEMAND DRIVEN |

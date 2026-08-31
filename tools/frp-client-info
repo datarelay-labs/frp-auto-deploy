@@ -90,6 +90,7 @@ try:
     membership = CREG.normalize_group_ids(client.get('group_ids'))
 except ValueError:
     membership = []
+manual_groups, dynamic_groups = CREG.client_group_memberships(state, client)
 groups_map = {}
 try:
     groups_map = CREG.ensure_groups_map(state)
@@ -109,7 +110,7 @@ def print_overview():
     print('Description    : %s' % (note or '-'))
     print('Service count  : %s' % len(enabled))
     print('Tag count      : %s' % len(tags))
-    print('Group count    : %s' % len(membership))
+    print('Group count    : %s' % (len(manual_groups) + len(dynamic_groups)))
 
 
 def print_services():
@@ -181,23 +182,27 @@ def print_tags():
 
 
 def print_groups():
-    if not membership:
-        print('(no groups)')
-        return
-    print('%-14s %-24s %s' % ('GROUP ID', 'NAME', 'TYPE'))
-    for gid in membership:
-        group = groups_map.get(gid) if isinstance(groups_map, dict) else None
-        if isinstance(group, dict):
-            name = CREG.sanitize_display(group.get('name') or '-', 24)
-            gtype = CREG.sanitize_display(group.get('type') or 'manual', 12)
-        else:
-            name = '(missing)'
-            gtype = '-'
-        print('%-14s %-24s %s' % (
+    rows = []
+    for gid, group in manual_groups:
+        rows.append((
+            CREG.sanitize_display(group.get('name') or gid, 24),
+            'manual',
             CREG.sanitize_display(gid, 14),
-            name,
-            gtype,
         ))
+    for gid, group in dynamic_groups:
+        rows.append((
+            CREG.sanitize_display(group.get('name') or gid, 24),
+            'dynamic',
+            CREG.sanitize_display(gid, 14),
+        ))
+    if not rows:
+        print('(none)')
+        if CREG.client_is_ungrouped(state, client):
+            print('System view: ungrouped')
+        return
+    print('%-24s %-8s %s' % ('GROUP', 'TYPE', 'GROUP ID'))
+    for name, gtype, gid in rows:
+        print('%-24s %-8s %s' % (name, gtype, gid))
 
 
 if view == 'overview':

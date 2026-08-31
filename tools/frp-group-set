@@ -148,6 +148,22 @@ def cmd_create(args):
     except ValueError as exc:
         fail(str(exc))
 
+    is_dynamic = bool(args.dynamic)
+    match_tags = {}
+    if is_dynamic:
+        if not args.match_tags:
+            fail('dynamic groups require at least one --match-tag KEY=VALUE')
+        for item in args.match_tags:
+            try:
+                key, value = CREG.parse_tag_assignment(item)
+                if key in match_tags and match_tags[key] != value:
+                    fail('duplicate conflicting tag selector for %s' % key)
+                match_tags[key] = value
+            except ValueError as exc:
+                fail(str(exc))
+    elif args.match_tags:
+        fail('--match-tag is only valid with --dynamic')
+
     def mutate(state):
         existing = CREG.find_group_id_by_name(state, name)
         if existing is not None:
@@ -156,37 +172,55 @@ def cmd_create(args):
         now = CREG.utc_now_iso()
         record = {
             'name': name,
-            'type': 'manual',
+            'type': 'dynamic' if is_dynamic else 'manual',
             'created_at': now,
             'updated_at': now,
         }
         if description:
             record['description'] = description
+        if is_dynamic:
+            record['match_tags'] = dict(match_tags)
         state['groups'][gid] = record
         return gid, record
 
     gid, record = with_locked_registry(mutate)
+    gtype = record.get('type') or 'manual'
     print('Created group %s' % CREG.sanitize_display(gid, 32))
     print('Name     : %s' % CREG.sanitize_display(record['name'], 64))
-    print('Type     : manual')
+    print('Type     : %s' % gtype)
     if description:
         print('Description: %s' % CREG.sanitize_display(description, 1024))
+    if is_dynamic:
+        for key in sorted(match_tags):
+            print('Match tag: %s=%s' % (
+                CREG.sanitize_display(key, 32),
+                CREG.sanitize_display(match_tags[key], 64),
+            ))
+    audit_details = {'type': gtype}
+    if is_dynamic:
+        audit_details['selector'] = dict(match_tags)
     emit_audit(
         'group.created',
         group_id=gid,
         group_name=record['name'],
-        details={'type': 'manual'},
+        details=audit_details,
     )
 
 
 def cmd_set(args):
-    if args.name is None and args.description is None and not args.clear_description:
-        fail('pass --name and/or --description/--clear-description')
-    if args.clear_description and args.description is not None:
-        fail('pass either --description or --clear-description')
+    if (
+        args.name is None
+        and args.description is None
+        and not args.clear_description
+        and not args.match_tags
+        and not args.remove_match_tags
+    ):
+        fail('pass --name, --description, --match-tag, and/or --remove-match-tag')
 
     new_name = None
     new_description = None
+    set_match_tags = []
+    remove_match_keys = []
     try:
         if args.name is not None:
             new_name = CREG.validate_group_name(args.name, required=True)
@@ -194,11 +228,19 @@ def cmd_set(args):
             new_description = ''
         elif args.description is not None:
             new_description = CREG.validate_group_description(args.description)
+        for item in args.match_tags or []:
+            set_match_tags.append(CREG.parse_tag_assignment(item))
+        for key in args.remove_match_tags or []:
+            remove_match_keys.append(CREG.validate_tag_key(key))
     except ValueError as exc:
         fail(str(exc))
+    if args.clear_description and args.description is not None:
+        fail('pass either --description or --clear-description')
 
     def mutate(state):
-        gid, group = CREG.resolve_group_or_exit(state, args.query)
+        gid, group = CREG.resolve_mutable_group_or_exit(state, args.query)
+        if CREG.group_record_type(group) != 'dynamic' and (set_match_tags or remove_match_keys):
+            fail('match-tag changes apply only to dynamic groups')
         old_name = str(group.get('name') or '')
         if new_name is not None:
             clash = CREG.find_group_id_by_name(state, new_name, exclude_id=gid)
@@ -210,6 +252,18 @@ def cmd_set(args):
                 group['description'] = new_description
             else:
                 group.pop('description', None)
+        if set_match_tags or remove_match_keys:
+            try:
+                tags = CREG.normalize_match_tags(group.get('match_tags'))
+            except ValueError as exc:
+                fail(str(exc))
+            for key, value in set_match_tags:
+                tags[key] = value
+            for key in remove_match_keys:
+                tags.pop(key, None)
+            if not tags:
+                fail('dynamic group selector cannot be empty')
+            group['match_tags'] = tags
         group['updated_at'] = CREG.utc_now_iso()
         group['type'] = str(group.get('type') or 'manual')
         state['groups'][gid] = group
@@ -233,37 +287,43 @@ def cmd_set(args):
         details={
             'renamed': new_name is not None,
             'description_changed': new_description is not None or args.clear_description,
+            'selector_changed': bool(set_match_tags or remove_match_keys),
+            'type': group.get('type') or 'manual',
         },
     )
 
 
 def cmd_delete(args):
     def mutate(state):
-        gid, group = CREG.resolve_group_or_exit(state, args.query)
+        gid, group = CREG.resolve_mutable_group_or_exit(state, args.query)
         name = str(group.get('name') or '')
-        # Remove membership references atomically with the group object.
-        for mid, client in list((state.get('clients') or {}).items()):
-            if not isinstance(client, dict):
-                continue
-            try:
-                ids = CREG.normalize_group_ids(client.get('group_ids'))
-            except ValueError:
-                fail('client %s has malformed group_ids' % CREG.sanitize_display(mid, 32))
-            if gid not in ids:
-                continue
-            CREG.set_client_group_ids(client, [item for item in ids if item != gid])
-            state['clients'][mid] = client
+        gtype = CREG.group_record_type(group)
+        # Remove membership references atomically with manual group object.
+        if gtype == 'manual':
+            for mid, client in list((state.get('clients') or {}).items()):
+                if not isinstance(client, dict):
+                    continue
+                try:
+                    ids = CREG.normalize_group_ids(client.get('group_ids'))
+                except ValueError:
+                    fail('client %s has malformed group_ids' % CREG.sanitize_display(mid, 32))
+                if gid not in ids:
+                    continue
+                CREG.set_client_group_ids(client, [item for item in ids if item != gid])
+                state['clients'][mid] = client
         state['groups'].pop(gid, None)
-        return gid, name
+        return gid, name, gtype
 
-    gid, name = with_locked_registry(mutate)
+    gid, name, gtype = with_locked_registry(mutate)
     print('Removed group %s' % CREG.sanitize_display(gid, 32))
     print('Name     : %s' % CREG.sanitize_display(name, 64))
+    print('Type     : %s' % gtype)
     print('Client identity, services, and ports were not changed.')
     emit_audit(
         'group.deleted',
         group_id=gid,
         group_name=name,
+        details={'type': gtype},
     )
 
 
@@ -305,7 +365,7 @@ def _assert_client_invariants(before, after, mid, state_after):
 def cmd_add_member(args):
     def mutate(state):
         mid, client = CREG.resolve_client_id_only_or_exit(state, args.client)
-        gid, group = CREG.resolve_group_or_exit(state, args.group)
+        gid, group = CREG.resolve_manual_group_or_exit(state, args.group)
         before = _client_snapshot(client)
         try:
             ids = CREG.normalize_group_ids(client.get('group_ids'))
@@ -349,7 +409,7 @@ def cmd_add_member(args):
 def cmd_remove_member(args):
     def mutate(state):
         mid, client = CREG.resolve_client_id_only_or_exit(state, args.client)
-        gid, group = CREG.resolve_group_or_exit(state, args.group)
+        gid, group = CREG.resolve_manual_group_or_exit(state, args.group)
         before = _client_snapshot(client)
         try:
             ids = CREG.normalize_group_ids(client.get('group_ids'))
@@ -393,16 +453,41 @@ def build_parser():
     parser = argparse.ArgumentParser(description='Manage manual client groups')
     sub = parser.add_subparsers(dest='command', required=True)
 
-    create = sub.add_parser('create', help='create a manual group')
+    create = sub.add_parser('create', help='create a manual or dynamic group')
     create.add_argument('name', help='unique group name')
     create.add_argument('--description', default=None, help='optional description')
+    create.add_argument('--dynamic', action='store_true', help='create a tag-based dynamic group')
+    create.add_argument(
+        '--match-tag',
+        action='append',
+        dest='match_tags',
+        default=[],
+        metavar='KEY=VALUE',
+        help='tag selector (required for --dynamic; repeatable; AND semantics)',
+    )
     create.set_defaults(func=cmd_create)
 
-    set_p = sub.add_parser('set', help='update group name or description')
+    set_p = sub.add_parser('set', help='update group name, description, or dynamic selector')
     set_p.add_argument('query', help='GROUP ID or unique group name')
     set_p.add_argument('--name', default=None, help='rename the group (GROUP ID unchanged)')
     set_p.add_argument('--description', default=None, help='set description')
     set_p.add_argument('--clear-description', action='store_true', help='clear description')
+    set_p.add_argument(
+        '--match-tag',
+        action='append',
+        dest='match_tags',
+        default=[],
+        metavar='KEY=VALUE',
+        help='add or update a dynamic selector tag',
+    )
+    set_p.add_argument(
+        '--remove-match-tag',
+        action='append',
+        dest='remove_match_tags',
+        default=[],
+        metavar='KEY',
+        help='remove a tag from a dynamic selector',
+    )
     set_p.set_defaults(func=cmd_set)
 
     delete = sub.add_parser('delete', help='remove a group and membership references')

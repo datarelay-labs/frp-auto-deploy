@@ -74,11 +74,13 @@ def load_state():
 
 
 def print_groups_table(state):
-    groups = CREG.sorted_groups(state)
     print('%-14s %-24s %-8s %7s' % ('GROUP ID', 'NAME', 'TYPE', 'CLIENTS'))
     print('-' * 58)
+    for name in (CREG.SYSTEM_GROUP_ALL, CREG.SYSTEM_GROUP_UNGROUPED):
+        count = CREG.group_member_count(state, name)
+        print('%-14s %-24s %-8s %7d' % ('-', name, 'system', count))
+    groups = CREG.sorted_groups(state)
     if not groups:
-        print('(none)')
         return
     for gid, group in groups:
         name = CREG.sanitize_display(group.get('name') or '-', 24)
@@ -95,12 +97,25 @@ def print_groups_table(state):
 def print_group_detail(state, gid, group):
     print('Group ID      : %s' % CREG.sanitize_display(gid, 32))
     print('Name          : %s' % CREG.sanitize_display(group.get('name') or '-', 64))
-    print('Type          : %s' % CREG.sanitize_display(group.get('type') or 'manual', 16))
+    gtype = CREG.group_record_type(group)
+    print('Type          : %s' % CREG.sanitize_display(gtype, 16))
+    if gtype == 'dynamic':
+        match_tags = group.get('match_tags') or {}
+        if isinstance(match_tags, dict) and match_tags:
+            print('Selector      :')
+            for key in sorted(match_tags):
+                print('  %s=%s' % (
+                    CREG.sanitize_display(key, 32),
+                    CREG.sanitize_display(match_tags[key], 64),
+                ))
+        else:
+            print('Selector      : (empty)')
     print('Description   : %s' % (
         CREG.sanitize_display(group.get('description') or '-', 1024) or '-'
     ))
-    print('Created       : %s' % CREG.sanitize_display(group.get('created_at') or '-', 64))
-    print('Updated       : %s' % CREG.sanitize_display(group.get('updated_at') or '-', 64))
+    if gtype != 'system':
+        print('Created       : %s' % CREG.sanitize_display(group.get('created_at') or '-', 64))
+        print('Updated       : %s' % CREG.sanitize_display(group.get('updated_at') or '-', 64))
     print('Client count  : %s' % CREG.group_member_count(state, gid))
 
 

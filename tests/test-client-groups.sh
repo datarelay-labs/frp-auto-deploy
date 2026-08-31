@@ -249,7 +249,10 @@ PY
 cp "$REG" "$WORKDIR/with-groups.json"
 cp "$REG.legacy" "$REG"
 "$FRP_GROUPS" >"$WORKDIR/legacy_list.out" || fail "old registry list groups"
-grep -q '(none)' "$WORKDIR/legacy_list.out" || fail "legacy should show no groups"
+grep -q 'all' "$WORKDIR/legacy_list.out" || fail "legacy should still show system group all"
+if grep -q 'customer-acme' "$WORKDIR/legacy_list.out"; then
+  fail "legacy should show no user-defined groups"
+fi
 "$CLIENTS" >"$WORKDIR/legacy_clients.out" || fail "old registry show clients"
 cp "$WORKDIR/with-groups.json" "$REG"
 pass "OLD_REGISTRY_COMPATIBILITY"

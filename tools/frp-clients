@@ -42,7 +42,13 @@ parser.add_argument(
     '--group',
     default=None,
     metavar='GROUP',
-    help='show clients that belong to this GROUP ID or unique group name',
+    help='show clients in this group (manual, dynamic, all, or ungrouped)',
+)
+parser.add_argument(
+    '--status',
+    default=None,
+    choices=('online', 'offline', 'unknown'),
+    help='filter by normalized client state',
 )
 args = parser.parse_args()
 tag_filters = []
@@ -119,9 +125,16 @@ if args.group:
     clients = [
         (mid, client)
         for mid, client in clients
-        if CREG.client_matches_group(client, gid)
+        if CREG.client_matches_group_selector(state, client, gid)
     ]
 listener_snapshot = CREG.passive_listening_ports()
+if args.status:
+    want = args.status
+    clients = [
+        (mid, client)
+        for mid, client in clients
+        if client_state(CREG.enabled_services(client), listener_snapshot) == want
+    ]
 
 print('Registered clients')
 print('==================')

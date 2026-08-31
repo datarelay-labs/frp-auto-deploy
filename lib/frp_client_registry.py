@@ -27,6 +27,8 @@ GROUP_DESCRIPTION_MAX_LEN = 1024
 GROUP_ID_PREFIX = 'grp_'
 GROUP_ID_HEX_LEN = 8
 RESERVED_GROUP_NAMES = frozenset({'all', 'ungrouped'})
+SYSTEM_GROUP_ALL = 'all'
+SYSTEM_GROUP_UNGROUPED = 'ungrouped'
 LABEL_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._ -]{0,63}$')
 TAG_KEY_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
 TAG_VALUE_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:/@+ -]{0,127}$')
@@ -469,6 +471,178 @@ def seed_admin_metadata(client, label=None, note=None):
     return client
 
 
+def is_system_group_selector(query):
+    return str(query or '').strip().lower() in (SYSTEM_GROUP_ALL, SYSTEM_GROUP_UNGROUPED)
+
+
+def system_group_meta(name):
+    text = str(name or '').strip().lower()
+    return {'name': text, 'type': 'system'}
+
+
+def group_record_type(group):
+    gtype = str((group or {}).get('type') or 'manual').strip().lower()
+    if gtype in ('manual', 'dynamic', 'system'):
+        return gtype
+    return 'manual'
+
+
+def normalize_match_tags(value):
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        items = list(value.items())
+    elif isinstance(value, list):
+        items = []
+        for item in value:
+            if isinstance(item, dict) and 'key' in item:
+                items.append((item.get('key'), item.get('value')))
+            else:
+                raise ValueError('invalid dynamic group selector')
+    else:
+        raise ValueError('match_tags must be an object')
+    out = {}
+    for key, val in items:
+        tag_key, tag_value = validate_tag_key(key), validate_tag_value(val)
+        if tag_key in out and out[tag_key] != tag_value:
+            raise ValueError('duplicate conflicting tag selector for %s' % tag_key)
+        out[tag_key] = tag_value
+    return out
+
+
+def client_matches_dynamic_group(client, group):
+    try:
+        filters = normalize_match_tags((group or {}).get('match_tags'))
+    except ValueError:
+        return False
+    if not filters:
+        return False
+    return client_matches_tags(client, list(filters.items()))
+
+
+def client_in_any_manual_group(state, client):
+    return bool(client_group_ids(client))
+
+
+def client_in_any_dynamic_group(state, client):
+    for _gid, group in sorted_groups(state):
+        if group_record_type(group) == 'dynamic' and client_matches_dynamic_group(client, group):
+            return True
+    return False
+
+
+def client_is_ungrouped(state, client):
+    return (
+        not client_in_any_manual_group(state, client)
+        and not client_in_any_dynamic_group(state, client)
+    )
+
+
+def client_matches_group_selector(state, client, selector):
+    if selector == SYSTEM_GROUP_ALL:
+        return True
+    if selector == SYSTEM_GROUP_UNGROUPED:
+        return client_is_ungrouped(state, client)
+    groups = ensure_groups_map(state)
+    group = groups.get(selector)
+    if not isinstance(group, dict):
+        return False
+    if group_record_type(group) == 'dynamic':
+        return client_matches_dynamic_group(client, group)
+    try:
+        return validate_group_id(selector) in normalize_group_ids((client or {}).get('group_ids'))
+    except ValueError:
+        return False
+
+
+def client_group_memberships(state, client):
+    manual = []
+    dynamic = []
+    groups = ensure_groups_map(state)
+    for gid in client_group_ids(client):
+        group = groups.get(gid)
+        if isinstance(group, dict):
+            manual.append((gid, group))
+    for gid, group in sorted_groups(state):
+        if group_record_type(group) == 'dynamic' and client_matches_dynamic_group(client, group):
+            dynamic.append((gid, group))
+    return manual, dynamic
+
+
+def validate_assigned_group_ids(state, group_ids):
+    ids = normalize_group_ids(group_ids)
+    groups = ensure_groups_map(state)
+    for gid in ids:
+        if gid not in groups:
+            raise ValueError('group not found: %s' % gid)
+        if group_record_type(groups[gid]) != 'manual':
+            raise ValueError('only manual groups may be assigned at enrollment')
+    return ids
+
+
+def resolve_group_ids_for_assignment(state, queries):
+    out = []
+    seen = set()
+    for query in queries or []:
+        gid, group = resolve_group(state, query)
+        if gid in (SYSTEM_GROUP_ALL, SYSTEM_GROUP_UNGROUPED):
+            raise ValueError('system groups cannot be assigned at enrollment')
+        if group_record_type(group) != 'manual':
+            raise ValueError('only manual groups may be assigned at enrollment')
+        if gid not in seen:
+            seen.add(gid)
+            out.append(gid)
+    return out
+
+
+def merge_client_group_ids(client, new_ids):
+    existing = normalize_group_ids(client.get('group_ids'))
+    added = []
+    merged = list(existing)
+    for gid in normalize_group_ids(new_ids):
+        if gid not in merged:
+            merged.append(gid)
+            added.append(gid)
+    set_client_group_ids(client, merged)
+    return merged, added
+
+
+def resolve_mutable_group(state, query):
+    gid, group = resolve_group(state, query)
+    if gid in (SYSTEM_GROUP_ALL, SYSTEM_GROUP_UNGROUPED) or group_record_type(group) == 'system':
+        raise GroupLookupError('system groups cannot be modified')
+    return gid, group
+
+
+def resolve_mutable_group_or_exit(state, query):
+    try:
+        return resolve_mutable_group(state, query)
+    except GroupLookupError as exc:
+        sys.stderr.write('ERROR: %s\n' % exc)
+        raise SystemExit(1)
+
+
+def resolve_manual_group(state, query):
+    gid, group = resolve_group(state, query)
+    if gid in (SYSTEM_GROUP_ALL, SYSTEM_GROUP_UNGROUPED):
+        raise GroupLookupError('system groups cannot be used for membership assignment')
+    if group_record_type(group) != 'manual':
+        raise GroupLookupError('only manual groups support explicit membership')
+    return gid, group
+
+
+def resolve_manual_group_or_exit(state, query):
+    try:
+        return resolve_manual_group(state, query)
+    except GroupLookupError as exc:
+        if exc.matches:
+            sys.stderr.write('ERROR: multiple groups matched.\n\n')
+            sys.stderr.write(format_group_candidate_table(exc.matches))
+        else:
+            sys.stderr.write('ERROR: %s\n' % exc)
+        raise SystemExit(1)
+
+
 def is_reserved_group_name(name):
     text = '' if name is None else str(name).strip().lower()
     return text in RESERVED_GROUP_NAMES
@@ -581,10 +755,13 @@ def format_group_candidate_table(matches):
 
 
 def resolve_group(state, query):
-    """Resolve by GROUP ID (exact) or unique group name. Ambiguous => fail closed."""
+    """Resolve by GROUP ID (exact), unique group name, or system group. Ambiguous => fail closed."""
     query = '' if query is None else str(query).strip()
     if not query:
         raise GroupLookupError('group identifier is required')
+    lower = query.lower()
+    if lower in (SYSTEM_GROUP_ALL, SYSTEM_GROUP_UNGROUPED):
+        return lower, system_group_meta(lower)
     groups = sorted_groups(state)
     by_id = {gid: group for gid, group in groups}
     if query in by_id:
@@ -633,28 +810,33 @@ def find_group_id_by_name(state, name, exclude_id=None):
     return None
 
 
-def clients_in_group(state, group_id):
-    gid = validate_group_id(group_id)
+def clients_in_group(state, group_selector):
+    query = str(group_selector or '').strip()
+    if is_system_group_selector(query):
+        selector = query.lower()
+    else:
+        try:
+            selector = validate_group_id(query)
+        except ValueError:
+            gid, _group = resolve_group(state, query)
+            selector = gid
     out = []
     for mid, client in sorted_clients(state):
-        try:
-            ids = normalize_group_ids(client.get('group_ids'))
-        except ValueError:
-            continue
-        if gid in ids:
+        if client_matches_group_selector(state, client, selector):
             out.append((mid, client))
     return out
 
 
 def client_matches_group(client, group_id):
+    """Manual membership only (legacy helper). Prefer client_matches_group_selector()."""
     try:
         return validate_group_id(group_id) in normalize_group_ids((client or {}).get('group_ids'))
     except ValueError:
         return False
 
 
-def group_member_count(state, group_id):
-    return len(clients_in_group(state, group_id))
+def group_member_count(state, group_selector):
+    return len(clients_in_group(state, group_selector))
 
 
 def set_client_group_ids(client, group_ids):

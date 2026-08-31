@@ -1133,15 +1133,34 @@ def _match_set(tokens, role, names=None):
                 ["name", "description"],
             )
         prop = tokens[3]
-        if prop not in ("name", "description"):
+        if prop not in ("name", "description", "match-tag"):
             return incomplete(
                 "Unknown group setting.",
                 [
                     "set group <GROUP> name <new-name>",
                     "set group <GROUP> description <value>",
+                    "set group <GROUP> match-tag <key> <value>",
                 ],
-                ["name", "description"],
+                ["name", "description", "match-tag"],
             )
+        if prop == "match-tag":
+            if len(tokens) < 6:
+                return incomplete(
+                    "Missing match-tag key/value.",
+                    ["set group <GROUP> match-tag <key> <value>"],
+                )
+            if len(tokens) > 6:
+                return {
+                    "status": "error",
+                    "message": "Too many arguments. Quote values that contain spaces.",
+                }
+            return {
+                "status": "ok",
+                "action": "set_group_match_tag",
+                "group": tokens[2],
+                "key": tokens[4],
+                "value": tokens[5],
+            }
         if len(tokens) < 5:
             return incomplete(
                 "Missing %s value." % prop,
@@ -1243,11 +1262,11 @@ def _match_create(tokens, role, names=None):
     resource = tokens[1]
     if resource == "zero-touch":
         if len(tokens) > 2:
-            return incomplete(
-                "Unexpected arguments.",
-                ["create zero-touch"],
-                tip="create zero-touch ?",
-            )
+            return {
+                "status": "ok",
+                "action": "create_zero_touch_cli",
+                "passthrough": tokens[2:],
+            }
         return {"status": "ok", "action": "create_zero_touch"}
     if resource == "enrollment":
         return {"status": "ok", "action": "create_enrollment", "passthrough": tokens[2:]}
@@ -1470,9 +1489,23 @@ def _match_remove(tokens, role, names=None):
         if len(tokens) < 3:
             return incomplete(
                 "Missing group.",
-                ["remove group <GROUP>"],
+                ["remove group <GROUP>", "remove group <GROUP> match-tag <key>"],
                 tip="show groups",
             )
+        if len(tokens) >= 4 and tokens[3] == "match-tag":
+            if len(tokens) < 5:
+                return incomplete(
+                    "Missing match-tag key.",
+                    ["remove group <GROUP> match-tag <key>"],
+                )
+            if len(tokens) > 5:
+                return {"status": "error", "message": "Too many arguments."}
+            return {
+                "status": "ok",
+                "action": "remove_group_match_tag",
+                "group": tokens[2],
+                "key": tokens[4],
+            }
         if len(tokens) > 3:
             return {
                 "status": "error",
@@ -1745,7 +1778,7 @@ def _canonical_completion(tokens, trailing, role, names, services, local_service
             if len(filled) == 2:
                 return _filter(groups, prefix)
             if len(filled) == 3:
-                return _filter(["name", "description"], prefix)
+                return _filter(["name", "description", "match-tag"], prefix)
         if filled[1] == "service" and client:
             if len(filled) == 2:
                 return _filter(local_services, prefix)
@@ -1766,13 +1799,18 @@ def _canonical_completion(tokens, trailing, role, names, services, local_service
             return _filter(_create_resources(role), prefix)
         if filled[1] == "enrollment":
             return _filter(
-                ["--one-line", "--ssh", "--ssh-user", "--ssh-port", "--ttl", "--note", "--label", "--client-name"],
+                [
+                    "--one-line", "--ssh", "--ssh-user", "--ssh-port", "--ttl", "--note",
+                    "--label", "--client-name", "--group",
+                ],
                 prefix,
             )
         if filled[1] == "enrollments":
             return _filter(["--count", "--csv", "--label-prefix", "--ssh-user", "--note", "--ttl"], prefix)
+        if filled[1] == "zero-touch":
+            return _filter(["--group", "--ssh", "--ssh-user", "--ssh-port", "--ttl", "--note", "--label"], prefix)
         if filled[1] == "group":
-            return _filter(["--description"], prefix)
+            return _filter(["--description", "--dynamic", "--match-tag"], prefix)
         return []
     if verb == "revoke":
         if len(filled) == 1:

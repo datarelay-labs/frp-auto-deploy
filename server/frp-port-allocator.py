@@ -85,6 +85,26 @@ def _load_client_registry():
 CREG = _load_client_registry()
 
 
+def _try_audit(event, **kwargs):
+    try:
+        candidates = [
+            Path(__file__).resolve().parent.parent / 'lib' / 'frp_audit.py',
+            Path('/usr/local/lib/frp-auto-deploy/frp_audit.py'),
+        ]
+        root = os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
+        if root:
+            candidates.insert(0, Path(root) / 'usr/local/lib/frp-auto-deploy/frp_audit.py')
+        for path in candidates:
+            if path.is_file():
+                spec = importlib.util.spec_from_file_location('frp_audit', str(path))
+                audit = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(audit)
+                audit.try_emit(event, **kwargs)
+                return
+    except Exception:
+        pass
+
+
 def unsupported_registry_message(state=None):
     version = None
     if isinstance(state, dict) and 'schema_version' in state:
@@ -288,11 +308,11 @@ def cleanup_expired_bootstrap_tickets(bootstrap_dir, now=None, keep_id=None):
     return
 
 
-def issue_bootstrap_ticket(enrollments_dir, bootstrap_dir, services, ttl, note='', label=''):
+def issue_bootstrap_ticket(enrollments_dir, bootstrap_dir, services, ttl, note='', label='', assigned_group_ids=None):
     """Create a hashed bootstrap ticket plus a normal enrollment record.
 
     Does not allocate a public port. Caller must have already validated
-    `services` with normalize_services().
+    `services` with normalize_services() and `assigned_group_ids` when present.
     """
     ttl = int(ttl)
     note = str(note or '')
@@ -316,6 +336,8 @@ def issue_bootstrap_ticket(enrollments_dir, bootstrap_dir, services, ttl, note='
         'note': note,
         'label': label,
     }
+    if assigned_group_ids:
+        enroll_record['assigned_group_ids'] = list(assigned_group_ids)
     ticket_record = {
         'schema': 1,
         'id': ticket_id,
@@ -745,10 +767,16 @@ class Allocator:
     def cleanup_expired_bootstrap_tickets(self, now=None, keep_id=None):
         cleanup_expired_bootstrap_tickets(self.bootstrap_dir, now, keep_id=keep_id)
 
-    def issue_bootstrap_ticket(self, services, ttl, note='', label=''):
+    def issue_bootstrap_ticket(self, services, ttl, note='', label='', assigned_group_ids=None):
         ensure_secret_dir(self.bootstrap_dir, 0o700)
         return issue_bootstrap_ticket(
-            self.enrollments_dir, self.bootstrap_dir, services, ttl, note, label=label
+            self.enrollments_dir,
+            self.bootstrap_dir,
+            services,
+            ttl,
+            note,
+            label=label,
+            assigned_group_ids=assigned_group_ids,
         )
 
     def _invalid_ticket_response(self):
@@ -1216,11 +1244,31 @@ class Allocator:
                         client['last_enrolled_at'] = now_iso
                         if not isinstance(client.get('services'), dict):
                             client['services'] = {}
-                        CREG.seed_admin_metadata(
-                            client,
-                            label=(record or {}).get('label'),
-                            note=(record or {}).get('note'),
-                        )
+                    CREG.seed_admin_metadata(
+                        client,
+                        label=(record or {}).get('label'),
+                        note=(record or {}).get('note'),
+                    )
+
+                    if record is not None and not identity_auth:
+                        assigned = record.get('assigned_group_ids')
+                        if assigned:
+                            try:
+                                validated = CREG.validate_assigned_group_ids(state, assigned)
+                            except ValueError:
+                                return 403, api_error(
+                                    'enrollment references a group that no longer exists',
+                                    'AUTH_FAILED',
+                                )
+                            _merged, added = CREG.merge_client_group_ids(client, validated)
+                            for gid in added:
+                                group = (state.get('groups') or {}).get(gid) or {}
+                                _try_audit(
+                                    'group.member_added',
+                                    group_id=gid,
+                                    group_name=group.get('name'),
+                                    client_id=machine_id,
+                                )
 
                     if client is None:
                         return 403, api_error('unknown client identity', 'AUTH_FAILED')
