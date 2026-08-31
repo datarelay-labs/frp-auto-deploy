@@ -3278,7 +3278,8 @@ frp_client_restart() {
   if [[ "${FRP_SKIP_SYSTEMD:-}" == "1" || -n "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
     return 0
   fi
-  systemctl enable frpc >/dev/null && systemctl restart frpc
+  # Runtime restart only — preserve enable/disable (do not force-enable).
+  systemctl restart frpc
 }
 
 frp_client_wait_proxies() {
@@ -3421,6 +3422,11 @@ frp_client_install_management_files() {
   }
   install -m 0644 "${source}/lib/frp_client_lifecycle.py" "${libdir}/frp_client_lifecycle.py"
   install -m 0644 "${source}/lib/frp-client-lifecycle.sh" "${libdir}/frp-client-lifecycle.sh"
+  [[ -f "${source}/uninstall-client.sh" ]] || {
+    echo "ERROR: missing ${source}/uninstall-client.sh" >&2
+    return 1
+  }
+  install -m 0755 "${source}/uninstall-client.sh" "${libdir}/uninstall-client.sh"
   install -m 0755 "${source}/tools/frp-client" "${bindir}/frp-client"
   install -m 0755 "${source}/tools/frpctl" "${bindir}/frpctl"
   if [[ -f "${source}/tools/frpcli" ]]; then
@@ -3443,6 +3449,7 @@ frp_client_upgrade_destinations() {
     "usr/local/lib/frp-auto-deploy/frp_ctl_repl.py:0644:lib/frp_ctl_repl.py" \
     "usr/local/lib/frp-auto-deploy/frp_client_lifecycle.py:0644:lib/frp_client_lifecycle.py" \
     "usr/local/lib/frp-auto-deploy/frp-client-lifecycle.sh:0644:lib/frp-client-lifecycle.sh" \
+    "usr/local/lib/frp-auto-deploy/uninstall-client.sh:0755:uninstall-client.sh" \
     "usr/local/bin/frp-client:0755:tools/frp-client" \
     "usr/local/bin/frpctl:0755:tools/frpctl" \
     "usr/local/bin/frpcli:0755:tools/frpcli"

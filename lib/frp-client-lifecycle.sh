@@ -41,6 +41,56 @@ frp_client_autostart_enabled() {
   systemctl is-enabled frpc >/dev/null 2>&1
 }
 
+frp_client_project_frpc_pids() {
+  # Return PIDs of project-owned frpc only (binary + project config), never all frpc.
+  local cfg bin pid cmdline
+  cfg="$(frp_client_toml_path 2>/dev/null || true)"
+  [[ -n "$cfg" ]] || cfg="/etc/frp/frpc.toml"
+  bin="$(frp_client_path /usr/local/bin/frpc)"
+  for pid in $(pgrep -x frpc 2>/dev/null || true); do
+    [[ -r "/proc/${pid}/cmdline" ]] || continue
+    cmdline="$(tr '\0' ' ' <"/proc/${pid}/cmdline" 2>/dev/null || true)"
+    case "$cmdline" in
+      *"${bin}"*"${cfg}"*|*"frpc -c ${cfg}"*|*"frpc -c ${cfg} "*)
+        printf '%s\n' "$pid"
+        ;;
+      *)
+        if [[ "$cmdline" == *frpc* && "$cmdline" == *"$cfg"* ]]; then
+          # Verify exe path when possible
+          if [[ -r "/proc/${pid}/exe" ]]; then
+            local exe
+            exe="$(readlink -f "/proc/${pid}/exe" 2>/dev/null || true)"
+            if [[ "$exe" == "$bin" || "$exe" == *'/frpc' ]]; then
+              printf '%s\n' "$pid"
+            fi
+          else
+            printf '%s\n' "$pid"
+          fi
+        fi
+        ;;
+    esac
+  done
+}
+
+frp_client_project_frpc_running() {
+  local pids
+  pids="$(frp_client_project_frpc_pids | head -n 1 || true)"
+  [[ -n "$pids" ]]
+}
+
+frp_client_kill_project_frpc() {
+  local pid
+  while read -r pid; do
+    [[ -n "$pid" ]] || continue
+    kill "$pid" 2>/dev/null || true
+  done < <(frp_client_project_frpc_pids)
+  sleep 0.2
+  while read -r pid; do
+    [[ -n "$pid" ]] || continue
+    kill -9 "$pid" 2>/dev/null || true
+  done < <(frp_client_project_frpc_pids)
+}
+
 frp_client_stop_frpc() {
   frp_client_hook_log stop
   if [[ "${FRP_CLIENT_HOOK_STOP_FAIL:-}" == "1" ]]; then
@@ -50,12 +100,20 @@ frp_client_stop_frpc() {
   if [[ "${FRP_SKIP_SYSTEMD:-}" == "1" || -n "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
     return 0
   fi
+  # Prefer project unit stop; never pkill -x frpc globally.
   if command -v systemctl >/dev/null 2>&1; then
     systemctl stop frpc >/dev/null 2>&1 || true
+    local main_pid
+    main_pid="$(systemctl show -p MainPID --value frpc 2>/dev/null || true)"
+    if [[ -n "$main_pid" && "$main_pid" != "0" && "$main_pid" =~ ^[0-9]+$ ]]; then
+      if frp_client_project_frpc_pids | grep -qx "$main_pid"; then
+        kill "$main_pid" 2>/dev/null || true
+      fi
+    fi
   fi
-  pkill -x frpc 2>/dev/null || true
-  if pgrep -x frpc >/dev/null 2>&1; then
-    echo "ERROR: frpc is still running" >&2
+  frp_client_kill_project_frpc
+  if frp_client_project_frpc_running; then
+    echo "ERROR: project frpc is still running" >&2
     return 1
   fi
   return 0
@@ -73,7 +131,7 @@ frp_client_start_frpc() {
   local cfg
   cfg="$(frp_client_toml_path)"
   frp_client_verify_config "$cfg" || return 1
-  systemctl enable frpc >/dev/null 2>&1 || true
+  # Do not systemctl enable here — resume restores autostart; restart preserves it.
   systemctl start frpc
   sleep 1
   if ! systemctl is-active --quiet frpc; then
@@ -251,12 +309,18 @@ EOF
     fi
   fi
   local root="${FRP_UNINSTALL_TEST_ROOT:-${FRP_CLIENT_TEST_ROOT:-}}"
-  local script="${_frp_lc_dir}/../uninstall-client.sh"
+  # Look up only installed artifact paths (never /home/... developer fallbacks).
+  local script="${_frp_lc_dir}/uninstall-client.sh"
   if [[ ! -f "$script" ]]; then
-    script="$(frp_client_path /usr/local/lib/frp-auto-deploy/../uninstall-client.sh)"
+    script="$(frp_client_path /usr/local/lib/frp-auto-deploy/uninstall-client.sh)"
   fi
   if [[ ! -f "$script" ]]; then
-    script="/home/aella/frp-auto-deploy-client-lifecycle/uninstall-client.sh"
+    # Development checkout: repo-root uninstall-client.sh next to lib/
+    script="${_frp_lc_dir}/../uninstall-client.sh"
+  fi
+  if [[ ! -f "$script" ]]; then
+    echo "ERROR: uninstall-client.sh not found (install client management files)" >&2
+    return 1
   fi
   if [[ -n "$root" ]]; then
     FRP_UNINSTALL_TEST_ROOT="$root" bash "$script"

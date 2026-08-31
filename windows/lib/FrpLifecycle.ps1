@@ -99,9 +99,17 @@ function Invoke-FrpClientTest {
     Write-Host 'FRP Client Connectivity Test'
     Write-Host '============================'
     Write-Host ''
-    if (Test-FrpIsEnrolled) { Write-Host 'Local state              PASS' } else { Write-Host 'Local state              FAIL' }
-    if (Test-Path -LiteralPath (Get-FrpIdentityPubPath)) { Write-Host 'Management identity      PASS' } else { Write-Host 'Management identity      FAIL' }
-    if (Test-Path -LiteralPath (Get-FrpTomlPath)) { Write-Host 'FRP configuration        PASS' } else { Write-Host 'FRP configuration        FAIL' }
+    $failed = $false
+    if (Test-FrpIsEnrolled) { Write-Host 'Local state              PASS' } else { Write-Host 'Local state              FAIL'; $failed = $true }
+    if (Test-Path -LiteralPath (Get-FrpIdentityPubPath)) { Write-Host 'Management identity      PASS' } else { Write-Host 'Management identity      FAIL'; $failed = $true }
+    $key = Get-FrpIdentityKeyPath
+    if (Test-Path -LiteralPath $key) {
+        Write-Host 'Identity permissions     PASS'
+    } else {
+        Write-Host 'Identity permissions     FAIL'
+        $failed = $true
+    }
+    if (Test-Path -LiteralPath (Get-FrpTomlPath)) { Write-Host 'FRP configuration        PASS' } else { Write-Host 'FRP configuration        FAIL'; $failed = $true }
     if (Test-FrpRemoteAccessPaused) {
         Write-Host 'Remote access            PAUSED'
     } else {
@@ -112,6 +120,10 @@ function Invoke-FrpClientTest {
     Write-Host ''
     Write-Host 'External public reachability : NOT TESTED'
     Write-Host ''
+    if ($failed) {
+        Write-Host 'RESULT=FAIL'
+        return 1
+    }
     Write-Host 'RESULT=PASS'
     return 0
 }
@@ -131,30 +143,103 @@ function Show-FrpClientLogs {
     return 0
 }
 
+function Protect-FrpRedactText {
+    param([string]$Text)
+    if ([string]::IsNullOrEmpty($Text)) { return '' }
+    $out = $Text
+    $out = [regex]::Replace($out, '(?im)^(auth\.)?token\s*=\s*.+$', 'auth.token = "[redacted]"')
+    $out = [regex]::Replace($out, '(?im)^token\s*=\s*.+$', 'token = "[redacted]"')
+    $out = [regex]::Replace($out, '(?i)(Authorization\s*[:=]\s*)\S+', '$1[redacted]')
+    $out = [regex]::Replace($out, '(?i)(password|passwd|secret|private[_-]?key|enrollment[_-]?code|bootstrap[_-]?ticket|mgmt_mac_key|auth_token|server_token)\s*[:=]\s*\S+', '$1=[redacted]')
+    $out = [regex]::Replace($out, 'BEGIN [A-Z ]*PRIVATE KEY[\s\S]*?END [A-Z ]*PRIVATE KEY', '[redacted private key]')
+    $out = [regex]::Replace($out, 'FRP_TOKEN_TEST_[A-Za-z0-9_\-]+', '[redacted]')
+    $out = [regex]::Replace($out, 'btck\.[0-9a-f]{16}\.[A-Za-z0-9]+', '[redacted]')
+    return $out
+}
+
+function Protect-FrpRedactJsonObject {
+    param($Obj)
+    if ($null -eq $Obj) { return $null }
+    if ($Obj -is [System.Collections.IDictionary]) {
+        $out = [ordered]@{}
+        foreach ($key in $Obj.Keys) {
+            $k = [string]$key
+            if ($k -match '(?i)token|secret|password|passwd|private.?key|authorization|enrollment.?code|bootstrap|hmac|auth_token|server_token') {
+                $out[$k] = '[redacted]'
+            } else {
+                $out[$k] = Protect-FrpRedactJsonObject -Obj $Obj[$key]
+            }
+        }
+        return $out
+    }
+    if ($Obj -is [System.Collections.IEnumerable] -and -not ($Obj -is [string])) {
+        $list = @()
+        foreach ($item in $Obj) { $list += ,(Protect-FrpRedactJsonObject -Obj $item) }
+        return $list
+    }
+    if ($Obj -is [string]) { return (Protect-FrpRedactText -Text $Obj) }
+    return $Obj
+}
+
 function Invoke-FrpSupportBundle {
     param([switch]$Anonymize)
     Initialize-FrpDirectories
     $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
     $out = Join-Path $env:TEMP ("frp-support-bundle-$stamp.zip")
+    $stage = Join-Path $env:TEMP ("frp-support-stage-$stamp")
+    if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
+    New-Item -ItemType Directory -Path $stage | Out-Null
     $items = @()
-    foreach ($name in @('version', 'client-state.json', 'frpc.toml')) {
-        $src = switch ($name) {
-            'version' { Get-FrpVersionPath }
-            'client-state.json' { Get-FrpStatePath }
-            'frpc.toml' { Get-FrpTomlPath }
-        }
-        if (Test-Path -LiteralPath $src) {
-            $items += $src
-        }
+
+    $ver = Get-FrpVersionPath
+    if (Test-Path -LiteralPath $ver) {
+        $dest = Join-Path $stage 'version.txt'
+        Copy-Item -LiteralPath $ver -Destination $dest -Force
+        $items += $dest
     }
+
+    $statePath = Get-FrpStatePath
+    if (Test-Path -LiteralPath $statePath) {
+        $raw = Get-Content -LiteralPath $statePath -Raw
+        $obj = $raw | ConvertFrom-Json
+        $redacted = Protect-FrpRedactJsonObject -Obj $obj
+        if ($Anonymize -and $redacted -is [System.Collections.IDictionary]) {
+            foreach ($k in @('hostname', 'frp_server', 'public_host', 'host_id')) {
+                if ($redacted.Contains($k)) { $redacted[$k] = '[anonymized]' }
+            }
+        }
+        $dest = Join-Path $stage 'client-state.redacted.json'
+        ($redacted | ConvertTo-Json -Depth 12) + "`n" | Set-Content -LiteralPath $dest -NoNewline
+        $items += $dest
+    }
+
+    $toml = Get-FrpTomlPath
+    if (Test-Path -LiteralPath $toml) {
+        $text = Protect-FrpRedactText -Text (Get-Content -LiteralPath $toml -Raw)
+        if ($Anonymize) {
+            $text = [regex]::Replace($text, '(?im)^(serverAddr|server_addr)\s*=\s*.+$', 'serverAddr = "[anonymized]"')
+        }
+        $dest = Join-Path $stage 'frpc.redacted.toml'
+        Set-Content -LiteralPath $dest -Value $text -NoNewline
+        $items += $dest
+    }
+
     $log = Join-Path (Get-FrpLogsDir) 'frpc.log'
-    if (Test-Path -LiteralPath $log) { $items += $log }
+    if (Test-Path -LiteralPath $log) {
+        $text = Protect-FrpRedactText -Text (Get-Content -LiteralPath $log -Raw)
+        $dest = Join-Path $stage 'frpc.redacted.log'
+        Set-Content -LiteralPath $dest -Value $text -NoNewline
+        $items += $dest
+    }
+
     if ($items.Count -eq 0) {
         Write-Host 'ERROR: nothing to bundle'
+        Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
         return 1
     }
     if (Test-Path -LiteralPath $out) { Remove-Item -LiteralPath $out -Force }
     Compress-Archive -LiteralPath $items -DestinationPath $out -Force
+    Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
     Write-Host ("Support bundle written to: {0}" -f $out)
     return 0
 }

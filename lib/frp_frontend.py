@@ -167,7 +167,7 @@ http {
         # Allocator backend is always loopback HTTPS. Verify DNS:localhost
         # (present on every project leaf) because nginx proxy_ssl_verify does
         # not reliably match iPAddress SANs such as the public IP.
-        location ~ ^/(ca\\.crt|healthz|enroll|bootstrap/redeem)$ {
+        location ~ ^/(ca\\.crt|healthz|enroll|enroll/challenge|bootstrap/redeem|time)$ {
             proxy_pass https://127.0.0.1:%s;
             proxy_http_version 1.1;
             proxy_ssl_trusted_certificate %s;

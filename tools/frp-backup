@@ -155,25 +155,38 @@ def _hold_lock_hook() -> None:
         time.sleep(0.05)
 
 
-def create_backup(root: Path, output: Path) -> None:
+DEFAULT_BACKUP_DIR = Path("var/lib/frp-auto-deploy/backups")
+
+
+def create_backup(root: Path, output: Path, *, manage_parent: bool = False) -> None:
     if os.environ.get("FRP_BACKUP_ALREADY_LOCKED") == "1":
         _hold_lock_hook()
         files = collect_files(root)
-        _stage_backup(root, output, files)
+        _stage_backup(root, output, files, manage_parent=manage_parent)
         return
     locks = _load_locks()
     timeout = float(os.environ.get("FRP_BACKUP_LOCK_TIMEOUT", "30"))
     with locks.acquire_control_locks(root, timeout=timeout):
         _hold_lock_hook()
         files = collect_files(root)
-        _stage_backup(root, output, files)
+        _stage_backup(root, output, files, manage_parent=manage_parent)
 
 
-def _stage_backup(root: Path, output: Path, files: list[tuple[str, Path]]) -> None:
-    output.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(output.parent, 0o700)
-    if os.geteuid() == 0:
-        os.chown(output.parent, 0, 0)
+def _stage_backup(
+    root: Path,
+    output: Path,
+    files: list[tuple[str, Path]],
+    *,
+    manage_parent: bool = False,
+) -> None:
+    parent = output.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    # Harden only the dedicated default backup directory (manage_parent=True).
+    # Never chmod/chown user-supplied parents such as /tmp or /home/user.
+    if manage_parent:
+        os.chmod(parent, 0o700)
+        if os.geteuid() == 0:
+            os.chown(parent, 0, 0)
     if output.is_symlink():
         fail("refusing to overwrite a symlink")
 
@@ -242,9 +255,14 @@ def main() -> int:
         fail("run with sudo")
     root = Path(test_root or "/")
     now = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    default = root / f"var/lib/frp-auto-deploy/backups/server-backup-{now}.tar.gz"
-    output = Path(sys.argv[1]).resolve() if len(sys.argv) == 2 else default
-    create_backup(root, output)
+    default = root / DEFAULT_BACKUP_DIR / f"server-backup-{now}.tar.gz"
+    if len(sys.argv) == 2:
+        output = Path(sys.argv[1]).resolve()
+        manage_parent = False
+    else:
+        output = default
+        manage_parent = True
+    create_backup(root, output, manage_parent=manage_parent)
     print("WARNING: this backup contains private keys, authentication tokens, and enrollment secrets.")
     print(f"Backup created: {output}")
     _audit_emit("backup.created", details={"path": str(output.name)})

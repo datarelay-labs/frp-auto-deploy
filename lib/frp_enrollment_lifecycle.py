@@ -325,21 +325,43 @@ def _rollback_staged(staged_paths):
 
 
 def _delete_targets(row):
+    """Two-phase tombstone purge.
+
+    Phase 1 (commit): rename every target out of the active namespace (``.purging``).
+    If any rename fails, restore all staged paths and raise — never leave a
+    ticket-only or enrollment-only active pair.
+
+    Phase 2 (cleanup): unlink tombstones. Failures here are OK when both
+    originals are absent from the active namespace (retryable leftover ``.purging``).
+    """
     staged = []
     targets = []
     if row.get('enroll_path'):
-        targets.append(row['enroll_path'])
+        targets.append(Path(row['enroll_path']))
     if row.get('ticket_path'):
-        targets.append(row['ticket_path'])
+        targets.append(Path(row['ticket_path']))
     try:
         for path in targets:
-            staged.append(_stage_delete(path))
-        errors = _commit_staged_deletes(staged)
-        if errors:
-            raise EnrollmentLifecycleError('ERROR: purge failed: %s' % '; '.join(errors))
+            if path.is_symlink():
+                raise EnrollmentLifecycleError(
+                    'ERROR: refusing to purge through a symlink: %s' % path
+                )
+            if path.is_file():
+                staged.append(_stage_delete(path))
+            elif path.exists():
+                raise EnrollmentLifecycleError(
+                    'ERROR: purge target is not a regular file: %s' % path
+                )
     except Exception:
-        _rollback_staged(staged)
+        _rollback_staged([item for item in staged if item is not None])
         raise
+    # Both (existing) targets are now out of the active namespace.
+    _commit_staged_deletes([item for item in staged if item is not None])
+    leftovers = [str(path) for path in targets if path.is_file()]
+    if leftovers:
+        raise EnrollmentLifecycleError(
+            'ERROR: purge left active enrollment artifact(s): %s' % '; '.join(leftovers)
+        )
 
 
 def _registry_lock(registry_file):
