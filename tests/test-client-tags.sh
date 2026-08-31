@@ -81,7 +81,10 @@ grep -q 'seoul-dp' "$WORKDIR/and.out" || fail "AND filter omitted match"
 grep -q 'busan-dp' "$WORKDIR/and.out" && fail "AND filter included wrong site"
 grep -q 'seoul-web' "$WORKDIR/and.out" && fail "AND filter included wrong customer"
 python3 "$ROOT/tools/frp-clients" --help >"$WORKDIR/help.out"
-grep -q 'multiple --tag filters use AND' "$WORKDIR/help.out" || fail "AND semantics missing from help"
+# Argparse may wrap help across lines; normalize whitespace before semantic check.
+help_norm="$(tr '\n\r\t' ' ' <"$WORKDIR/help.out" | tr -s ' ')"
+[[ "$help_norm" == *'multiple --tag filters use AND semantics'* ]] \
+  || fail "AND semantics missing from help"
 pass "TAG_FILTER_AND_SEMANTICS"
 
 python3 "$ROOT/tools/frp-client-set" aaaaaaaa --remove-tag site >"$WORKDIR/remove.out"
