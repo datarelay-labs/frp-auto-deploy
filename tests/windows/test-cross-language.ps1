@@ -3,45 +3,75 @@
 . (Join-Path $PSScriptRoot '_import.ps1')
 
 function Invoke-FrpPythonUtf8Stdin {
-    # PS 5.1 pipes strings to native exes as UTF-16LE by default; Python expects UTF-8.
-    # Write UTF-8 bytes directly to the child stdin BaseStream (no pipeline encoding).
+    # PS 5.1 Process.StandardInput StreamWriter emits UTF-8 BOM, which breaks
+    # base64/ascii crypto payloads. Feed stdin from a BOM-free UTF-8 temp file.
     param(
         [Parameter(Mandatory = $true)][string]$PythonExe,
         [Parameter(Mandatory = $true)][string[]]$ArgumentList,
         [Parameter(Mandatory = $true)][string]$StdinText,
         [hashtable]$Environment = @{}
     )
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $PythonExe
-    $psi.Arguments = ($ArgumentList | ForEach-Object {
-            if ($_ -match '[\s"]') { '"{0}"' -f ($_ -replace '"', '\"') } else { $_ }
-        }) -join ' '
-    $psi.UseShellExecute = $false
-    $psi.RedirectStandardInput = $true
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.CreateNoWindow = $true
-    foreach ($key in $Environment.Keys) {
-        $psi.EnvironmentVariables[$key] = [string]$Environment[$key]
-    }
-    $psi.EnvironmentVariables['PYTHONUTF8'] = '1'
-    $psi.EnvironmentVariables['PYTHONIOENCODING'] = 'utf-8'
-
-    $proc = New-Object System.Diagnostics.Process
-    $proc.StartInfo = $psi
-    [void]$proc.Start()
     $utf8 = New-Object System.Text.UTF8Encoding $false
-    $bytes = $utf8.GetBytes($StdinText)
-    $proc.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
-    $proc.StandardInput.BaseStream.Flush()
-    $proc.StandardInput.Close()
-    $stdout = $proc.StandardOutput.ReadToEnd()
-    $stderr = $proc.StandardError.ReadToEnd()
-    $proc.WaitForExit()
-    if ($proc.ExitCode -ne 0) {
-        throw ("python failed (exit {0}): {1}" -f $proc.ExitCode, $stderr.Trim())
+    $inFile = Join-Path ([System.IO.Path]::GetTempPath()) ('frp-py-in-' + [guid]::NewGuid().ToString('N') + '.txt')
+    $outFile = Join-Path ([System.IO.Path]::GetTempPath()) ('frp-py-out-' + [guid]::NewGuid().ToString('N') + '.txt')
+    $errFile = Join-Path ([System.IO.Path]::GetTempPath()) ('frp-py-err-' + [guid]::NewGuid().ToString('N') + '.txt')
+    $saved = @{}
+    try {
+        $clean = $StdinText.TrimStart([char]0xFEFF)
+        [System.IO.File]::WriteAllText($inFile, $clean, $utf8)
+        foreach ($key in $Environment.Keys) {
+            $saved[$key] = [Environment]::GetEnvironmentVariable($key)
+            [Environment]::SetEnvironmentVariable($key, [string]$Environment[$key], 'Process')
+        }
+        [Environment]::SetEnvironmentVariable('PYTHONUTF8', '1', 'Process')
+        [Environment]::SetEnvironmentVariable('PYTHONIOENCODING', 'utf-8', 'Process')
+
+        $argParts = @()
+        foreach ($a in $ArgumentList) {
+            if ($a -match '[\s"]') {
+                $argParts += ('"{0}"' -f ($a -replace '"', '\"'))
+            } else {
+                $argParts += $a
+            }
+        }
+        $argStr = $argParts -join ' '
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            if ($env:OS -match 'Windows_NT') {
+                $cmdExe = Join-Path $env:SystemRoot 'System32\cmd.exe'
+                $cmdline = '"{0}" {1} < "{2}" > "{3}" 2> "{4}"' -f $PythonExe, $argStr, $inFile, $outFile, $errFile
+                & $cmdExe /c $cmdline | Out-Null
+            } else {
+                $bashCmd = "'" + ($PythonExe -replace "'", "'\\''") + "' " + $argStr +
+                    " < '" + ($inFile -replace "'", "'\\''") + "'" +
+                    " > '" + ($outFile -replace "'", "'\\''") + "'" +
+                    " 2> '" + ($errFile -replace "'", "'\\''") + "'"
+                & /bin/bash -c $bashCmd | Out-Null
+            }
+            $code = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $prev
+        }
+        if ($null -eq $code) { $code = 0 }
+        $stdout = ''
+        $stderr = ''
+        if (Test-Path -LiteralPath $outFile) {
+            $stdout = [System.IO.File]::ReadAllText($outFile, $utf8)
+        }
+        if (Test-Path -LiteralPath $errFile) {
+            $stderr = [System.IO.File]::ReadAllText($errFile, $utf8)
+        }
+        if ($code -ne 0) {
+            throw ("python failed (exit {0}): {1}" -f $code, $stderr.Trim())
+        }
+        return $stdout
+    } finally {
+        foreach ($key in $saved.Keys) {
+            [Environment]::SetEnvironmentVariable($key, $saved[$key], 'Process')
+        }
+        Remove-Item -LiteralPath $inFile, $outFile, $errFile -Force -ErrorAction SilentlyContinue
     }
-    return $stdout
 }
 
 function Get-FrpPythonExe {
@@ -70,7 +100,7 @@ try {
     $pt = Unprotect-FrpTokenPbkdf2 -Ciphertext $v.token_ciphertext_python -Secret $v.secret
     Assert-FrpEqual $v.token $pt 'PS decrypts Python ciphertext'
 
-    # Python decrypts PowerShell ciphertext (UTF-8 byte-safe stdin; no PS5.1 pipeline)
+    # Python decrypts PowerShell ciphertext (BOM-free UTF-8 stdin file redirect)
     $psCt = Protect-FrpTokenPbkdf2 -Token $v.token -Secret $v.secret
     $authPy = Join-Path $script:RepoRoot 'lib/frp_mgmt_auth.py'
     $pyPt = Invoke-FrpPythonUtf8Stdin -PythonExe $python `
