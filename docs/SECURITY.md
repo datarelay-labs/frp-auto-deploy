@@ -138,12 +138,13 @@ Apply uses a new timestamp/nonce/signature and reuses existing public ports.
 
 ## 9. Revoke vs release
 
-| Action | Management identity | Port reservations |
-| --- | --- | --- |
-| `frp-revoke-client` | blocked | kept |
-| `frp-release-client` / `frp-release-service` | unchanged | freed |
+| Action | Management identity | Port reservations | Client record |
+| --- | --- | --- | --- |
+| `frp-revoke-client` | blocked | kept | kept |
+| `frp-release-client` / `frp-release-service` | unchanged | freed | kept (`services: {}` when none remain) |
 
 Revoke is not release. An administrator can still release after revoke.
+Release does not delete the client record.
 
 ## 10. Disable vs release
 

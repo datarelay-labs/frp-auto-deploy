@@ -583,13 +583,13 @@ update    != re-enrollment
 | edit + `apply` | changes target/name/config | **kept when possible** |
 | `revoke client` | removes management identity / blocks management | **kept** |
 | `release service` | returns one service's public port | **released** |
-| `release client` | removes the server client record and all reservations | **released** |
+| `release client` | frees all service reservations; keeps the management record | **released** |
 | client uninstall | removes local client state only | **server ports remain** |
 | server uninstall | removes runtime/software | state is preserved |
 | server purge | destructive server cleanup | state deleted |
 
 There is intentionally no ambiguous `delete client` command. If you mean
-"free the public ports and remove the server record", use `release client`.
+"free the public ports while keeping the management record", use `release client`.
 
 ---
 

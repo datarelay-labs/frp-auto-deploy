@@ -49,7 +49,23 @@ Environment equivalents: `FRP_ALLOCATOR_URL`, `FRP_ALLOCATOR_CA_SHA256`, `FRP_BO
 
 ### ENROLL ONCE / RUN MANY TIMES
 
-If identity + config already exist, zero-touch **refuses** another ticket and tells you to run `frp-client start`. Port reservations and machine identity stay stable across restarts.
+If identity + config already exist and install completed, zero-touch **refuses** another ticket and tells you to run `frp-client start`. Port reservations and machine identity stay stable across restarts.
+
+If enrollment finished but binary download/start did not (`install_status=enrolled_incomplete`), re-running the installer **resumes** with the same identity and reserved ports — it does not redeem a new ticket or mint a new management key.
+
+### Zero-service (management-only)
+
+When the redeemed ticket carries `services: []`, Windows keeps an empty service list. It does **not** invent an RDP mapping. Management identity remains enrolled; `frpc` is not started until a service exists.
+
+### TLS
+
+Pinned allocator CA verification and hostname/IP SAN checks both apply on the .NET HTTPS path. A trusted CA with the wrong hostname fails. Set `FRP_WINDOWS_FORCE_DOTNET_HTTP_HTTP=1` only in tests to exercise that path; production prefers `curl --cacert` when present.
+
+### Updates, PID, secrets
+
+- `frp-client update` snapshots managed files and process state; failure restores binary, metadata, config, and prior running/stopped state (`RECOVERY_REQUIRED=YES` if rollback itself fails).
+- Stop kills only a PID whose recorded exe matches the managed `frpc.exe`.
+- Secret ACL application is fail-closed on Windows.
 
 ## RDP
 
@@ -101,7 +117,7 @@ tools\frp-client.cmd autostart
 | --- | --- |
 | `start` / `stop` | Idempotent; manages only the PID recorded under `logs\frpc.pid` |
 | `info` | Prints `mstsc` / `ssh` / HTTP(S) URLs without secrets |
-| `update` | Replaces `frpc.exe` after SHA256 verify; preserves identity and ports; best-effort rollback |
+| `update` | Replaces `frpc.exe` after SHA256 verify; preserves identity and ports; transactional rollback of managed files + process state |
 | `uninstall` | **LOCAL SOFTWARE REMOVED, SERVER RESERVATIONS PRESERVED** |
 | `autostart` | Stub: reports not configured (Task Scheduler / Service is optional) |
 

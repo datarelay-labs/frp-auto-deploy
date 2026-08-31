@@ -30,9 +30,15 @@ Already enrolled 2.1.0 clients remain compatible. After a server project update
 from 2.1.0, newly generated Zero-touch / enrollment installer commands use the
 `v2.1.1` bootstrap URL when the persisted URL was an official managed ref.
 
-## Unreleased (post-2.1.1 / main)
+## Unreleased (post-2.1.1 / feature/windows-client)
 
-_None yet._
+- Windows TLS: enforce hostname/IP SAN verification on the pinned-.NET path (no `-or $true` bypass)
+- Windows zero-service tickets stay management-only (no automatic RDP)
+- `release` clears port reservations but keeps the management client record; `revoke` remains identity-only
+- Mutation CLIs require immutable CLIENT ID (label/hostname shortcuts are read-only)
+- Windows install fails closed on `frpc` start failure when services exist; partial enroll resumes without re-ticket
+- Windows update rolls back managed files and process state; PID stop checks exe ownership; secret ACL fail-closed
+- Installer URL setters reject non-HTTPS values; SSH helper no longer defaults to `root`
 
 ## 2.1.0 — 2026-08-29
 
