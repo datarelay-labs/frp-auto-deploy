@@ -25,28 +25,44 @@ try {
         Stop-FrpClient | Out-Null
         Write-FrpTestPass 'test-process-control (fake)'
     } else {
-        # Provision hash-verified frpc.exe when missing so Windows CI does not
-        # silently skip critical process coverage.
+        # Hash-verified real frpc.exe is required for Windows coverage. A live
+        # FRP server is NOT required: immediate-exit failure is the isolated
+        # unit-test path (full tunnel start remains E2E_ONLY).
         if (-not (Test-Path -LiteralPath (Get-FrpFrpcPath))) {
             Write-Host 'Provisioning hash-verified frpc.exe for process-control test...'
             Install-FrpWindowsBinary | Out-Null
         }
-        if (-not (Test-Path -LiteralPath (Get-FrpFrpcPath))) {
-            throw 'ERROR: frpc.exe missing after Install-FrpWindowsBinary'
-        }
+        Assert-FrpTrue (Test-Path -LiteralPath (Get-FrpFrpcPath)) 'frpc.exe present'
+        $frpc = Get-FrpFrpcPath
+        Assert-FrpTrue ($frpc.ToLower().EndsWith('frpc.exe')) 'frpc path leaf'
+
         New-Item -ItemType Directory -Path (Get-FrpConfigDir) -Force | Out-Null
-        if (-not (Test-Path -LiteralPath (Get-FrpTomlPath))) {
-            Set-Content -LiteralPath (Get-FrpTomlPath) -Value "serverAddr = `"127.0.0.1`"`nserverPort = 7000`n"
+        # Point at a closed local port so frpc exits immediately.
+        Set-Content -LiteralPath (Get-FrpTomlPath) -Value @"
+serverAddr = "127.0.0.1"
+serverPort = 1
+loginFailExit = true
+"@
+
+        $threw = $false
+        try {
+            Start-FrpClient | Out-Null
+        } catch {
+            $threw = $true
+            Assert-FrpTrue ($_.Exception.Message -match 'exited immediately|failed to start|frpc') 'immediate-exit error text'
         }
-        $pid1 = Start-FrpClient
-        Assert-FrpTrue ((Get-FrpClientStatus).Running) 'frpc running'
-        $pid2 = Start-FrpClient
-        Assert-FrpEqual $pid1 $pid2 'idempotent start'
+        Assert-FrpTrue $threw 'Start-FrpClient fails closed on immediate exit'
+        Assert-FrpTrue ($null -eq (Read-FrpPidMetadata)) 'metadata cleared after immediate exit'
+        Assert-FrpTrue (-not (Get-FrpClientStatus).Running) 'not running after failed start'
+
+        # Idempotent stop with no live process / stale metadata
         $stopped = Stop-FrpClient
-        Assert-FrpTrue $stopped 'stopped'
-        Assert-FrpTrue (-not (Get-FrpClientStatus).Running) 'not running after stop'
-        Stop-FrpClient | Out-Null
-        Write-FrpTestPass 'test-process-control (windows frpc)'
+        Assert-FrpTrue (-not $stopped) 'idempotent stop returns false'
+        Write-FrpPidFile -ProcessId 999999 -ExePath $frpc
+        $stopped2 = Stop-FrpClient
+        Assert-FrpTrue (-not $stopped2) 'stale pid cleared without kill'
+        Assert-FrpTrue ($null -eq (Read-FrpPidMetadata)) 'stale metadata cleared'
+        Write-FrpTestPass 'test-process-control (windows frpc immediate-exit + stop)'
     }
 } finally {
     Remove-Item Env:FRP_WINDOWS_ALLOW_FAKE_PROCESS -ErrorAction SilentlyContinue
