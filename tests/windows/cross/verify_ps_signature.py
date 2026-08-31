@@ -23,7 +23,7 @@ def main(argv=None):
     p.add_argument('--op', default='enroll')
     args = p.parse_args(argv)
 
-    pub = Path(args.pubkey_pem).read_text(encoding='utf-8')
+    pub = Path(args.pubkey_pem).read_text(encoding='utf-8-sig')
     message = MGMT.signed_message(args.machine_id, args.body, args.ts, args.nonce, op=args.op)
     ok = MGMT.verify_signature(pub, message, args.sig_b64)
     if not ok:

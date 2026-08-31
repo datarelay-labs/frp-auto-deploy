@@ -126,7 +126,8 @@ try {
     $id = New-FrpEcdsaIdentity
     $sig = Protect-FrpSignMessage -PrivatePem $id.PrivatePem -Message $msg
     $pubFile = Join-Path $crossDir 'ps-pub.pem'
-    [System.IO.File]::WriteAllText($pubFile, $id.PublicPem)
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($pubFile, $id.PublicPem, $utf8NoBom)
     & $python $verify --pubkey-pem $pubFile --body $v.body --ts $v.ts --nonce $v.nonce `
         --machine-id $v.machine_id --sig-b64 $sig
     if ($LASTEXITCODE -ne 0) { throw 'Python verify of PS signature failed' }
