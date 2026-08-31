@@ -100,12 +100,24 @@ BACKUP_STDOUT="$WORKDIR/backup.stdout"
 python3 "$ROOT/tools/frp-backup" "$BACKUP" >"$BACKUP_STDOUT" \
   || fail "backup creation"
 [[ -f "$BACKUP" ]] || fail "backup archive missing"
-[[ "$(mode_of "$OUTDIR")" == "0o700" ]] || fail "backup directory mode"
+[[ "$(mode_of "$OUTDIR")" == "0o755" ]] || fail "user-supplied backup parent mode must stay unchanged"
 [[ "$(mode_of "$BACKUP")" == "0o600" ]] || fail "backup archive mode"
 grep -q 'contains private keys' "$BACKUP_STDOUT" || fail "secret warning missing"
 if grep -qE 'token-original-super-secret|private note|original-enrollment' "$BACKUP_STDOUT"; then
   fail "backup leaked a secret"
 fi
+# Regression: /tmp-style fixture parent mode/owner must remain untouched.
+TMP_PARENT="$WORKDIR/tmp-style-parent"
+mkdir -p "$TMP_PARENT"
+chmod 1777 "$TMP_PARENT"
+OWNER_BEFORE="$(stat -c '%u:%g' "$TMP_PARENT")"
+MODE_BEFORE="$(mode_of "$TMP_PARENT")"
+TMP_BACKUP="$TMP_PARENT/server.tar.gz"
+python3 "$ROOT/tools/frp-backup" "$TMP_BACKUP" >/dev/null \
+  || fail "backup into tmp-style parent"
+[[ "$(mode_of "$TMP_PARENT")" == "$MODE_BEFORE" ]] || fail "tmp-style parent mode changed"
+[[ "$(stat -c '%u:%g' "$TMP_PARENT")" == "$OWNER_BEFORE" ]] || fail "tmp-style parent owner changed"
+[[ "$(mode_of "$TMP_BACKUP")" == "0o600" ]] || fail "tmp-style archive mode"
 pass "BACKUP_CREATE_PERMISSIONS_NO_SECRET_LEAK"
 
 BAD_CHECKSUM="$WORKDIR/checksum.tar.gz"

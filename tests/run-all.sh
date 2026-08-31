@@ -76,6 +76,7 @@ python3 tests/test-frontend-proxy.py
 ./tests/test-client-installer-url-migration.sh
 ./tests/test-install-txn-rollback.sh
 python3 tests/test-audit-log.py
+python3 tests/test-audit-query.py
 ./tests/test-frp-compatibility.sh
 ./tests/test-backup-restore.sh
 

@@ -81,8 +81,22 @@ def test_backend_identity_ip_and_dns():
             fail('missing trusted X-Forwarded-For from $remote_addr')
         if 'location = "/~!frp"' not in conf:
             fail('WSS path')
-        if 'ca\\.crt|healthz|enroll|bootstrap/redeem' not in conf:
-            fail('allocator allowlist')
+        allow_re = 'location ~ ^/(ca\\.crt|healthz|enroll|enroll/challenge|bootstrap/redeem|time)$ {'
+        if allow_re not in conf:
+            fail('allocator allowlist', conf)
+        for leaf in (
+            'ca\\.crt',
+            'healthz',
+            'enroll',
+            'enroll/challenge',
+            'bootstrap/redeem',
+            'time',
+        ):
+            if leaf not in allow_re:
+                fail('allowlist missing path', leaf)
+        if 'location / {' not in conf or 'return 404;' not in conf:
+            fail('default deny for non-allowlisted paths')
+        pass_('ALLOCATOR_ALLOWLIST_CHALLENGE_TIME')
         pass_('NGINX_BACKEND_DNS_IDENTITY')
         pass_('NGINX_NO_PUBLIC_IP_PROXY_SSL_NAME')
         pass_('NGINX_BACKEND_VERIFY_ON')

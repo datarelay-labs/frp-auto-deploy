@@ -15,16 +15,20 @@ try {
     $root = Get-FrpWindowsRoot
     Assert-FrpTrue (Test-Path -LiteralPath $root) 'root exists'
 
-    # Mimic uninstall messaging + local removal
-    $msg = 'LOCAL SOFTWARE REMOVED, SERVER RESERVATIONS PRESERVED'
-    Assert-FrpTrue ($msg -match 'SERVER RESERVATIONS PRESERVED') 'reservation message'
-    Remove-Item -LiteralPath $root -Recurse -Force
+    $rc = Invoke-FrpClientUninstall
+    Assert-FrpTrue ($rc -eq 0) 'uninstall exit 0'
     Assert-FrpTrue (-not (Test-Path -LiteralPath $root)) 'root removed'
 
-    # Tools source still documents the message
+    # Idempotent second uninstall (nothing left → success)
+    $rc2 = Invoke-FrpClientUninstall
+    Assert-FrpTrue ($rc2 -eq 0) 'second uninstall exit 0'
+
+    # Tools source still documents the message and fail-closed stop
     $client = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'windows\tools\FrpClient.ps1') -Raw
     Assert-FrpTrue ($client -match 'SERVER RESERVATIONS PRESERVED') 'uninstall message in tool'
     Assert-FrpTrue ($client -match 'administrator releases them') 'port release wording'
+    Assert-FrpTrue ($client -match 'refusing to remove credentials') 'fail-closed stop gate'
+    Assert-FrpTrue ($client -match 'Remaining items') 'lists remaining on Remove-Item failure'
 
     Write-FrpTestPass 'test-uninstall'
 } finally {

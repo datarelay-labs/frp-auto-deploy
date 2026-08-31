@@ -302,4 +302,107 @@ python3 "$PURGE" enrollments --older-than 30 >/dev/null
 [[ ! -f "$TREE/var/lib/frp-auto-deploy/enrollments/1212121212121212.json" ]] || fail "BULK_PURGE"
 pass "BULK_PURGE"
 
+# Pair purge atomicity: before-commit failure restores both; after-commit
+# leftover .purging is OK when both absent from active namespace.
+python3 - "$TREE" "$LIFECYCLE" <<'PY'
+import importlib.util, json, os, sys, time
+from pathlib import Path
+
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('elc', sys.argv[2])
+elc = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(elc)
+
+enroll_dir = root / 'var/lib/frp-auto-deploy/enrollments'
+boot_dir = root / 'var/lib/frp-auto-deploy/bootstrap'
+tid = 'feedfacecafebeef'
+eid = 'deadbeefcafef00d'
+now = int(time.time())
+ticket = {
+    'schema': 1,
+    'id': tid,
+    'secret_hash': 'a' * 64,
+    'enrollment_id': eid,
+    'created_at': '2026-01-01T00:00:00Z',
+    'expires_at': now - 86400 * 90,
+    'completed_at': '2026-01-02T00:00:00Z',
+    'label': 'pair-atom',
+    'services': [],
+}
+enroll = {
+    'id': eid,
+    'secret': 'b' * 64,
+    'created_at': '2026-01-01T00:00:00Z',
+    'expires_at': now - 86400 * 90,
+    'used_at': '2026-01-02T00:00:00Z',
+    'label': 'pair-atom',
+}
+tpath = boot_dir / (tid + '.json')
+epath = enroll_dir / (eid + '.json')
+tpath.write_text(json.dumps(ticket, indent=2) + '\n')
+epath.write_text(json.dumps(enroll, indent=2) + '\n')
+
+# Inject stage failure on second rename; first must roll back.
+real_stage = elc._stage_delete
+calls = {'n': 0}
+
+def flaky_stage(path):
+    calls['n'] += 1
+    if calls['n'] >= 2:
+        raise OSError('simulated stage failure')
+    return real_stage(path)
+
+elc._stage_delete = flaky_stage
+row = {
+    'id': eid,
+    'state': 'completed',
+    'type': 'zero-touch',
+    'enroll_path': str(epath),
+    'ticket_path': str(tpath),
+    'pair_error': None,
+}
+try:
+    try:
+        elc.purge_enrollment_row(row, reason='test')
+        raise SystemExit('FAIL: purge should have failed mid-stage')
+    except Exception:
+        pass
+    # Both must be restored to the active namespace — never ticket-only or enroll-only.
+    if not tpath.is_file() or not epath.is_file():
+        raise SystemExit('FAIL: pair not fully restored after pre-commit failure')
+    if list(boot_dir.glob('*.purging')) or list(enroll_dir.glob('*.purging')):
+        raise SystemExit('FAIL: leftover tombstones after rollback')
+finally:
+    elc._stage_delete = real_stage
+
+# Happy path: both removed from active; leftover .purging after commit is tolerated.
+tpath.write_text(json.dumps(ticket, indent=2) + '\n')
+epath.write_text(json.dumps(enroll, indent=2) + '\n')
+committed = []
+real_commit = elc._commit_staged_deletes
+
+def sticky_commit(staged_paths):
+    errors = real_commit(staged_paths)
+    # Leave one tombstone behind to simulate cleanup failure after rename commit.
+    for staged in staged_paths:
+        if staged is None:
+            continue
+        p = Path(staged)
+        if not p.exists():
+            p.write_text('tombstone-retry')
+            committed.append(p)
+            break
+    return errors
+
+elc._commit_staged_deletes = sticky_commit
+try:
+    elc.purge_enrollment_row(row, reason='test')
+finally:
+    elc._commit_staged_deletes = real_commit
+if tpath.is_file() or epath.is_file():
+    raise SystemExit('FAIL: active pair files still present after successful purge')
+print('PASS PAIR_PURGE_ATOMICITY')
+PY
+pass "PAIR_PURGE_ATOMICITY"
+
 echo "ENROLLMENT_RETENTION_TESTS=PASS"

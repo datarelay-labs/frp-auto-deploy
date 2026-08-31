@@ -67,6 +67,7 @@ chmod 600 "$CLIENT/etc/frp/frpc.toml"
 cat >"$CLIENT/etc/frp/client-identity.key" <<'EOF'
 TEST-IDENTITY-KEY-FIXTURE-NOT-A-REAL-KEY
 EOF
+chmod 600 "$CLIENT/etc/frp/client-identity.key"
 echo 'pub' >"$CLIENT/etc/frp/client-identity.pub"
 echo 'mac' >"$CLIENT/etc/frp/client-identity.mac"
 cat >"$CLIENT/etc/frp-auto-deploy/version" <<'EOF'
@@ -111,11 +112,22 @@ if run_ctl restart >"$WORKDIR/rst-paused.out" 2>"$WORKDIR/rst-paused.err"; then
 fi
 grep -q 'paused' "$WORKDIR/rst-paused.err" "$WORKDIR/rst-paused.out" || fail "restart paused message"
 
-# test read-only
+# test read-only; FAIL overall → non-zero exit (no CA / unreachable allocator)
 before="$(cat "$CLIENT/etc/frp/client-state.json")"
+set +e
 run_ctl test >"$WORKDIR/test.out" 2>&1
+test_rc=$?
+set -e
 [[ "$(cat "$CLIENT/etc/frp/client-state.json")" == "$before" ]] || fail "test mutated state"
 grep -q 'NOT TESTED' "$WORKDIR/test.out" || fail "external reachability disclaimer"
+grep -q 'RESULT=' "$WORKDIR/test.out" || fail "test RESULT"
+if grep -q 'RESULT=FAIL' "$WORKDIR/test.out"; then
+  [[ "$test_rc" -ne 0 ]] || fail "RESULT=FAIL must exit non-zero"
+else
+  [[ "$test_rc" -eq 0 ]] || fail "RESULT=PASS/WARN must exit 0"
+fi
+grep -q 'IP literal' "$WORKDIR/test.out" || fail "FRP server DNS IP literal"
+grep -q 'Identity permissions' "$WORKDIR/test.out" || fail "identity permissions check"
 
 # logs
 export FRP_CLIENT_LIFECYCLE_LOG_FIXTURE="$WORKDIR/log-fixture.txt"
@@ -168,6 +180,29 @@ grep -qi 'cancel' "$WORKDIR/un-decline.out" || fail "decline message"
 
 # uninstall with frpctl --yes (last: destroys fixture tree)
 run_ctl pause >"$WORKDIR/pause4.out" 2>&1 || true
+
+# Regression: uninstall must not use global pkill -x frpc (unrelated frpc survives).
+# With FRP_SKIP_SYSTEMD=1 the stop path is a no-op; assert source never invokes pkill -x.
+if grep -nE '^[[:space:]]*pkill[[:space:]]+-x[[:space:]]+frpc' \
+  "$ROOT/lib/frp-client-lifecycle.sh" "$ROOT/uninstall-client.sh"; then
+  fail "global pkill -x frpc must not appear in uninstall/stop paths"
+fi
+# Document: an unrelated process named frpc is not killed — stop/uninstall only
+# target project-owned PIDs (systemctl unit MainPID or cmdline matching
+# /usr/local/bin/frpc -c /etc/frp/frpc.toml). FRP_SKIP_SYSTEMD=1 mocks systemd.
+grep -q 'frp_client_project_frpc' "$ROOT/lib/frp-client-lifecycle.sh" \
+  || fail "project-scoped frpc stop helper missing"
+grep -q 'frp_u_project_frpc' "$ROOT/uninstall-client.sh" \
+  || fail "uninstall project-scoped frpc helper missing"
+# No /home/... production fallbacks
+if grep -nE '/home/aella/' "$ROOT/lib/frp-client-lifecycle.sh"; then
+  fail "developer /home/aella path left as uninstall fallback"
+fi
+install -m 0755 "$ROOT/uninstall-client.sh" \
+  "$CLIENT/usr/local/lib/frp-auto-deploy/uninstall-client.sh"
+[[ -f "$CLIENT/usr/local/lib/frp-auto-deploy/uninstall-client.sh" ]] \
+  || fail "uninstall helper not installed to libdir"
+
 run_ctl uninstall --yes >"$WORKDIR/un.out" 2>&1 || fail "uninstall --yes"
 [[ ! -f "$CLIENT/etc/frp/client-state.json" ]] || fail "state removed"
 [[ ! -f "$CLIENT/etc/frp/client-identity.key" ]] || fail "identity removed"
