@@ -58,8 +58,14 @@ foreach ($t in $tests) {
     Write-Host ""
     Write-Host "--- $t ---"
     try {
-        $output = & $hostExe -NoProfile -File $path 2>&1
-        $code = $LASTEXITCODE
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $output = & $hostExe -NoProfile -File $path 2>&1
+            $code = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $prevEap
+        }
         if ($null -eq $code) { $code = 0 }
         $output | ForEach-Object { Write-Host $_ }
         if ($code -ne 0) {
