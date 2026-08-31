@@ -172,13 +172,11 @@ def _https_head(url):
         raise ValueError('not https')
     host = parsed.hostname
     port = parsed.port or 443
-    ctx = ssl.create_default_context()
     ca = _path('/etc/frp-auto-deploy/allocator-ca.crt')
-    if ca.is_file():
-        ctx.load_verify_locations(cafile=str(ca))
-    else:
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+    if not ca.is_file():
+        raise ValueError('allocator CA missing')
+    ctx = ssl.create_default_context()
+    ctx.load_verify_locations(cafile=str(ca))
     with socket.create_connection((host, port), timeout=CONNECT_TIMEOUT) as raw:
         with ctx.wrap_socket(raw, server_hostname=host) as tls:
             tls.settimeout(CONNECT_TIMEOUT)
@@ -187,6 +185,38 @@ def _https_head(url):
                 tls.recv(64)
             except Exception:
                 pass
+
+
+def _resolve_host(host):
+    host = str(host or '').strip()
+    if not host:
+        return 'FAIL', 'empty host'
+    # IP literal (v4/v6)
+    try:
+        socket.inet_pton(socket.AF_INET, host)
+        return 'PASS', 'IP literal'
+    except OSError:
+        pass
+    try:
+        socket.inet_pton(socket.AF_INET6, host.strip('[]'))
+        return 'PASS', 'IP literal'
+    except OSError:
+        pass
+    try:
+        socket.getaddrinfo(host, None)
+        return 'PASS', host
+    except socket.gaierror as exc:
+        return 'FAIL', 'DNS resolution failed: %s' % exc
+
+
+def _identity_permissions():
+    key = _path('/etc/frp/client-identity.key')
+    if not key.is_file():
+        return 'FAIL', 'client-identity.key missing'
+    mode = key.stat().st_mode & 0o777
+    if mode != 0o600:
+        return 'FAIL', 'client-identity.key mode 0o%o (expected 0600)' % mode
+    return 'PASS', '0600'
 
 
 def _frpc_active():
@@ -238,7 +268,7 @@ def run_connectivity_test():
 
     checks.append(_check('Local state', local_state))
     checks.append(_check('Management identity', mgmt_identity))
-    checks.append(_check('Identity permissions', mgmt_identity))
+    checks.append(_check('Identity permissions', _identity_permissions))
     checks.append(_check('FRP configuration', frp_config))
     checks.append(_check('Remote access pause marker', lambda: (
         'PASS' if pause else 'PASS',
@@ -250,7 +280,7 @@ def run_connectivity_test():
     allocator = (state or {}).get('allocator_url') or ''
 
     if server:
-        checks.append(_check('FRP server DNS', lambda: ('PASS', server)))
+        checks.append(_check('FRP server DNS', lambda: _resolve_host(server)))
         checks.append(_check('FRP server TCP reach', lambda: (
             'PASS' if _tcp_ok(server, port) else 'FAIL',
             '%s:%s' % (server, port),
@@ -260,14 +290,16 @@ def run_connectivity_test():
         checks.append(_check('FRP server TCP reach', lambda: ('SKIP', 'no server in state')))
 
     if allocator:
-        checks.append(_check('Allocator HTTPS', lambda: (
-            'PASS' if _https_ok(allocator) else 'FAIL',
-            allocator,
-        )))
-        checks.append(_check('CA validation', lambda: (
-            'PASS' if _path('/etc/frp-auto-deploy/allocator-ca.crt').is_file() else 'WARN',
-            'allocator CA present' if _path('/etc/frp-auto-deploy/allocator-ca.crt').is_file() else 'missing',
-        )))
+        ca_path = _path('/etc/frp-auto-deploy/allocator-ca.crt')
+        if not ca_path.is_file():
+            checks.append(_check('Allocator HTTPS', lambda: ('FAIL', 'allocator CA missing')))
+            checks.append(_check('CA validation', lambda: ('FAIL', 'missing')))
+        else:
+            checks.append(_check('Allocator HTTPS', lambda: (
+                'PASS' if _https_ok(allocator) else 'FAIL',
+                allocator,
+            )))
+            checks.append(_check('CA validation', lambda: ('PASS', 'allocator CA present')))
     else:
         checks.append(_check('Allocator HTTPS', lambda: ('SKIP', 'no allocator URL')))
         checks.append(_check('CA validation', lambda: ('SKIP', 'no allocator URL')))
@@ -325,7 +357,11 @@ def run_connectivity_test():
         last_group = name
         label = name.ljust(24)
         lines.append('%s %s' % (label, item['status']))
-        if item['detail'] and item['status'] in ('WARN', 'FAIL', 'SKIP'):
+        show_detail = item['detail'] and (
+            item['status'] in ('WARN', 'FAIL', 'SKIP')
+            or name in ('FRP server DNS', 'Identity permissions', 'CA validation')
+        )
+        if show_detail:
             lines.append('  (%s)' % item['detail'])
 
     lines.extend(['', 'RESULT=%s' % overall])
@@ -488,9 +524,9 @@ def main(argv=None):
     argv = list(argv or sys.argv[1:])
     cmd = argv[0] if argv else 'help'
     if cmd == 'test':
-        _, text, _ = run_connectivity_test()
+        overall, text, _ = run_connectivity_test()
         sys.stdout.write(text)
-        return 0
+        return 1 if overall == 'FAIL' else 0
     if cmd == 'logs':
         lines = 100
         follow = False

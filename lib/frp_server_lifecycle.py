@@ -172,7 +172,12 @@ def run_server_test():
     name, status, detail = 'Allocator service', *systemd_active('frp-port-allocator')
     checks.append({'name': name, 'status': status, 'detail': detail})
 
-    checks.append(_check('Deployment mode', lambda: ('PASS', mode)))
+    def deployment_mode_check():
+        if mode in ('direct', 'single443'):
+            return 'PASS', mode
+        return 'FAIL', 'invalid deployment_mode: %s' % (mode or '(empty)')
+
+    checks.append(_check('Deployment mode', deployment_mode_check))
 
     if mode == 'single443':
         name, status, detail = 'Frontend service', *systemd_active('frp-frontend')
@@ -222,13 +227,52 @@ def run_server_test():
         for line in version_path.read_text(encoding='utf-8').splitlines():
             if line.startswith('FRP_VERSION='):
                 frp_ver = line.split('=', 1)[1].strip()
-    checks.append(_check('FRP version', lambda: ('PASS' if frp_ver else 'WARN', frp_ver or 'unknown')))
+
+    def frp_version_check():
+        if not frp_ver:
+            return 'SKIP', 'FRP_VERSION not configured'
+        binary = _path('/usr/local/bin/frps')
+        if not binary.is_file():
+            return 'SKIP', 'frps binary not installed'
+        try:
+            proc = subprocess.run(
+                [str(binary), '--version'],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            out = ((proc.stdout or '') + (proc.stderr or '')).strip()
+            if frp_ver in out:
+                return 'PASS', frp_ver
+            return 'FAIL', 'configured %s vs installed: %s' % (frp_ver, out or 'unknown')
+        except Exception as exc:
+            return 'SKIP', str(exc)
+
+    checks.append(_check('FRP version', frp_version_check))
 
     checks.append(_check('Port range', lambda: (
         'PASS' if int(cfg.get('port_end', 0)) >= int(cfg.get('port_start', 0)) else 'FAIL',
         '',
     )))
-    checks.append(_check('Port conflicts', lambda: ('PASS', 'registry invariants (see doctor)')))
+
+    def port_conflicts():
+        reg_file = cfg.get('registry_file') or '/var/lib/frp-auto-deploy/registry.json'
+        path = _path(reg_file) if str(reg_file).startswith('/') else Path(reg_file)
+        if not path.is_file():
+            return 'FAIL', 'registry missing'
+        try:
+            from frp_doctor import PASS, WARN, FAIL, validate_registry
+            data = json.loads(path.read_text(encoding='utf-8'))
+            status, message, _issues = validate_registry(data, cfg)
+            if status == PASS:
+                return 'PASS', message
+            if status == WARN:
+                return 'WARN', message
+            return 'FAIL', message
+        except Exception as exc:
+            return 'FAIL', str(exc)
+
+    checks.append(_check('Port conflicts', port_conflicts))
 
     checks.append({'name': 'External Internet reachability', 'status': 'SKIP', 'detail': 'NOT TESTED'})
 
@@ -426,9 +470,9 @@ def main(argv=None):
     argv = list(argv or sys.argv[1:])
     cmd = argv[0] if argv else 'help'
     if cmd == 'test':
-        _, text, _ = run_server_test()
+        overall, text, _ = run_server_test()
         sys.stdout.write(text)
-        return 0
+        return 1 if overall == 'FAIL' else 0
     if cmd == 'logs':
         component = 'all'
         lines = 100

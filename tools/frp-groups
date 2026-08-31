@@ -130,12 +130,12 @@ def print_group_clients(state, cfg, gid):
     if not clients:
         print('(none)')
         return
-    all_mids = [mid for mid, _client in clients]
+    all_registry_mids = [mid for mid, _client in CREG.sorted_clients(state)]
     for idx, (mid, client) in enumerate(clients, start=1):
         services = CREG.enabled_services(client)
         label = CREG.sanitize_display(client.get('label') or '-', 12)
         hostname = CREG.sanitize_display(client.get('hostname') or '-', 14)
-        short_id = CREG.sanitize_display(CREG.unique_short_id(mid, all_mids), 10)
+        short_id = CREG.sanitize_display(CREG.unique_short_id(mid, all_registry_mids), 10)
         mgmt = CREG.mgmt_status(client)
         print(
             f'{idx:<3} {short_id:<10} {label:<12} {hostname:<14} '

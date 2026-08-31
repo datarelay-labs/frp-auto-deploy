@@ -186,6 +186,31 @@ def rotate_if_needed(max_bytes=5 * 1024 * 1024, keep=5):
     os.chmod(path, 0o600)
 
 
+def _row_timestamp(row):
+    """Prefer canonical timestamp; accept legacy ts."""
+    return row.get("timestamp") or row.get("ts") or ""
+
+
+def _row_details(row):
+    """Prefer canonical details; accept legacy meta."""
+    details = row.get("details")
+    if details is None:
+        details = row.get("meta")
+    return details if isinstance(details, dict) else {}
+
+
+def _iter_audit_paths(path: Path, keep: int):
+    """Current audit file plus rotated .1 .. .keep (oldest last)."""
+    paths = []
+    if path.is_file():
+        paths.append(path)
+    for index in range(1, max(int(keep), 0) + 1):
+        rotated = Path(f"{path}.{index}")
+        if rotated.is_file():
+            paths.append(rotated)
+    return paths
+
+
 def query(
     *,
     since=None,
@@ -194,11 +219,17 @@ def query(
     group=None,
     limit=500,
 ):
-    """Return filtered audit rows (server-side timestamps, redacted)."""
+    """Return filtered audit rows (server-side timestamps, redacted).
+
+    Results are sorted newest-first by timestamp. ``limit`` keeps the NEWEST
+    matching entries (deterministic for ``show audit``).
+    """
     from frp_client_registry import parse_duration, parse_iso_timestamp
 
     path = audit_path()
-    if not path.is_file():
+    keep = int(os.environ.get("FRP_AUDIT_ROTATE_KEEP", "5"))
+    sources = _iter_audit_paths(path, keep)
+    if not sources:
         return []
     cutoff = None
     if since:
@@ -208,51 +239,59 @@ def query(
             raise ValueError(str(exc)) from exc
         from datetime import timedelta
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=delta)
-    rows = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
+    matched = []
+    for source in sources:
         try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
+            text = source.read_text(encoding="utf-8")
+        except OSError:
             continue
-        if not isinstance(row, dict):
-            continue
-        ts = parse_iso_timestamp(row.get("ts"))
-        if cutoff and (ts is None or ts < cutoff):
-            continue
-        if event and row.get("event") != event:
-            continue
-        if client_id:
-            cid = str(client_id).lower()
-            if str(row.get("client_id", "")).lower() != cid:
-                meta = row.get("meta") or {}
-                if str(meta.get("client_id", "")).lower() != cid:
-                    continue
-        if group:
-            g = str(group).lower()
-            meta = row.get("meta") or {}
-            if str(meta.get("group", "")).lower() != g:
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
                 continue
-        rows.append(row)
-        if len(rows) >= max(int(limit), 1):
-            break
-    return rows
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            ts_raw = _row_timestamp(row)
+            ts = parse_iso_timestamp(ts_raw)
+            if cutoff and (ts is None or ts < cutoff):
+                continue
+            if event and row.get("event") != event:
+                continue
+            details = _row_details(row)
+            if client_id:
+                cid = str(client_id).lower()
+                top = str(row.get("client_id", "")).lower()
+                nested = str(details.get("client_id", "")).lower()
+                if top != cid and nested != cid:
+                    continue
+            if group:
+                g = str(group).lower()
+                top_g = str(row.get("group", "")).lower()
+                nested_g = str(details.get("group", "")).lower()
+                if top_g != g and nested_g != g:
+                    continue
+            matched.append((ts or datetime(1970, 1, 1, tzinfo=timezone.utc), row))
+    matched.sort(key=lambda item: item[0], reverse=True)
+    return [row for _ts, row in matched[: max(int(limit), 1)]]
 
 
 def format_audit_table(rows):
+    """Format rows newest-first (query order) for ``show audit``."""
     lines = []
     for row in rows:
-        meta = row.get("meta") or {}
+        details = _row_details(row)
         meta_bits = []
-        for key in sorted(meta.keys()):
-            meta_bits.append("%s=%s" % (key, meta[key]))
+        for key in sorted(details.keys()):
+            meta_bits.append("%s=%s" % (key, details[key]))
         meta_text = ", ".join(meta_bits)
         lines.append(
             "%s  event=%s  actor=%s%s"
             % (
-                row.get("ts", ""),
+                _row_timestamp(row),
                 row.get("event", ""),
                 row.get("actor", ""),
                 ("  " + meta_text) if meta_text else "",
@@ -271,16 +310,16 @@ def format_audit_csv(rows):
 
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["ts", "event", "actor", "client_id", "meta_json"])
+    writer.writerow(["timestamp", "event", "actor", "client_id", "details_json"])
     for row in rows:
-        meta = row.get("meta") or {}
+        details = _row_details(row)
         writer.writerow(
             [
-                row.get("ts", ""),
+                _row_timestamp(row),
                 row.get("event", ""),
                 row.get("actor", ""),
-                row.get("client_id", meta.get("client_id", "")),
-                json.dumps(meta, sort_keys=True),
+                row.get("client_id", details.get("client_id", "")),
+                json.dumps(details, sort_keys=True),
             ]
         )
     return buf.getvalue()
@@ -301,13 +340,12 @@ def main(argv=None):
             raise SystemExit("ERROR: --event is required")
         emit(args.event, actor=args.actor)
         return 0
-    path = audit_path()
-    if not path.is_file():
+    rows = query(limit=max(args.lines, 1))
+    if not rows:
         sys.stdout.write("(no audit log)\n")
         return 0
-    lines = path.read_text(encoding="utf-8").splitlines()
-    for line in lines[-max(args.lines, 1) :]:
-        sys.stdout.write(line + "\n")
+    for row in rows:
+        sys.stdout.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
     return 0
 
 

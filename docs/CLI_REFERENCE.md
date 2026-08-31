@@ -82,6 +82,10 @@ show info
 `status` and `version` remain shortcuts for `show status` / `show version`.
 Canonical help prefers the `show` form.
 
+`show status` / `status` reports **local published-port observation** only
+(whether expected local listeners appear bound). It is not an authoritative
+statement of FRP tunnel reachability or end-to-end public connectivity.
+
 `show clients` reuses the existing client table. The identity columns are
 CLIENT ID, LABEL, and HOSTNAME. Group membership is not expanded into extra
 rows; use `show client <ID> groups` or `show group <GROUP> clients`.

@@ -132,33 +132,67 @@ def enrollment_counts(cfg):
 
 def server_health_summary(cfg, state):
     """Lightweight health labels for fleet overview (local checks only)."""
+    import subprocess
+
     out = {}
     try:
-        from frp_doctor import validate_registry
-        validate_registry(state, cfg)
-        out['registry'] = 'PASS'
+        from frp_doctor import PASS, WARN, FAIL, validate_registry
+        status, _msg, _issues = validate_registry(state, cfg)
+        if status == PASS:
+            out['registry'] = 'PASS'
+        elif status == WARN:
+            out['registry'] = 'WARN'
+        else:
+            out['registry'] = 'FAIL'
     except Exception:
         out['registry'] = 'FAIL'
-    for key, path_key in (
-        ('frps', '/etc/systemd/system/frps.service'),
-        ('allocator', '/etc/systemd/system/frp-port-allocator.service'),
-    ):
-        if _path(path_key).is_file():
-            out[key] = 'PASS'
-        else:
-            out[key] = 'SKIP'
+
+    def unit_label(unit, unit_file):
+        if not _path(unit_file).is_file():
+            return 'SKIP'
+        if os.environ.get('FRP_SKIP_SYSTEMD') == '1' or _root():
+            hook = os.environ.get(
+                'FRP_SERVER_LIFECYCLE_UNIT_%s' % unit.upper().replace('-', '_')
+            )
+            if hook == 'active':
+                return 'PASS'
+            if hook == 'inactive':
+                return 'WARN'
+            # Unit file present but activity not verified in test mode.
+            return 'Configured'
+        try:
+            proc = subprocess.run(
+                ['systemctl', 'is-active', unit],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            state_txt = (proc.stdout or proc.stderr or '').strip()
+            if state_txt == 'active':
+                return 'PASS'
+            return 'WARN'
+        except Exception:
+            return 'Configured'
+
+    out['frps'] = unit_label('frps', '/etc/systemd/system/frps.service')
+    out['allocator'] = unit_label(
+        'frp-port-allocator', '/etc/systemd/system/frp-port-allocator.service'
+    )
     mode = str(cfg.get('deployment_mode') or 'direct').strip().lower()
     if mode == 'single443':
-        if _path('/etc/systemd/system/frp-frontend.service').is_file():
-            out['frontend'] = 'PASS'
-        else:
-            out['frontend'] = 'WARN'
+        out['frontend'] = unit_label(
+            'frp-frontend', '/etc/systemd/system/frp-frontend.service'
+        )
+    elif mode not in ('direct', 'single443'):
+        out['deployment_mode'] = 'FAIL'
     cert = cfg.get('tls_server_cert') or ''
-    cert_path = _path(cert) if cert.startswith('/') else Path(cert)
-    if cert_path.is_file():
+    cert_path = _path(cert) if str(cert).startswith('/') else Path(cert)
+    if cert and cert_path.is_file():
         out['TLS'] = 'PASS'
-    else:
+    elif cert:
         out['TLS'] = 'WARN'
+    else:
+        out['TLS'] = 'SKIP'
     return out
 
 
