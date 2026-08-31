@@ -148,6 +148,11 @@ function Start-FrpClient {
     Initialize-FrpDirectories
     Clear-FrpStalePid
 
+    $pausePath = Join-Path (Get-FrpStateDir) 'remote-access-paused.json'
+    if (Test-Path -LiteralPath $pausePath) {
+        throw "ERROR: client remote access is paused. Use 'frpctl resume' to reconnect."
+    }
+
     if (-not (Test-Path -LiteralPath (Get-FrpTomlPath))) {
         throw 'ERROR: frpc.toml is missing; enroll this client first (install-client.ps1 -ZeroTouch ...)'
     }

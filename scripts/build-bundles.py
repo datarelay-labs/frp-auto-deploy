@@ -94,8 +94,11 @@ client_files=[
  'lib/frp_doctor.py',
  'lib/frp_ctl_grammar.py',
  'lib/frp_ctl_repl.py',
+ 'lib/frp-client-lifecycle.sh',
+ 'lib/frp_client_lifecycle.py',
  'tools/frp-client',
  'tools/frpctl',
+ 'tools/frpcli',
 ]
 client_lines=['#!/usr/bin/env bash','set -euo pipefail','TMP="$(mktemp -d)"','trap \'rm -rf "$TMP"\' EXIT']
 for rel in client_files:

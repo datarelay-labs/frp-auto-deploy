@@ -14,6 +14,13 @@ elif [[ -f /usr/local/lib/frp-auto-deploy/frp-doctor-common.sh ]]; then
   # shellcheck disable=SC1091
   . /usr/local/lib/frp-auto-deploy/frp-doctor-common.sh
 fi
+if [[ -f "${_FRPCTL_DIR}/../lib/frp-client-lifecycle.sh" ]]; then
+  # shellcheck source=../lib/frp-client-lifecycle.sh
+  . "${_FRPCTL_DIR}/../lib/frp-client-lifecycle.sh"
+elif [[ -f /usr/local/lib/frp-auto-deploy/frp-client-lifecycle.sh ]]; then
+  # shellcheck disable=SC1091
+  . /usr/local/lib/frp-auto-deploy/frp-client-lifecycle.sh
+fi
 
 frpctl_path() {
   local p="$1"
@@ -454,7 +461,12 @@ Canonical grammar:
   create zero-touch | create enrollment | create backup
   revoke client ID | release client ID | release service ID SID
   update project [--check] | update frp [--check]
+  pause | resume | restart | test | logs | support-bundle | uninstall
   doctor | help | menu | history | exit
+
+Client lifecycle commands (client hosts): pause stops remote access locally
+without touching identity or server reservations; resume restores it.
+frpcli is a friendly alias for frpctl.
 
 status and version remain shortcuts. Older flat commands (clients,
 client-set, enroll, ...) still work for scripts. See 'help legacy'.
@@ -487,14 +499,28 @@ frpctl_print_version() {
 }
 
 frpctl_print_client_menu() {
-  echo "1) Show status"
-  echo "2) Show services"
-  echo "3) Show connection information"
-  echo "4) Manage services"
-  echo "5) Update project"
-  echo "6) Doctor"
-  echo "7) Help"
-  echo "8) Exit"
+  echo "1) Status & connection"
+  echo "2) Manage services"
+  echo "3) Troubleshooting"
+  echo "4) Remote access control"
+  echo "5) Update / repair"
+  echo "6) Uninstall"
+  echo "7) Exit"
+}
+
+frpctl_print_client_troubleshoot_menu() {
+  echo "1) Test connection"
+  echo "2) Logs"
+  echo "3) Doctor"
+  echo "4) Create support bundle"
+  echo "5) Back"
+}
+
+frpctl_print_client_remote_menu() {
+  echo "1) Pause remote access"
+  echo "2) Resume remote access"
+  echo "3) Restart connection"
+  echo "4) Back"
 }
 
 frpctl_print_server_menu() {
@@ -579,11 +605,73 @@ frpctl_read() {
   printf '%s' "$value"
 }
 
+frpctl_client_troubleshoot_menu() {
+  local choice
+  while true; do
+    echo
+    frpctl_header
+    echo "Troubleshooting"
+    echo "==============="
+    frpctl_print_client_troubleshoot_menu
+    echo
+    choice="$(frpctl_read "Select: " "")" || return 1
+    case "$choice" in
+      1) frpctl_lifecycle_dispatch test ;;
+      2) frpctl_lifecycle_dispatch logs ;;
+      3) frpctl_dispatch doctor || true ;;
+      4) frpctl_lifecycle_dispatch support-bundle ;;
+      5) return 0 ;;
+      *) echo "ERROR: select 1-5" >&2 ;;
+    esac
+  done
+}
+
+frpctl_client_remote_menu() {
+  local choice
+  while true; do
+    echo
+    frpctl_header
+    echo "Remote access control"
+    echo "===================="
+    frpctl_print_client_remote_menu
+    echo
+    choice="$(frpctl_read "Select: " "")" || return 1
+    case "$choice" in
+      1) frpctl_lifecycle_dispatch pause ;;
+      2) frpctl_lifecycle_dispatch resume ;;
+      3) frpctl_lifecycle_dispatch restart ;;
+      4) return 0 ;;
+      *) echo "ERROR: select 1-4" >&2 ;;
+    esac
+  done
+}
+
+frpctl_lifecycle_dispatch() {
+  local cmd="${1:-}"
+  shift || true
+  case "$cmd" in
+    pause) frp_client_pause_remote_access "$@" ;;
+    resume) frp_client_resume_remote_access "$@" ;;
+    restart) frp_client_lifecycle_restart "$@" ;;
+    test) frp_client_lifecycle_test "$@" ;;
+    logs) frp_client_lifecycle_logs "$@" ;;
+    support-bundle) frp_client_lifecycle_support_bundle "$@" ;;
+    uninstall) frp_client_lifecycle_uninstall "$@" ;;
+    *)
+      echo "ERROR: unknown lifecycle command: $cmd" >&2
+      return 1
+      ;;
+  esac
+}
+
 frpctl_client_menu() {
   local choice
   while true; do
     echo
     frpctl_header
+    echo "FRP Client"
+    echo "=========="
+    echo
     frpctl_print_client_menu
     echo
     if [[ "${FRP_CTL_TEST_MENU:-}" == "1" ]]; then
@@ -591,18 +679,21 @@ frpctl_client_menu() {
     fi
     choice="$(frpctl_read "Select: " "")" || return 1
     case "$choice" in
-      1) frpctl_run frp-client status ;;
-      2) frpctl_run frp-client list ;;
-      3) frpctl_run frp-client info ;;
-      4) frpctl_run frp-client ;;
+      1)
+        frpctl_run frp-client status
+        echo
+        frpctl_run frp-client info
+        ;;
+      2) frpctl_run frp-client ;;
+      3) frpctl_client_troubleshoot_menu ;;
+      4) frpctl_client_remote_menu ;;
       5) frpctl_client_update ;;
-      6) frpctl_dispatch doctor || true ;;
-      7) frpctl_repl_help ;;
-      8)
+      6) frpctl_lifecycle_dispatch uninstall ;;
+      7)
         echo "Exit."
         return 0
         ;;
-      *) echo "ERROR: select 1-8" >&2 ;;
+      *) echo "ERROR: select 1-7" >&2 ;;
     esac
   done
 }
@@ -1995,6 +2086,25 @@ frpctl_dispatch_canonical() {
       ;;
     update_frp) frpctl_require_server || return 1; frpctl_run frp-update $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
     restore_backup) frpctl_require_server || return 1; frpctl_run frp-restore "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("path",""))' "$result")" ;;
+    client_pause) frpctl_require_client || return 1; frpctl_lifecycle_dispatch pause ;;
+    client_resume) frpctl_require_client || return 1; frpctl_lifecycle_dispatch resume ;;
+    client_restart) frpctl_require_client || return 1; frpctl_lifecycle_dispatch restart ;;
+    client_test) frpctl_require_client || return 1; frpctl_lifecycle_dispatch test ;;
+    client_logs)
+      frpctl_require_client || return 1
+      # shellcheck disable=SC2086
+      frpctl_lifecycle_dispatch logs $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result")
+      ;;
+    client_support_bundle)
+      frpctl_require_client || return 1
+      # shellcheck disable=SC2086
+      frpctl_lifecycle_dispatch support-bundle $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result")
+      ;;
+    client_uninstall)
+      frpctl_require_client || return 1
+      # shellcheck disable=SC2086
+      frpctl_lifecycle_dispatch uninstall $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result")
+      ;;
     doctor)
       if ! type frp_doctor_main >/dev/null 2>&1; then
         echo "ERROR: doctor diagnostics are not installed on this host." >&2

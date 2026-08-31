@@ -264,3 +264,28 @@ them. `help legacy` lists them.
 | `status` / `version` | `show status` / `show version` |
 
 Direct `/usr/local/sbin/frp-*` tools are unchanged.
+
+---
+
+## Client lifecycle (client hosts)
+
+Canonical command: `sudo frpctl`. Friendly alias: `sudo frpcli` (identical behavior).
+
+```text
+pause
+resume
+restart
+test
+logs [--lines N] [--follow]
+support-bundle [--anonymize] [--output PATH]
+uninstall [--yes]
+```
+
+- **pause** stops `frpc` and records persistent local state; identity, services, and server reservations are preserved.
+- **resume** clears pause state and restores prior autostart semantics.
+- **restart** is refused while paused (`Use 'frpctl resume' to reconnect.`).
+- **test** is read-only; external public reachability is reported as `NOT TESTED` when it cannot be verified safely.
+- **support-bundle** never includes private keys, tokens, enrollment codes, or bootstrap tickets.
+- **uninstall** removes local software only. It is not `revoke client` (identity) or `release client` (ports).
+
+Root (or Administrator on Windows) is required for mutating lifecycle commands.

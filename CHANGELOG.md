@@ -61,6 +61,11 @@ from 2.1.0, newly generated Zero-touch / enrollment installer commands use the
   `GET /time` sync, stored `management_time_offset_sec`, and server-relative
   management timestamps (±300 s replay window unchanged; client OS clock not
   modified)
+- Client lifecycle: `frpctl pause|resume|restart|test|logs|support-bundle|uninstall` (canonical); `frpcli` friendly alias
+- Pause is persistent across reboot; update/apply do not auto-resume remote access
+- Support bundles use deterministic redaction; uninstall preserves server records and port reservations
+- Windows: `frpctl.cmd` / `frpcli.cmd` wrappers; uninstall wording uses **release** (not revoke) for ports
+
 - Windows TLS: enforce hostname/IP SAN verification on the pinned-.NET path (no `-or $true` bypass)
 - Windows zero-service tickets stay management-only (no automatic RDP)
 - `release` clears port reservations but keeps the management client record; `revoke` remains identity-only

@@ -826,6 +826,11 @@ sudo frpctl show status
 sudo frpctl show services
 sudo frpctl show info
 sudo frpctl doctor
+sudo frpctl pause          # stop remote access locally (identity/ports preserved)
+sudo frpctl resume         # restore remote access
+sudo frpctl test           # read-only connectivity check
+sudo frpctl support-bundle # redacted diagnostics for support
+sudo frpcli test           # same as frpctl (friendly alias)
 ```
 
 If those commands are healthy and the assigned public service port is reachable,

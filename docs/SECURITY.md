@@ -350,3 +350,14 @@ upgrade.
 A **2.0.0** client cannot speak FRP WSS. Switching the server to single-443
 requires **2.1.0+** clients and an Apply after cutover; it is not a silent
 transport upgrade.
+
+## 17. Client diagnostics and support bundles
+
+`frpctl test`, `frpctl logs`, and `frpctl support-bundle` are read-only or
+redacted outputs for operators and support. They must never include private
+management keys, FRP tokens, Enrollment Codes, Bootstrap Tickets, or raw
+Authorization headers. Support bundles are written with restrictive permissions
+(`0600` on Linux) and deterministic JSON/TOML redaction — not ad-hoc `grep`.
+
+`frpctl uninstall` removes local software only. It does not revoke management
+identity or release public port reservations on the server.

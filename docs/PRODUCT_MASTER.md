@@ -397,6 +397,23 @@ Public port는 사용자 입장에서 persistent resource로 취급한다.
 
 ---
 
+## 6.9 Client Local Remote Access Control
+
+> **Client owner retains local control over whether FRP remote access is active.**
+
+Client-side operations (canonical `sudo frpctl`, friendly alias `sudo frpcli`):
+
+- `pause` / `resume` — stop or restore outbound tunnel without touching identity, services, or server reservations
+- `restart` — recover the tunnel process without re-enroll (refused while paused)
+- `test` — read-only connectivity diagnostics
+- `logs` — project-managed frpc logs (redacted)
+- `support-bundle` — secret-free diagnostic archive for support
+- `uninstall` — remove local software only; server record and port reservations remain until an administrator **releases** them
+
+Pause is persistent across reboot. Update, apply, and doctor must not implicitly resume paused clients.
+
+---
+
 # 7. Target Users
 
 주요 사용자는 다음과 같다.
@@ -1595,6 +1612,7 @@ branch 또는 development 작업 중.
 - contextual help
 - shell-safe parser
 - Zero-touch UX 개선
+- client lifecycle: pause, resume, restart, test, logs, support-bundle, uninstall (`frpcli` alias)
 
 남은 작업은 Stable/Main 상태를 릴리즈 시점마다 재분류한다.
 

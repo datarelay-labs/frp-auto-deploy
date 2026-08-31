@@ -155,7 +155,11 @@ def canonical_verbs(role):
     if server:
         verbs.extend(["set", "unset", "create", "revoke", "purge", "release", "restore", "add", "remove"])
     if client:
-        verbs.extend(["add", "enable", "disable", "apply", "discard", "set"])
+        verbs.extend([
+            "add", "enable", "disable", "apply", "discard", "set",
+            "pause", "resume", "restart", "test", "logs",
+            "support-bundle", "uninstall",
+        ])
     return sorted(set(verbs))
 
 
@@ -366,6 +370,18 @@ def _root_help(role):
                 "  release service <ID> <service-id>",
                 "  release client <ID>",
                 "  restore backup <path>",
+            ]
+        )
+    if client:
+        lines.extend(
+            [
+                "  pause                Pause remote FRP access (local)",
+                "  resume               Resume remote FRP access",
+                "  restart              Restart frpc without re-enroll",
+                "  test                 Read-only connectivity test",
+                "  logs [--lines N] [--follow]",
+                "  support-bundle [--anonymize]",
+                "  uninstall [--yes]",
             ]
         )
     lines.extend(
@@ -884,6 +900,7 @@ def _concise_root(role):
             # Keep a stable everyday list for client-only hosts.
             keep = {
                 "show", "set", "add", "enable", "disable", "apply", "discard",
+                "pause", "resume", "restart", "test", "logs", "support-bundle", "uninstall",
                 "update", "doctor", "help", "menu", "history", "exit",
             }
             rows = extra + rows
@@ -923,6 +940,13 @@ def match(tokens, role, names=None, clients=None, groups=None):
         "disable": _match_enable_disable,
         "apply": lambda toks, role, names=None: {"status": "ok", "action": "apply"},
         "discard": lambda toks, role, names=None: {"status": "ok", "action": "discard"},
+        "pause": lambda toks, role, names=None: _match_client_lifecycle("pause", toks, role),
+        "resume": lambda toks, role, names=None: _match_client_lifecycle("resume", toks, role),
+        "restart": lambda toks, role, names=None: _match_client_lifecycle("restart", toks, role),
+        "test": lambda toks, role, names=None: _match_client_lifecycle("test", toks, role),
+        "logs": lambda toks, role, names=None: _match_client_lifecycle("logs", toks, role),
+        "support-bundle": lambda toks, role, names=None: _match_client_lifecycle("support-bundle", toks, role),
+        "uninstall": lambda toks, role, names=None: _match_client_lifecycle("uninstall", toks, role),
         "doctor": lambda toks, role, names=None: {"status": "ok", "action": "doctor", "passthrough": toks[1:]},
         "help": lambda toks, role, names=None: {"status": "ok", "action": "help", "passthrough": toks[1:]},
         "?": lambda toks, role, names=None: {"status": "ok", "action": "help", "passthrough": toks[1:]},
@@ -948,7 +972,62 @@ def match(tokens, role, names=None, clients=None, groups=None):
         return fn(tokens, role, names)
     if verb in ("enable", "disable", "apply", "discard") and not client:
         return {"status": "role", "need": "client", "command": verb}
+    if verb in (
+        "pause", "resume", "restart", "test", "logs", "support-bundle", "uninstall",
+    ) and not client:
+        return {"status": "role", "need": "client", "command": verb}
     return fn(tokens, role, names)
+
+
+def _match_client_lifecycle(verb, tokens, role):
+    client, _server = _role_parts(role)
+    if not client:
+        return {"status": "role", "need": "client", "command": verb}
+    rest = tokens[1:]
+    if verb in ("pause", "resume", "restart", "test") and rest:
+        return {
+            "status": "error",
+            "message": "Too many arguments for %s." % verb,
+        }
+    if verb == "logs":
+        allowed = {"--lines", "--follow"}
+        i = 0
+        while i < len(rest):
+            tok = rest[i]
+            if tok == "--lines":
+                if i + 1 >= len(rest):
+                    return {"status": "error", "message": "Missing value for --lines."}
+                if not re.fullmatch(r"[0-9]+", rest[i + 1]):
+                    return {"status": "error", "message": "Invalid --lines value."}
+                i += 2
+                continue
+            if tok == "--follow":
+                i += 1
+                continue
+            return {"status": "error", "message": "Unknown logs option: %s" % tok}
+    if verb == "support-bundle":
+        allowed = {"--anonymize", "--output"}
+        i = 0
+        while i < len(rest):
+            tok = rest[i]
+            if tok == "--anonymize":
+                i += 1
+                continue
+            if tok == "--output":
+                if i + 1 >= len(rest):
+                    return {"status": "error", "message": "Missing value for --output."}
+                i += 2
+                continue
+            return {"status": "error", "message": "Unknown support-bundle option: %s" % tok}
+    if verb == "uninstall":
+        for tok in rest:
+            if tok != "--yes":
+                return {"status": "error", "message": "Unknown uninstall option: %s" % tok}
+    return {
+        "status": "ok",
+        "action": "client_%s" % verb.replace("-", "_"),
+        "passthrough": rest,
+    }
 
 
 def _match_show(tokens, role, names=None):
@@ -1642,6 +1721,13 @@ def _tab_desc_map(line, role, names=None, clients=None):
         "disable": "Disable a local service",
         "apply": "Apply pending local changes",
         "discard": "Discard pending local changes",
+        "pause": "Pause remote FRP access",
+        "resume": "Resume remote FRP access",
+        "restart": "Restart frpc connection",
+        "test": "Run connectivity diagnostics",
+        "logs": "Show frpc logs",
+        "support-bundle": "Create redacted support bundle",
+        "uninstall": "Remove local client software",
         "quit": "Leave frpctl",
         "q": "Leave frpctl",
     }

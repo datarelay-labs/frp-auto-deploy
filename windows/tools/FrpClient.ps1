@@ -6,7 +6,8 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('start', 'stop', 'status', 'info', 'update', 'uninstall', 'doctor', 'autostart', 'help')]
+    [ValidateSet('start', 'stop', 'status', 'info', 'update', 'uninstall', 'doctor', 'autostart',
+        'pause', 'resume', 'restart', 'test', 'logs', 'support-bundle', 'help')]
     [string]$Command = 'help',
 
     [switch]$Check,
@@ -40,7 +41,7 @@ function Import-FrpWindowsModules {
     }
     foreach ($mod in @(
             'FrpPaths.ps1', 'FrpCrypto.ps1', 'FrpTls.ps1', 'FrpState.ps1',
-            'FrpConfig.ps1', 'FrpProcess.ps1', 'FrpBootstrap.ps1'
+            'FrpConfig.ps1', 'FrpProcess.ps1', 'FrpBootstrap.ps1', 'FrpLifecycle.ps1'
         )) {
         . (Join-Path $libDir $mod)
     }
@@ -58,6 +59,12 @@ frp-client (Windows)
   status      Running / enrolled summary
   info        Connection details (RDP/SSH/HTTP)
   update      Update frpc.exe (preserve identity/ports); --check for dry run
+  pause       Pause remote FRP access (identity/ports preserved)
+  resume      Resume remote FRP access
+  restart     Restart frpc without re-enroll
+  test        Read-only connectivity test
+  logs        Show frpc.log [--lines N] [--follow]
+  support-bundle  Create diagnostic bundle (no secrets)
   uninstall   Remove local software (SERVER RESERVATIONS PRESERVED)
   doctor      Basic local checks
   autostart   Optional autostart helper (stub)
@@ -173,7 +180,7 @@ function Invoke-FrpClientUpdate {
         if ($env:FRP_WINDOWS_FAIL_AFTER_METADATA_WRITE -eq '1') {
             throw 'ERROR: simulated failure after metadata write (FRP_WINDOWS_FAIL_AFTER_METADATA_WRITE=1)'
         }
-        if ($wasRunning) {
+        if ($wasRunning -and -not (Test-FrpRemoteAccessPaused)) {
             if ($env:FRP_WINDOWS_FAIL_BEFORE_RESTART -eq '1') {
                 throw 'ERROR: simulated failure before restart (FRP_WINDOWS_FAIL_BEFORE_RESTART=1)'
             }
@@ -196,7 +203,7 @@ function Invoke-FrpClientUpdate {
                 }
                 Copy-Item -LiteralPath $bak -Destination $dest -Force
             }
-            if ($wasRunning) {
+            if ($wasRunning -and -not (Test-FrpRemoteAccessPaused)) {
                 Start-FrpClient | Out-Null
             }
             Write-Host 'Rollback restored snapshotted files and prior run state.'
@@ -216,7 +223,7 @@ function Invoke-FrpClientUpdate {
 function Invoke-FrpClientUninstall {
     Write-Host 'LOCAL SOFTWARE REMOVED, SERVER RESERVATIONS PRESERVED'
     Write-Host 'This removes local frpc binaries, config, state, and tools.'
-    Write-Host 'Public port reservations on the server remain until an administrator revokes them.'
+    Write-Host 'Public port reservations on the server remain until an administrator releases them.'
     try { Stop-FrpClient | Out-Null } catch { }
     $root = Get-FrpWindowsRoot
     if (Test-Path -LiteralPath $root) {
@@ -289,6 +296,17 @@ switch ($Command) {
     }
     'info' { exit (Show-FrpClientInfo) }
     'update' { exit (Invoke-FrpClientUpdate -CheckOnly:$Check) }
+    'pause' { exit (Invoke-FrpPauseRemoteAccess) }
+    'resume' { exit (Invoke-FrpResumeRemoteAccess) }
+    'restart' { exit (Invoke-FrpRestartConnection) }
+    'test' { exit (Invoke-FrpClientTest) }
+    'logs' {
+        $lines = 100
+        $follow = $false
+        if ($env:FRP_LOG_LINES) { $lines = [int]$env:FRP_LOG_LINES }
+        exit (Show-FrpClientLogs -Lines $lines -Follow:$follow)
+    }
+    'support-bundle' { exit (Invoke-FrpSupportBundle) }
     'uninstall' { exit (Invoke-FrpClientUninstall) }
     'doctor' { exit (Invoke-FrpClientDoctor) }
     'autostart' { exit (Invoke-FrpClientAutostart) }
