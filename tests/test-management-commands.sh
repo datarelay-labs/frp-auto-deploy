@@ -32,6 +32,10 @@ reg_path.write_text(json.dumps({
       "hostname": "dev-dp-mirror",
       "created_at": "2026-08-26T00:00:00Z",
       "last_enrolled_at": "2026-08-26T01:00:00Z",
+      "mgmt_status": "enrolled",
+      "mgmt_pubkey": "pk-aabb",
+      "mgmt_fingerprint": "fp-aabb",
+      "mgmt_mac_key": "mac-aabb",
       "services": {
         "ssh": {
           "name": "SSH",
@@ -67,6 +71,10 @@ reg_path.write_text(json.dumps({
       "hostname": "client-b",
       "created_at": "2026-08-26T00:00:00Z",
       "last_enrolled_at": "2026-08-26T02:00:00Z",
+      "mgmt_status": "enrolled",
+      "mgmt_pubkey": "pk-eeff",
+      "mgmt_fingerprint": "fp-eeff",
+      "mgmt_mac_key": "mac-eeff",
       "services": {
         "http": {
           "name": "HTTP",
@@ -94,13 +102,15 @@ grep -q 'ssh:6002' "$OUT" || fail "clients ssh summary"
 grep -q 'grafana:6003' "$OUT" || fail "clients grafana summary"
 grep -q 'api:6004 (reserved)' "$OUT" || fail "clients reserved service"
 grep -q 'http:6005' "$OUT" || fail "clients http summary"
+grep -q 'Use CLIENT ID for set/unset/revoke/release.' "$OUT" || fail "clients mutation footer"
+grep -q 'show/info only' "$OUT" || fail "clients read-only shortcut footer"
 if grep -qE 'ssh_port|https_port' "$OUT"; then
   fail "clients leaked legacy fields"
 fi
 pass "frp-clients generic"
 
 INFO="$WORKDIR/info.out"
-python3 "$ROOT/tools/frp-client-info" dev-dp-mirror >"$INFO"
+python3 "$ROOT/tools/frp-client-info" aabbccdd >"$INFO"
 grep -q 'Hostname' "$INFO" || fail "info hostname field"
 grep -q 'dev-dp-mirror' "$INFO" || fail "info hostname"
 grep -q 'Service count' "$INFO" || fail "info service count"
@@ -108,7 +118,7 @@ grep -q '2' "$INFO" || fail "info enabled count"
 if grep -q '127.0.0.1:22' "$INFO"; then
   fail "overview dumped service detail"
 fi
-python3 "$ROOT/tools/frp-client-info" dev-dp-mirror services >"$WORKDIR/info-svc.out"
+python3 "$ROOT/tools/frp-client-info" aabbccdd services >"$WORKDIR/info-svc.out"
 grep -q '127.0.0.1:22' "$WORKDIR/info-svc.out" || fail "info ssh target"
 grep -q '203.0.113.10:6002' "$WORKDIR/info-svc.out" || fail "info ssh public"
 grep -q 'ssh -p 6002 aella@203.0.113.10' "$WORKDIR/info-svc.out" || fail "info ssh connect"
@@ -116,58 +126,104 @@ grep -q '127.0.0.1:3000' "$WORKDIR/info-svc.out" || fail "info grafana target"
 if grep -q '6004' "$WORKDIR/info-svc.out"; then
   fail "info should omit disabled service"
 fi
+# read-only still accepts hostname
+python3 "$ROOT/tools/frp-client-info" dev-dp-mirror >"$WORKDIR/info-host.out"
+grep -q 'aabbccdd' "$WORKDIR/info-host.out" || fail "read-only hostname shortcut"
 pass "frp-client-info generic"
 
 cp "$TREE/var/lib/frp-auto-deploy/registry.json" "$WORKDIR/registry.before"
-printf 'nope\n' | python3 "$ROOT/tools/frp-release-client" client-b >"$WORKDIR/cancel.out" 2>"$WORKDIR/cancel.err" && fail "cancel should fail"
+printf 'nope\n' | python3 "$ROOT/tools/frp-release-client" eeff0011 >"$WORKDIR/cancel.out" 2>"$WORKDIR/cancel.err" && fail "cancel should fail"
 python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" "$WORKDIR/registry.before" <<'PY'
 import sys
 from pathlib import Path
 assert Path(sys.argv[1]).read_bytes() == Path(sys.argv[2]).read_bytes()
 PY
-printf 'RELEASE\n' | python3 "$ROOT/tools/frp-release-client" client-b >"$WORKDIR/release.out"
-python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY' || fail "release did not drop client-b"
+printf 'RELEASE\n' | python3 "$ROOT/tools/frp-release-client" eeff0011 >"$WORKDIR/release.out"
+python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY' || fail "release client must keep record"
 import json,sys
 from pathlib import Path
 state=json.loads(Path(sys.argv[1]).read_text())
-assert 'eeff0011' not in state['clients']
+assert 'eeff0011' in state['clients']
+client=state['clients']['eeff0011']
+assert client['services'] == {}
+assert client.get('mgmt_status')=='enrolled'
+assert client.get('mgmt_pubkey')=='pk-eeff'
+assert client.get('mgmt_fingerprint')=='fp-eeff'
+assert client.get('mgmt_mac_key')=='mac-eeff'
 assert 'aabbccdd' in state['clients']
 assert state['clients']['aabbccdd']['services']['ssh']['remote_port']==6002
 assert state['clients']['aabbccdd']['services']['api']['remote_port']==6004
 PY
 grep -q 'http: 6005' "$WORKDIR/release.out" || fail "release listed service port"
-pass "frp-release-client generic"
+pass "frp-release-client keeps identity"
 
-printf 'nope\n' | python3 "$ROOT/tools/frp-release-service" dev-dp-mirror grafana >"$WORKDIR/svc-cancel.out" 2>"$WORKDIR/svc-cancel.err" && fail "service release cancel should fail"
+printf 'nope\n' | python3 "$ROOT/tools/frp-release-service" aabbccdd grafana >"$WORKDIR/svc-cancel.out" 2>"$WORKDIR/svc-cancel.err" && fail "service release cancel should fail"
 python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY' || fail "cancel mutated grafana"
 import json,sys
 from pathlib import Path
 state=json.loads(Path(sys.argv[1]).read_text())
 assert 'grafana' in state['clients']['aabbccdd']['services']
 PY
-printf 'RELEASE\n' | python3 "$ROOT/tools/frp-release-service" dev-dp-mirror grafana >"$WORKDIR/svc-release.out"
-python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY' || fail "service release"
+printf 'RELEASE\n' | python3 "$ROOT/tools/frp-release-service" aabbccdd grafana >"$WORKDIR/svc-release.out"
+python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY' || fail "release one of multiple services"
 import json,sys
 from pathlib import Path
 state=json.loads(Path(sys.argv[1]).read_text())
-svc=state['clients']['aabbccdd']['services']
+client=state['clients']['aabbccdd']
+svc=client['services']
 assert 'grafana' not in svc
 assert svc['ssh']['remote_port']==6002
 assert svc['api']['remote_port']==6004
+assert client.get('mgmt_status')=='enrolled'
+assert client.get('mgmt_pubkey')=='pk-aabb'
+assert client.get('mgmt_fingerprint')=='fp-aabb'
+assert client.get('mgmt_mac_key')=='mac-aabb'
 PY
 grep -q 'service grafana' "$WORKDIR/svc-release.out" || fail "service release output"
-pass "frp-release-service generic"
+pass "frp-release-service preserves others"
 
-printf 'REVOKE\n' | python3 "$ROOT/tools/frp-revoke-client" dev-dp-mirror >"$WORKDIR/revoke.out"
+# Release remaining services one by one → last service leaves empty services
+printf 'RELEASE\n' | python3 "$ROOT/tools/frp-release-service" aabbccdd ssh >"$WORKDIR/svc-ssh.out"
+printf 'RELEASE\n' | python3 "$ROOT/tools/frp-release-service" aabbccdd api >"$WORKDIR/svc-api.out"
+python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY' || fail "release last service keeps record"
+import json,sys
+from pathlib import Path
+state=json.loads(Path(sys.argv[1]).read_text())
+assert 'aabbccdd' in state['clients']
+client=state['clients']['aabbccdd']
+assert client['services'] == {}
+assert client.get('mgmt_status')=='enrolled'
+assert client.get('mgmt_pubkey')=='pk-aabb'
+assert client.get('mgmt_fingerprint')=='fp-aabb'
+assert client.get('mgmt_mac_key')=='mac-aabb'
+PY
+pass "frp-release-service last keeps identity"
+
+# Restore services for revoke coverage
+python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY'
+import json,sys
+from pathlib import Path
+p=Path(sys.argv[1])
+state=json.loads(p.read_text())
+state['clients']['aabbccdd']['services']={
+  'ssh':{'name':'SSH','protocol':'tcp','local_ip':'127.0.0.1','local_port':22,'remote_port':6002,'preset':'ssh','ssh_user':'aella','enabled':True},
+  'api':{'name':'API','protocol':'tcp','local_ip':'127.0.0.1','local_port':8080,'remote_port':6004,'preset':'custom','enabled':False},
+}
+p.write_text(json.dumps(state, indent=2, sort_keys=True)+'\n')
+PY
+
+printf 'REVOKE\n' | python3 "$ROOT/tools/frp-revoke-client" aabbccdd >"$WORKDIR/revoke.out"
 python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY' || fail "revoke"
 import json,sys
 from pathlib import Path
 state=json.loads(Path(sys.argv[1]).read_text())
 client=state['clients']['aabbccdd']
 assert client.get('mgmt_status')=='revoked'
+assert client.get('mgmt_mac_key') is None
+assert client.get('mgmt_pubkey')=='pk-aabb'
+assert client.get('mgmt_fingerprint')=='fp-aabb'
 assert client['services']['ssh']['remote_port']==6002
 assert client['services']['api']['remote_port']==6004
-assert 'grafana' not in client['services']
 PY
 grep -q 'Revoking management identity' "$WORKDIR/revoke.out" || fail "revoke header"
 grep -q 'ssh: 6002' "$WORKDIR/revoke.out" || fail "revoke listed reservation"
@@ -176,16 +232,21 @@ if grep -qi 'private key\|mgmt_mac_key\|BEGIN PUBLIC' "$WORKDIR/revoke.out"; the
 fi
 pass "frp-revoke-client keeps reservations"
 
-printf 'RELEASE\n' | python3 "$ROOT/tools/frp-release-client" dev-dp-mirror --force >"$WORKDIR/revoke-release.out"
+printf 'RELEASE\n' | python3 "$ROOT/tools/frp-release-client" aabbccdd --force >"$WORKDIR/revoke-release.out"
 python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY' || fail "release after revoke"
 import json,sys
 from pathlib import Path
 state=json.loads(Path(sys.argv[1]).read_text())
-assert 'aabbccdd' not in state['clients']
+assert 'aabbccdd' in state['clients']
+client=state['clients']['aabbccdd']
+assert client['services'] == {}
+assert client.get('mgmt_status')=='revoked'
+assert client.get('mgmt_pubkey')=='pk-aabb'
+assert client.get('mgmt_fingerprint')=='fp-aabb'
 PY
 pass "admin release still works after revoke"
 
-# Restore a client so status still has one remaining host (client-b was already released).
+# Restore clients for legacy / status coverage
 python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY'
 import json,sys
 from pathlib import Path
@@ -193,6 +254,10 @@ p=Path(sys.argv[1])
 state=json.loads(p.read_text())
 state['clients']['aabbccdd']={
   'hostname':'dev-dp-mirror',
+  'mgmt_status':'enrolled',
+  'mgmt_pubkey':'pk-aabb',
+  'mgmt_fingerprint':'fp-aabb',
+  'mgmt_mac_key':'mac-aabb',
   'services':{
     'ssh':{'name':'SSH','protocol':'tcp','local_ip':'127.0.0.1','local_port':22,'remote_port':6002,'preset':'ssh','ssh_user':'aella','enabled':True},
     'api':{'name':'API','protocol':'tcp','local_ip':'127.0.0.1','local_port':8080,'remote_port':6004,'preset':'custom','enabled':False},
@@ -204,6 +269,8 @@ state['clients']['legacy00aa']={
     'ssh':{'name':'SSH','protocol':'tcp','local_ip':'127.0.0.1','local_port':22,'remote_port':6010,'preset':'ssh','enabled':True},
   },
 }
+# drop empty eeff0011 so status counts stay simple
+state['clients'].pop('eeff0011', None)
 p.write_text(json.dumps(state, indent=2, sort_keys=True)+'\n')
 PY
 
@@ -222,19 +289,20 @@ assert state['clients']['legacy00aa']['services']['ssh']['remote_port']==6010
 assert 'ssh_user' not in state['clients']['legacy00aa']['services']['ssh']
 PY
 cp "$TREE/var/lib/frp-auto-deploy/registry.json" "$WORKDIR/legacy.before"
-printf 'nope\n' | python3 "$ROOT/tools/frp-release-client" legacy-ssh \
+printf 'nope\n' | python3 "$ROOT/tools/frp-release-client" legacy00aa \
   >"$WORKDIR/legacy-cancel.out" 2>"$WORKDIR/legacy-cancel.err" && fail "legacy cancel should fail"
 cmp -s "$TREE/var/lib/frp-auto-deploy/registry.json" "$WORKDIR/legacy.before" ||
   fail "cancelled legacy release mutated registry"
 pass "legacy SSH readable without auto-release"
 
-printf 'RELEASE\n' | python3 "$ROOT/tools/frp-release-service" legacy-ssh ssh \
+printf 'RELEASE\n' | python3 "$ROOT/tools/frp-release-service" legacy00aa ssh \
   >"$WORKDIR/legacy-svc-release.out"
 python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY' || fail "explicit legacy service release"
 import json,sys
 from pathlib import Path
 state=json.loads(Path(sys.argv[1]).read_text())
-assert 'legacy00aa' not in state['clients']
+assert 'legacy00aa' in state['clients']
+assert state['clients']['legacy00aa']['services'] == {}
 assert state['clients']['aabbccdd']['services']['ssh']['remote_port']==6002
 assert all(
     svc.get('remote_port') != 6010
@@ -258,13 +326,14 @@ state['clients']['legacy00aa']={
 }
 p.write_text(json.dumps(state, indent=2, sort_keys=True)+'\n')
 PY
-printf 'RELEASE\n' | python3 "$ROOT/tools/frp-release-client" legacy-ssh --force \
+printf 'RELEASE\n' | python3 "$ROOT/tools/frp-release-client" legacy00aa --force \
   >"$WORKDIR/legacy-force-release.out"
 python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY' || fail "forced legacy client release"
 import json,sys
 from pathlib import Path
 state=json.loads(Path(sys.argv[1]).read_text())
-assert 'legacy00aa' not in state['clients']
+assert 'legacy00aa' in state['clients']
+assert state['clients']['legacy00aa']['services'] == {}
 assert 'aabbccdd' in state['clients']
 assert state['clients']['aabbccdd']['services']['ssh']['remote_port']==6002
 assert all(
@@ -275,6 +344,17 @@ assert all(
 )
 PY
 pass "legacy force release reclaims port"
+
+# Mutation selector rejects label/hostname
+set +e
+printf 'RELEASE\n' | python3 "$ROOT/tools/frp-release-client" dev-dp-mirror --force \
+  >"$WORKDIR/mut-host.out" 2>"$WORKDIR/mut-host.err"
+host_rc=$?
+set -e
+[[ "$host_rc" -ne 0 ]] || fail "release by hostname should fail"
+grep -q 'mutation commands require immutable CLIENT ID' "$WORKDIR/mut-host.err" \
+  || fail "hostname mutation error"
+pass "mutation rejects hostname"
 
 # shellcheck source=../lib/frp-common.sh
 . "$ROOT/lib/frp-common.sh"
@@ -291,8 +371,9 @@ if ! env \
   "$ROOT/tools/frp-server-status" >"$STATUS_OUT"; then
   fail "status exited non-zero"
 fi
-grep -q 'Clients         : 1' "$STATUS_OUT" || fail "status client count after release"
-# reserved 6000 + ssh 6002 + api 6004 = 3 (grafana released)
+# aabbccdd (with services) + legacy00aa (empty services after release) = 2
+grep -q 'Clients         : 2' "$STATUS_OUT" || fail "status client count after release"
+# reserved 6000 + ssh 6002 + api 6004 = 3 (legacy port released)
 grep -q 'Reserved ports  : 3' "$STATUS_OUT" || fail "status reserved ports"
 pass "frp-server-status generic"
 

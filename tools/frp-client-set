@@ -85,7 +85,7 @@ def fail(message, code=2):
 parser = argparse.ArgumentParser(
     description='Set server-owned client metadata without touching identity or ports'
 )
-parser.add_argument('query', help='label, unique hostname, or machine-id prefix')
+parser.add_argument('query', help='immutable CLIENT ID (exact registry key)')
 parser.add_argument('--label', default=None, help='new administrator label')
 parser.add_argument('--note', default=None, help='new administrator description')
 parser.add_argument(
@@ -157,7 +157,7 @@ lock_fd = lock_registry(path)
 try:
     state = json.loads(path.read_text())
     require_v2(state)
-    mid, client = CREG.resolve_client_or_exit(state, args.query)
+    mid, client = CREG.resolve_client_id_only_or_exit(state, args.query)
     hostname_before = client.get('hostname')
     old_label = str(client.get('label') or '').strip()
     all_mids = list((state.get('clients') or {}))

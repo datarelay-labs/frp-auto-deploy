@@ -389,6 +389,30 @@ def resolve_client(state, query):
     raise ClientLookupError('client not found')
 
 
+def resolve_client_id_only(state, query):
+    """Resolve by immutable CLIENT ID only (exact registry key or unique short id).
+
+    Labels, hostnames, and arbitrary machine-id prefixes are rejected. Mutation
+    tools must use this; read-only tools may keep resolve_client shortcuts.
+    """
+    query = '' if query is None else str(query).strip()
+    if not query:
+        raise ClientLookupError('client identifier is required')
+    clients = sorted_clients(state)
+    by_id = {mid: client for mid, client in clients}
+    if query in by_id:
+        return query, by_id[query]
+    all_mids = list(by_id)
+    short_matches = [
+        (mid, by_id[mid])
+        for mid in all_mids
+        if unique_short_id(mid, all_mids) == query
+    ]
+    if len(short_matches) == 1:
+        return short_matches[0]
+    raise ClientLookupError('mutation requires immutable client id')
+
+
 def resolve_client_or_exit(state, query):
     try:
         return resolve_client(state, query)
@@ -404,6 +428,15 @@ def resolve_client_or_exit(state, query):
             sys.stderr.write('Run:\n  show clients\n\nor:\n  show client ?\n')
         else:
             sys.stderr.write('ERROR: %s\n' % exc)
+        raise SystemExit(1)
+
+
+def resolve_client_id_only_or_exit(state, query):
+    try:
+        return resolve_client_id_only(state, query)
+    except ClientLookupError:
+        sys.stderr.write('ERROR: mutation commands require immutable CLIENT ID.\n')
+        sys.stderr.write("Use 'show clients' to find the CLIENT ID.\n")
         raise SystemExit(1)
 
 

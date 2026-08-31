@@ -392,7 +392,7 @@ def _show_help(rest, role):
             "  show client <ID> services\n"
             "  show client <ID> tags\n\n"
             "CLIENT ID is the immutable selector. A unique label or hostname\n"
-            "is also accepted as a shortcut.\n\n"
+            "is also accepted as a shortcut for show only.\n\n"
             "Examples:\n"
             "  show client 24cd7856\n"
             "  show client 24cd7856 services\n"
@@ -409,6 +409,7 @@ def _set_help(rest, role):
             "  set client <ID> label <value>\n"
             "  set client <ID> note <value>\n"
             "  set client <ID> tag <key> <value>\n\n"
+            "Requires immutable CLIENT ID (not label or hostname).\n\n"
             "Examples:\n"
             "  set client 24cd7856 label production\n"
             "  set client 24cd7856 note \"Seoul production gateway\"\n"
@@ -491,7 +492,9 @@ def _verb_help(verb, role):
             "Release\n=======\n\nUsage:\n"
             "  release service <ID> <service-id>\n"
             "  release client <ID>\n\n"
-            "release returns public port reservations. It is not revoke or unset.\n"
+            "release returns public port reservations and keeps the client\n"
+            "management record (services become empty). It is not revoke or unset.\n"
+            "Mutation commands require immutable CLIENT ID.\n"
         ),
         "restore": "Restore\n=======\n\nUsage:\n  restore backup <path>\n",
         "add": (
@@ -722,7 +725,7 @@ def _concise_root(role):
         ("unset", "Remove configuration values"),
         ("create", "Create enrollment or backup"),
         ("revoke", "Revoke management access"),
-        ("release", "Return reserved public ports"),
+        ("release", "Return reserved public ports (keep client record)"),
         ("update", "Update project or FRP"),
         ("restore", "Restore backup"),
         ("doctor", "Run health checks"),
@@ -1192,7 +1195,7 @@ def _tab_desc_map(line, role, names=None, clients=None):
         "unset": "Remove configuration values",
         "create": "Create zero-touch enrollment or backup",
         "revoke": "Revoke management access",
-        "release": "Return reserved public ports",
+        "release": "Return reserved public ports (keep client record)",
         "update": "Update project or FRP",
         "restore": "Restore backup",
         "doctor": "Run health checks",
@@ -1269,7 +1272,7 @@ def _tab_desc_map(line, role, names=None, clients=None):
         }, "named"
     if verb == "release" and len(filled) == 1:
         return {
-            "client": "Release all reserved ports for a client",
+            "client": "Release all reserved ports (keep client record)",
             "service": "Release one service reservation",
         }, "named"
     if verb == "update" and len(filled) == 1:

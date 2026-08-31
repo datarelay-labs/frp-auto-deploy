@@ -176,14 +176,14 @@ pass "FRPCTL_ENROLL_ONE_LINE_DISPATCH"
 grep -qx 'DISPATCH frp-client-info customer-dp' "$WORKDIR/server-info.out" || fail "client-info dispatch"
 "$CTL" client customer-dp >"$WORKDIR/server-client.out"
 grep -qx 'DISPATCH frp-client-info customer-dp' "$WORKDIR/server-client.out" || fail "client alias dispatch"
-"$CTL" revoke-client customer-dp >"$WORKDIR/server-revoke.out"
-grep -qx 'DISPATCH frp-revoke-client customer-dp' "$WORKDIR/server-revoke.out" || fail "revoke dispatch"
-"$CTL" revoke customer-dp >"$WORKDIR/server-revoke2.out"
-grep -qx 'DISPATCH frp-revoke-client customer-dp' "$WORKDIR/server-revoke2.out" || fail "revoke alias dispatch"
-"$CTL" release-service customer-dp grafana >"$WORKDIR/server-relsvc.out"
-grep -qx 'DISPATCH frp-release-service customer-dp grafana' "$WORKDIR/server-relsvc.out" || fail "release-service dispatch"
-"$CTL" release-client customer-dp >"$WORKDIR/server-relcli.out"
-grep -qx 'DISPATCH frp-release-client customer-dp' "$WORKDIR/server-relcli.out" || fail "release-client dispatch"
+"$CTL" revoke-client aabbccdd0011 >"$WORKDIR/server-revoke.out"
+grep -qx 'DISPATCH frp-revoke-client aabbccdd0011' "$WORKDIR/server-revoke.out" || fail "revoke dispatch"
+"$CTL" revoke aabbccdd0011 >"$WORKDIR/server-revoke2.out"
+grep -qx 'DISPATCH frp-revoke-client aabbccdd0011' "$WORKDIR/server-revoke2.out" || fail "revoke alias dispatch"
+"$CTL" release-service aabbccdd0011 grafana >"$WORKDIR/server-relsvc.out"
+grep -qx 'DISPATCH frp-release-service aabbccdd0011 grafana' "$WORKDIR/server-relsvc.out" || fail "release-service dispatch"
+"$CTL" release-client aabbccdd0011 >"$WORKDIR/server-relcli.out"
+grep -qx 'DISPATCH frp-release-client aabbccdd0011' "$WORKDIR/server-relcli.out" || fail "release-client dispatch"
 "$CTL" update >"$WORKDIR/server-update.out"
 grep -qx 'DISPATCH frp-update' "$WORKDIR/server-update.out" || fail "server update dispatch"
 unset FRP_CTL_DRY_RUN
@@ -311,16 +311,16 @@ run_repl "$SERVER" "$WORKDIR/server-cmds.out" \
   clients \
   "client dp-os-upgrade" \
   enroll \
-  "revoke dp-os-upgrade" \
-  "release-service dp-os-upgrade e2e-ssh" \
-  "release-client dp-os-upgrade" \
+  "revoke aabbccdd0011" \
+  "release-service aabbccdd0011 e2e-ssh" \
+  "release-client aabbccdd0011" \
   exit || fail "server cmds"
 grep -q 'DISPATCH frp-clients' "$WORKDIR/server-cmds.out" || fail "repl clients"
 grep -q 'DISPATCH frp-client-info dp-os-upgrade' "$WORKDIR/server-cmds.out" || fail "repl client info"
 grep -q 'DISPATCH frp-create-client' "$WORKDIR/server-cmds.out" || fail "repl enroll"
-grep -q 'DISPATCH frp-revoke-client dp-os-upgrade' "$WORKDIR/server-cmds.out" || fail "repl revoke"
-grep -q 'DISPATCH frp-release-service dp-os-upgrade e2e-ssh' "$WORKDIR/server-cmds.out" || fail "repl release-service"
-grep -q 'DISPATCH frp-release-client dp-os-upgrade' "$WORKDIR/server-cmds.out" || fail "repl release-client"
+grep -q 'DISPATCH frp-revoke-client aabbccdd0011' "$WORKDIR/server-cmds.out" || fail "repl revoke"
+grep -q 'DISPATCH frp-release-service aabbccdd0011 e2e-ssh' "$WORKDIR/server-cmds.out" || fail "repl release-service"
+grep -q 'DISPATCH frp-release-client aabbccdd0011' "$WORKDIR/server-cmds.out" || fail "repl release-client"
 [[ "$(prompt_count "$WORKDIR/server-cmds.out")" -ge 6 ]] || fail "server cmds returned to prompt"
 pass "FRPCTL_REPL_SERVER_CLIENTS"
 pass "FRPCTL_REPL_SERVER_CLIENT_INFO"
@@ -479,20 +479,20 @@ export FRP_CTL_DRY_RUN=1
 grep -qx 'DISPATCH frp-clients' "$WORKDIR/show-clients.out" || fail "show clients"
 "$CTL" show client customer-dp >"$WORKDIR/show-client.out"
 grep -qx 'DISPATCH frp-client-info customer-dp overview' "$WORKDIR/show-client.out" || fail "show client"
-"$CTL" set client customer-dp label production >"$WORKDIR/set-label.out"
-grep -qx 'DISPATCH frp-client-set customer-dp --label production' "$WORKDIR/set-label.out" || fail "set client label"
-"$CTL" set client customer-dp tag env=oci >"$WORKDIR/set-tag.out"
-grep -qx 'DISPATCH frp-client-set customer-dp --tag env=oci' "$WORKDIR/set-tag.out" || fail "set client tag"
-"$CTL" unset client customer-dp label >"$WORKDIR/unset-label.out"
-grep -qx 'DISPATCH frp-client-set customer-dp --clear-label' "$WORKDIR/unset-label.out" || fail "unset label"
-"$CTL" unset client customer-dp tag env >"$WORKDIR/unset-tag.out"
-grep -qx 'DISPATCH frp-client-set customer-dp --remove-tag env' "$WORKDIR/unset-tag.out" || fail "unset tag"
+"$CTL" set client aabbccdd0011 label production >"$WORKDIR/set-label.out"
+grep -qx 'DISPATCH frp-client-set aabbccdd0011 --label production' "$WORKDIR/set-label.out" || fail "set client label"
+"$CTL" set client aabbccdd0011 tag env=oci >"$WORKDIR/set-tag.out"
+grep -qx 'DISPATCH frp-client-set aabbccdd0011 --tag env=oci' "$WORKDIR/set-tag.out" || fail "set client tag"
+"$CTL" unset client aabbccdd0011 label >"$WORKDIR/unset-label.out"
+grep -qx 'DISPATCH frp-client-set aabbccdd0011 --clear-label' "$WORKDIR/unset-label.out" || fail "unset label"
+"$CTL" unset client aabbccdd0011 tag env >"$WORKDIR/unset-tag.out"
+grep -qx 'DISPATCH frp-client-set aabbccdd0011 --remove-tag env' "$WORKDIR/unset-tag.out" || fail "unset tag"
 "$CTL" create enrollment --ssh --ssh-user aella --label dp01 >"$WORKDIR/create-enroll.out"
 grep -qx 'DISPATCH frp-create-client --ssh --ssh-user aella --label dp01' "$WORKDIR/create-enroll.out" || fail "create enrollment"
-"$CTL" revoke client customer-dp >"$WORKDIR/revoke-c.out"
-grep -qx 'DISPATCH frp-revoke-client customer-dp' "$WORKDIR/revoke-c.out" || fail "revoke client"
-"$CTL" release service customer-dp ssh >"$WORKDIR/rel-svc.out"
-grep -qx 'DISPATCH frp-release-service customer-dp ssh' "$WORKDIR/rel-svc.out" || fail "release service"
+"$CTL" revoke client aabbccdd0011 >"$WORKDIR/revoke-c.out"
+grep -qx 'DISPATCH frp-revoke-client aabbccdd0011' "$WORKDIR/revoke-c.out" || fail "revoke client"
+"$CTL" release service aabbccdd0011 ssh >"$WORKDIR/rel-svc.out"
+grep -qx 'DISPATCH frp-release-service aabbccdd0011 ssh' "$WORKDIR/rel-svc.out" || fail "release service"
 "$CTL" update project --check >"$WORKDIR/upd-proj.out"
 grep -qx 'DISPATCH frp-project-update --check' "$WORKDIR/upd-proj.out" || fail "update project"
 "$CTL" update frp --check >"$WORKDIR/upd-frp.out"
@@ -505,16 +505,16 @@ pass "FRPCTL_CREATE_COMMANDS"
 pass "FRPCTL_LIFECYCLE_COMMANDS"
 pass "FRPCTL_UPDATE_COMMANDS"
 
-run_repl "$SERVER" "$WORKDIR/incomplete.out" "set client oci-e2e-renamed" exit || fail "incomplete set"
+run_repl "$SERVER" "$WORKDIR/incomplete.out" "set client aabbccdd0011" exit || fail "incomplete set"
 grep -q 'Missing client setting' "$WORKDIR/incomplete.out" || fail "incomplete message"
 grep -q 'set client <ID> label <value>' "$WORKDIR/incomplete.out" || fail "incomplete usage"
 pass "FRPCTL_INCOMPLETE_SET"
 
 export FRP_CTL_DRY_RUN=1
-run_repl "$SERVER" "$WORKDIR/quoted.out" 'set client dp01 note "OCI E2E client"' exit || fail "quoted note"
-grep -q 'DISPATCH frp-client-set dp01 --note OCI E2E client' "$WORKDIR/quoted.out" || fail "quoted note dispatch"
-run_repl "$SERVER" "$WORKDIR/singleq.out" "set client dp01 label 'Seoul DP'" exit || fail "single quote"
-grep -q "DISPATCH frp-client-set dp01 --label Seoul DP" "$WORKDIR/singleq.out" || fail "single quote dispatch"
+run_repl "$SERVER" "$WORKDIR/quoted.out" 'set client aabbccdd0011 note "OCI E2E client"' exit || fail "quoted note"
+grep -q 'DISPATCH frp-client-set aabbccdd0011 --note OCI E2E client' "$WORKDIR/quoted.out" || fail "quoted note dispatch"
+run_repl "$SERVER" "$WORKDIR/singleq.out" "set client aabbccdd0011 label 'Seoul DP'" exit || fail "single quote"
+grep -q "DISPATCH frp-client-set aabbccdd0011 --label Seoul DP" "$WORKDIR/singleq.out" || fail "single quote dispatch"
 unset FRP_CTL_DRY_RUN
 pass "FRPCTL_QUOTED_VALUE"
 pass "FRPCTL_SINGLE_QUOTE_VALUE"
@@ -533,8 +533,8 @@ pass "FRPCTL_SESSION_HISTORY"
 export FRP_CTL_DRY_RUN=1
 "$CTL" clients >"$WORKDIR/legacy-clients.out"
 grep -qx 'DISPATCH frp-clients' "$WORKDIR/legacy-clients.out" || fail "legacy clients"
-"$CTL" client-set customer-dp --label x >"$WORKDIR/legacy-set.out"
-grep -qx 'DISPATCH frp-client-set customer-dp --label x' "$WORKDIR/legacy-set.out" || fail "legacy client-set"
+"$CTL" client-set aabbccdd0011 --label x >"$WORKDIR/legacy-set.out"
+grep -qx 'DISPATCH frp-client-set aabbccdd0011 --label x' "$WORKDIR/legacy-set.out" || fail "legacy client-set"
 unset FRP_CTL_DRY_RUN
 pass "FRPCTL_LEGACY_ALIAS_COMPATIBILITY"
 pass "BACKWARD_COMPATIBILITY"
@@ -639,7 +639,7 @@ python3 "$ROOT/tools/frp-clients" >"$WORKDIR/sel-list.out"
 grep -qE '^#[[:space:]]+CLIENT ID[[:space:]]+LABEL' "$WORKDIR/sel-list.out" || fail "CLIENT ID column"
 grep -q '24cd7856' "$WORKDIR/sel-list.out" || fail "list short id"
 grep -q 'aaa' "$WORKDIR/sel-list.out" || fail "list label"
-grep -q 'Use CLIENT ID in client commands.' "$WORKDIR/sel-list.out" || fail "CLIENT ID footer"
+grep -q 'Use CLIENT ID for set/unset/revoke/release.' "$WORKDIR/sel-list.out" || fail "CLIENT ID footer"
 if grep -q 'SECRET_MAC_SELECTOR' "$WORKDIR/sel-list.out"; then
   fail "selector list leaked secret"
 fi
@@ -653,6 +653,24 @@ FRP_CTL_REPL=1 "$CTL" show client dp-os-upgrade >"$WORKDIR/sel-host.out"
 grep -q 'dp-os-upgrade' "$WORKDIR/sel-host.out" || fail "hostname lookup"
 pass "HOSTNAME_SHORTCUT_STILL_WORKS"
 
+set +e
+FRP_CTL_REPL=1 "$CTL" set client aaa label production >"$WORKDIR/sel-mut-label.out" 2>"$WORKDIR/sel-mut-label.err"
+mut_label_rc=$?
+set -e
+[[ "$mut_label_rc" -ne 0 ]] || fail "set by label should fail"
+grep -q 'mutation commands require immutable CLIENT ID' "$WORKDIR/sel-mut-label.err" \
+  || fail "set by label error"
+pass "MUTATION_REJECTS_LABEL"
+
+set +e
+FRP_CTL_REPL=1 "$CTL" revoke client dp-os-upgrade-2 >"$WORKDIR/sel-mut-host.out" 2>"$WORKDIR/sel-mut-host.err"
+mut_host_rc=$?
+set -e
+[[ "$mut_host_rc" -ne 0 ]] || fail "revoke by hostname should fail"
+grep -q 'mutation commands require immutable CLIENT ID' "$WORKDIR/sel-mut-host.err" \
+  || fail "revoke by hostname error"
+pass "MUTATION_REJECTS_HOSTNAME"
+
 FRP_CTL_REPL=1 "$CTL" set client 24cd7856 label production >"$WORKDIR/sel-relabel.out"
 grep -q 'Updated client 24cd7856' "$WORKDIR/sel-relabel.out" || fail "label update header"
 grep -q 'old: aaa' "$WORKDIR/sel-relabel.out" || fail "label old value"
@@ -665,6 +683,18 @@ FRP_CTL_REPL=1 "$CTL" show client aaa >"$WORKDIR/sel-old-label.out" 2>"$WORKDIR/
 old_rc=$?
 set -e
 [[ "$old_rc" -ne 0 ]] || fail "old label should not remain identity"
+set +e
+FRP_CTL_REPL=1 "$CTL" set client aaa label again >"$WORKDIR/sel-old-mut.out" 2>"$WORKDIR/sel-old-mut.err"
+old_mut_rc=$?
+FRP_CTL_REPL=1 "$CTL" set client production label again2 >"$WORKDIR/sel-new-mut.out" 2>"$WORKDIR/sel-new-mut.err"
+new_mut_rc=$?
+set -e
+[[ "$old_mut_rc" -ne 0 ]] || fail "old label must not mutate"
+[[ "$new_mut_rc" -ne 0 ]] || fail "new label must not mutate"
+grep -q 'mutation commands require immutable CLIENT ID' "$WORKDIR/sel-old-mut.err" \
+  || fail "old label mutation error"
+grep -q 'mutation commands require immutable CLIENT ID' "$WORKDIR/sel-new-mut.err" \
+  || fail "new label mutation error"
 pass "LABEL_CHANGE_DOES_NOT_CHANGE_SELECTOR"
 
 set +e
