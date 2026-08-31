@@ -160,6 +160,176 @@ function Get-FrpCaCertificate {
     }
 }
 
+function Test-FrpDnsNameMatchesHostname {
+    param(
+        [Parameter(Mandatory = $true)][string]$Pattern,
+        [Parameter(Mandatory = $true)][string]$Hostname
+    )
+    $p = $Pattern.Trim().TrimEnd('.').ToLowerInvariant()
+    $h = $Hostname.Trim().TrimEnd('.').ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($p) -or [string]::IsNullOrWhiteSpace($h)) { return $false }
+    if ($p -eq $h) { return $true }
+    # RFC 6125 single-label wildcard: *.example.com matches a.example.com, not example.com or a.b.example.com
+    if ($p.StartsWith('*.') -and $p.Length -gt 2) {
+        $suffix = $p.Substring(1) # ".example.com"
+        if (-not $h.EndsWith($suffix)) { return $false }
+        $prefix = $h.Substring(0, $h.Length - $suffix.Length)
+        if ([string]::IsNullOrEmpty($prefix)) { return $false }
+        if ($prefix.Contains('.')) { return $false }
+        return $true
+    }
+    return $false
+}
+
+function Read-FrpAsn1Length {
+    param([byte[]]$Data, [int]$Offset)
+    if ($Offset -ge $Data.Length) { throw 'asn1 truncated' }
+    $b = $Data[$Offset]
+    if ($b -lt 0x80) {
+        return @{ Length = [int]$b; Next = $Offset + 1 }
+    }
+    $n = $b -band 0x7F
+    if ($n -lt 1 -or $n -gt 4) { throw 'asn1 length unsupported' }
+    if (($Offset + $n) -ge $Data.Length) { throw 'asn1 truncated' }
+    $len = 0
+    for ($i = 1; $i -le $n; $i++) {
+        $len = ($len -shl 8) -bor $Data[$Offset + $i]
+    }
+    return @{ Length = [int]$len; Next = $Offset + 1 + $n }
+}
+
+function Get-FrpCertificateSanEntries {
+    <#
+    .SYNOPSIS
+      Parse SubjectAltName (2.5.29.17) into DNS names and IP addresses. Fail closed on parse errors.
+    #>
+    param([Parameter(Mandatory = $true)][System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate)
+    $dnsNames = New-Object System.Collections.Generic.List[string]
+    $ipAddresses = New-Object System.Collections.Generic.List[string]
+    $ext = $null
+    foreach ($e in $Certificate.Extensions) {
+        if ($e.Oid -and $e.Oid.Value -eq '2.5.29.17') { $ext = $e; break }
+    }
+    if ($null -eq $ext) {
+        return @{ DnsNames = @(); IpAddresses = @(); Present = $false }
+    }
+
+    $raw = $ext.RawData
+    if ($null -eq $raw -or $raw.Length -lt 2) {
+        return @{ DnsNames = @(); IpAddresses = @(); Present = $true }
+    }
+
+    try {
+        $idx = 0
+        if ($raw[$idx] -ne 0x30) { throw 'san not sequence' }
+        $idx++
+        $seqLen = Read-FrpAsn1Length -Data $raw -Offset $idx
+        $idx = $seqLen.Next
+        $end = $idx + $seqLen.Length
+        if ($end -gt $raw.Length) { throw 'asn1 truncated' }
+
+        while ($idx -lt $end) {
+            $tag = $raw[$idx]
+            $idx++
+            $lenInfo = Read-FrpAsn1Length -Data $raw -Offset $idx
+            $idx = $lenInfo.Next
+            $len = $lenInfo.Length
+            if (($idx + $len) -gt $end) { throw 'asn1 truncated' }
+            $slice = New-Object byte[] $len
+            [Array]::Copy($raw, $idx, $slice, 0, $len)
+            $idx += $len
+
+            # context-specific primitive: dNSName [2], iPAddress [7]
+            if ($tag -eq 0x82) {
+                $dnsNames.Add([System.Text.Encoding]::ASCII.GetString($slice))
+            } elseif ($tag -eq 0x87) {
+                if ($len -eq 4 -or $len -eq 16) {
+                    $ipAddresses.Add(([System.Net.IPAddress]::new($slice)).ToString())
+                }
+            }
+        }
+    } catch {
+        return @{ DnsNames = @(); IpAddresses = @(); Present = $true; ParseFailed = $true }
+    }
+
+    return @{
+        DnsNames    = @($dnsNames)
+        IpAddresses = @($ipAddresses)
+        Present     = $true
+        ParseFailed = $false
+    }
+}
+
+function Test-FrpCertificateHostname {
+    <#
+    .SYNOPSIS
+      Verify leaf certificate hostname (DNS/IP SAN, CN fallback). Fail closed on mismatch.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Hostname
+    )
+    $hostName = ([string]$Hostname).Trim()
+    if ([string]::IsNullOrWhiteSpace($hostName)) { return $false }
+
+    # Prefer platform MatchesHostname when available (never short-circuit to always-true).
+    try {
+        $mi = [System.Security.Cryptography.X509Certificates.X509Certificate2].GetMethod(
+            'MatchesHostname',
+            [type[]]@([string], [bool], [bool])
+        )
+        if ($null -eq $mi) {
+            $mi = [System.Security.Cryptography.X509Certificates.X509Certificate2].GetMethod(
+                'MatchesHostname',
+                [type[]]@([string])
+            )
+        }
+        if ($null -ne $mi) {
+            if ($mi.GetParameters().Length -eq 3) {
+                return [bool]$mi.Invoke($Certificate, @($hostName, $true, $true))
+            }
+            return [bool]$mi.Invoke($Certificate, @($hostName))
+        }
+    } catch {
+        # Fall through to manual verification.
+    }
+
+    $parsedIp = $null
+    $isIp = [System.Net.IPAddress]::TryParse($hostName, [ref]$parsedIp)
+    $san = Get-FrpCertificateSanEntries -Certificate $Certificate
+    if ($san.ParseFailed) { return $false }
+
+    $hasDnsOrIpSan = ($san.DnsNames.Count -gt 0) -or ($san.IpAddresses.Count -gt 0)
+    if ($hasDnsOrIpSan) {
+        if ($isIp) {
+            foreach ($ipText in $san.IpAddresses) {
+                $sanIp = $null
+                if ([System.Net.IPAddress]::TryParse($ipText, [ref]$sanIp)) {
+                    if ($sanIp.Equals($parsedIp)) { return $true }
+                }
+            }
+            return $false
+        }
+        foreach ($dns in $san.DnsNames) {
+            if (Test-FrpDnsNameMatchesHostname -Pattern $dns -Hostname $hostName) { return $true }
+        }
+        return $false
+    }
+
+    # CN fallback only when no DNS/IP SAN present.
+    if ($isIp) { return $false }
+    $cn = $Certificate.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::DnsName, $false)
+    if ([string]::IsNullOrWhiteSpace($cn)) {
+        # Subject CN attribute as last resort when GetNameInfo empty and no SAN
+        $subject = $Certificate.Subject
+        if ($subject -match '(?i)(?:^|,)\s*CN\s*=\s*([^,]+)') {
+            $cn = $Matches[1].Trim().Trim('"')
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($cn)) { return $false }
+    return (Test-FrpDnsNameMatchesHostname -Pattern $cn -Hostname $hostName)
+}
+
 function New-FrpPinnedServerCertificateValidator {
     param([Parameter(Mandatory = $true)][string]$CaPath)
     $ca = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($CaPath)
@@ -189,24 +359,20 @@ function New-FrpPinnedServerCertificateValidator {
                 }
             }
             if (-not $trusted) { return $false }
-            # Hostname check when possible
+
+            # Hostname required after CA trust; fail closed if hostname cannot be determined.
+            $hostName = $null
             if ($sender -is [System.Net.HttpWebRequest]) {
-                $hostName = ([System.Net.HttpWebRequest]$sender).RequestUri.Host
+                $uri = ([System.Net.HttpWebRequest]$sender).RequestUri
+                if ($null -ne $uri) { $hostName = $uri.Host }
+            } elseif ($null -ne $sender) {
                 try {
-                    return [System.Security.Cryptography.X509Certificates.X509Certificate2].GetMethod('MatchesHostname') -eq $null -or $true
+                    $uriProp = $sender.RequestUri
+                    if ($null -ne $uriProp) { $hostName = $uriProp.Host }
                 } catch { }
-                # Basic CN/SAN contains check
-                $name = $serverCert.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::DnsName, $false)
-                if ($name -and ($name -eq $hostName -or $name -eq "*.$hostName" -or $hostName.EndsWith($name.TrimStart('*')))) {
-                    return $true
-                }
-                # If IP literal, accept when cert built to project CA (IP SAN support varies).
-                $ip = $null
-                if ([System.Net.IPAddress]::TryParse($hostName, [ref]$ip)) { return $true }
-                if ([string]::IsNullOrWhiteSpace($name)) { return $true }
-                return ($name -eq $hostName)
             }
-            return $true
+            if ([string]::IsNullOrWhiteSpace($hostName)) { return $false }
+            return (Test-FrpCertificateHostname -Certificate $serverCert -Hostname $hostName)
         } catch {
             return $false
         }
@@ -236,7 +402,9 @@ function Invoke-FrpHttpsJson {
     }
 
     # Prefer curl --cacert when available (matches Linux client semantics).
-    if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+    # FRP_WINDOWS_FORCE_DOTNET_HTTP=1 skips curl for tests; does not weaken production.
+    $forceDotNetHttp = ($env:FRP_WINDOWS_FORCE_DOTNET_HTTP -eq '1')
+    if (-not $forceDotNetHttp -and (Get-Command curl.exe -ErrorAction SilentlyContinue)) {
         $tmpBody = $null
         $tmpResp = [System.IO.Path]::GetTempFileName()
         $args = @(

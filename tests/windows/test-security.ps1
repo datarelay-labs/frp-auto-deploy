@@ -39,4 +39,10 @@ Assert-FrpTrue ($tls -match 'finally') 'tls finally present'
 Assert-FrpTrue ($tls -match 'ServerCertificateValidationCallback = \$previous') 'tls restores callback'
 Assert-FrpTrue ($tls -match '\$previousCallback') 'ca fetch restores previousCallback'
 
+# Hostname validation must never short-circuit with -or $true near MatchesHostname.
+Assert-FrpTrue ($tls -notmatch 'MatchesHostname[^\r\n]*-or\s*\$true') 'no MatchesHostname -or $true'
+Assert-FrpTrue ($tls -notmatch '-or\s*\$true') 'no -or $true in FrpTls.ps1'
+Assert-FrpTrue ($tls -match 'function\s+Test-FrpCertificateHostname') 'hostname helper present'
+Assert-FrpTrue ($tls -match 'Test-FrpCertificateHostname') 'validator uses hostname helper'
+
 Write-FrpTestPass 'test-security'
