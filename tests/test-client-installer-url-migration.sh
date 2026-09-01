@@ -152,11 +152,11 @@ Path(sys.argv[1]).write_text(json.dumps({
   "deployment_mode": "direct",
   "frp_transport": "tcp",
   "port_start": 6000,
-  "port_end": 6099,
+  "port_end": 6098,
   "frp_control_listen_port": 7000,
   "frp_control_public_port": 7000,
-  "allocator_listen_port": 7500,
-  "allocator_public_port": 7500,
+  "allocator_listen_port": 6099,
+  "allocator_public_port": 6099,
   "client_installer_url": "https://example.test/old.sh",
 }, indent=2) + "\n")
 PY

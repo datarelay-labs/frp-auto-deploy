@@ -79,7 +79,7 @@ def seed_tree(tree: Path, public_host: str, listen_port: int, pki_dir: Path):
         "public_host": public_host,
         "public_ip": public_host,
         "port_start": 6000,
-        "port_end": 6099,
+        "port_end": 6098,
         "allocator_listen_port": listen_port,
         "allocator_public_port": listen_port,
         "frp_control_listen_port": 7000,

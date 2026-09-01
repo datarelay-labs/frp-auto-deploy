@@ -33,7 +33,7 @@ cfg = {
     "public_host": "203.0.113.10",
     "public_ip": "203.0.113.10",
     "port_start": 6000,
-    "port_end": 6099,
+    "port_end": 6098,
     "frp_control_listen_port": 7000,
     "frp_control_public_port": 7000,
     "allocator_listen_port": 6099,

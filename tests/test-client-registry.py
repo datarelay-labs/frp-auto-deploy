@@ -271,7 +271,7 @@ def test_enroll_rejects_oversized_machine_id():
             'public_ip': '203.0.113.10',
             'control_port': 443,
             'port_start': 6000,
-            'port_end': 6099,
+            'port_end': 6098,
             'registry_file': str(registry),
             'enrollments_dir': str(enrollments),
             'token_file': str(token),
