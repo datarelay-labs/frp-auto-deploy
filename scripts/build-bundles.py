@@ -12,8 +12,24 @@ sys.path.insert(0, str(root / 'lib'))
 from frp_project_files import server_bootstrap_source_rels  # noqa: E402
 
 
+# Digests of outer bundles that embed SHA256SUMS. Including them inside the
+# embedded copy creates an unsatisfiable hash fixed-point (rebuild never
+# matches the committed artifact). Repo-root SHA256SUMS still pins them.
+_SHA256SUMS_SELF_EMBED_SKIP = frozenset({
+    'dist/bootstrap-server.sh',
+})
+
+
 def bundle_payload(rel):
     data = (root / rel).read_bytes()
+    if rel == 'SHA256SUMS':
+        lines = []
+        for line in data.decode('utf-8').splitlines():
+            parts = line.split(None, 1)
+            if len(parts) == 2 and parts[1] in _SHA256SUMS_SELF_EMBED_SKIP:
+                continue
+            lines.append(line)
+        return ('\n'.join(lines) + '\n').encode('utf-8')
     if rel != 'release-manifest.json':
         return data
     # Artifact hashes describe the outer bundles. Strip them from the

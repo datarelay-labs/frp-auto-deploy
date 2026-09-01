@@ -23,7 +23,8 @@ foreach ($f in $files) {
         $hit = $false
         foreach ($line in $lines) {
             if ($line -match '(?i)(Invoke-RestMethod|\birm\b)\s*\|\s*(Invoke-Expression|\biex\b)') {
-                if ($line -match '(?i)no\s+irm|never\s+irm|not\s+.*irm') { continue }
+                # Docs that forbid the pattern (e.g. "no Invoke-Expression / irm|iex").
+                if ($line -match '(?i)(no|never|without)\s+.*(irm|iex|Invoke-Expression)|not\s+.*\birm\b') { continue }
                 $hit = $true
                 break
             }
