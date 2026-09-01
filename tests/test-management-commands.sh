@@ -232,7 +232,7 @@ if grep -qi 'private key\|mgmt_mac_key\|BEGIN PUBLIC' "$WORKDIR/revoke.out"; the
 fi
 pass "frp-revoke-client keeps reservations"
 
-printf 'RELEASE\n' | python3 "$ROOT/tools/frp-release-client" aabbccdd --force >"$WORKDIR/revoke-release.out"
+printf 'RELEASE\n' | python3 "$ROOT/tools/frp-release-client" aabbccdd >"$WORKDIR/revoke-release.out"
 python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY' || fail "release after revoke"
 import json,sys
 from pathlib import Path
@@ -326,9 +326,9 @@ state['clients']['legacy00aa']={
 }
 p.write_text(json.dumps(state, indent=2, sort_keys=True)+'\n')
 PY
-printf 'RELEASE\n' | python3 "$ROOT/tools/frp-release-client" legacy00aa --force \
-  >"$WORKDIR/legacy-force-release.out"
-python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY' || fail "forced legacy client release"
+printf 'RELEASE\n' | python3 "$ROOT/tools/frp-release-client" legacy00aa \
+  >"$WORKDIR/legacy-client-release.out"
+python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY' || fail "legacy client release"
 import json,sys
 from pathlib import Path
 state=json.loads(Path(sys.argv[1]).read_text())
@@ -343,11 +343,11 @@ assert all(
     if isinstance(svc, dict)
 )
 PY
-pass "legacy force release reclaims port"
+pass "legacy client release reclaims port"
 
 # Mutation selector rejects label/hostname
 set +e
-printf 'RELEASE\n' | python3 "$ROOT/tools/frp-release-client" dev-dp-mirror --force \
+printf 'RELEASE\n' | python3 "$ROOT/tools/frp-release-client" dev-dp-mirror \
   >"$WORKDIR/mut-host.out" 2>"$WORKDIR/mut-host.err"
 host_rc=$?
 set -e

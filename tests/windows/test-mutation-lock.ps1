@@ -35,7 +35,10 @@ try {
         Start-Sleep -Milliseconds 50
     }
     Assert-FrpEqual 'Running' ([string]$blocker.State) 'blocker job holds lock'
-    Assert-FrpTrue (Test-Path -LiteralPath $lockPath) 'lock file exists while held'
+    # Non-Windows test hosts use an exclusive lock file; Windows uses a named Mutex.
+    if (-not (Test-FrpIsWindowsHost)) {
+        Assert-FrpTrue (Test-Path -LiteralPath $lockPath) 'lock file exists while held'
+    }
 
     # update vs update — allow a couple retries for scheduler jitter, but require eventual reject.
     $threwUpdate = $false
