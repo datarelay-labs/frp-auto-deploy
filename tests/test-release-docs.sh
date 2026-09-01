@@ -145,6 +145,20 @@ grep -q 'REAL_ARM_SYSTEMD=NOT_TESTED' docs/RELEASE_VALIDATION.md || fail "ARM64 
 grep -q 'REAL_OPENSSL_1_0_2_TLS_ENROLLMENT=NOT_TESTED' docs/RELEASE_VALIDATION.md || fail "OpenSSL 1.0.2 limitation missing"
 pass "REAL_ACCEPTANCE_RECORDED"
 
+# 2.1.1 must require fresh real E2E; 2.1.0 PASS is historical baseline only.
+grep -q 'historical baseline / previous-release evidence' docs/RELEASE_VALIDATION.md ||
+  fail "VALIDATION missing historical-baseline wording for 2.1.0"
+grep -q '2.1.1 real E2E required' docs/RELEASE_VALIDATION.md ||
+  fail "VALIDATION missing 2.1.1 real E2E requirement"
+grep -q 'real 2.1.1 Ubuntu/OCI E2E' docs/RELEASE_CHECKLIST.md ||
+  fail "CHECKLIST missing 2.1.1 real E2E path"
+grep -q 'real-environment validation pending' docs/RELEASE_CHECKLIST.md ||
+  fail "CHECKLIST missing honest Windows pending status"
+grep -q 'CI-tested' docs/RELEASE_VALIDATION.md ||
+  fail "VALIDATION missing Windows CI-tested status"
+echo "RELEASE_211_REAL_E2E_REQUIRED=PASS"
+pass "RELEASE_211_REAL_E2E_REQUIRED"
+
 chmod +x "$ROOT/scripts/validate-release-tag.sh"
 TMPERR="$(mktemp)"
 if "$ROOT/scripts/validate-release-tag.sh" v2.1.2 >/dev/null 2>"$TMPERR"; then

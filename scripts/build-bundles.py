@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 import base64
 import json
+import sys
 from pathlib import Path
 
-root=Path(__file__).resolve().parents[1]
-dist=root/'dist'
+root = Path(__file__).resolve().parents[1]
+dist = root / 'dist'
 dist.mkdir(exist_ok=True)
+
+sys.path.insert(0, str(root / 'lib'))
+from frp_project_files import server_bootstrap_source_rels  # noqa: E402
+
 
 def bundle_payload(rel):
     data = (root / rel).read_bytes()
@@ -19,112 +24,69 @@ def bundle_payload(rel):
             meta.pop('sha256', None)
     return (json.dumps(import_data, indent=2, sort_keys=False) + '\n').encode('utf-8')
 
-files=[
- 'VERSION',
- 'release-manifest.json',
- 'install-server.sh',
- 'lib/frp-common.sh',
- 'lib/frp_mgmt_auth.py',
- 'lib/frp_pki.py',
- 'lib/frp_frontend.py',
- 'lib/frp_install_txn.py',
- 'lib/frp-server-upgrade.sh',
- 'lib/frp_client_registry.py',
- 'lib/frp_audit.py',
- 'lib/frp_fleet.py',
- 'lib/frp_server_lifecycle.py',
- 'lib/frp_project_files.py',
- 'lib/frp_url.py',
- 'lib/frp_control_locks.py',
- 'lib/frp_server_config.py',
- 'lib/frp_enrollment_lifecycle.py',
- 'lib/frp_enroll_challenge.py',
- 'lib/frp_clock_sync.py',
- 'lib/server-project-files.manifest',
- 'lib/frp-doctor-common.sh',
- 'lib/frp_doctor.py',
- 'lib/frp_ctl_grammar.py',
- 'lib/frp_ctl_repl.py',
- 'server/frp-port-allocator.py',
- 'server/migrate_token.py',
- 'server/frps.service',
- 'server/frp-port-allocator.service',
- 'server/frp-frontend.service',
- 'tools/frp-create-client',
- 'tools/frp-enrollments',
- 'tools/frp-enrollment-revoke',
- 'tools/frp-enrollment-purge',
- 'tools/frp-enroll-bulk',
- 'tools/frp-clients',
- 'tools/frp-client-info',
- 'tools/frp-release-client',
- 'tools/frp-release-service',
- 'tools/frp-revoke-client',
- 'tools/frp-client-set',
- 'tools/frp-set-client-installer-url',
- 'tools/frp-server-status',
- 'tools/frp-project-update',
- 'tools/frp-backup',
- 'tools/frp-restore',
- 'tools/frp-update',
- 'tools/frp-upstream',
- 'tools/frp-groups',
- 'tools/frp-group-set',
- 'tools/frpctl',
- 'tools/frpcli',
-]
 
-lines=['#!/usr/bin/env bash','set -euo pipefail','TMP="$(mktemp -d)"','trap \'rm -rf "$TMP"\' EXIT']
+# Server payload is derived from server-project-files.manifest managed classes
+# plus bootstrap-only scaffolding (VERSION / install-server.sh / migrate_token).
+files = server_bootstrap_source_rels(source_root=root)
 for rel in files:
-    data=base64.b64encode(bundle_payload(rel)).decode()
-    parent=str(Path(rel).parent)
-    if parent!='.': lines.append(f'mkdir -p "$TMP/{parent}"')
+    if not (root / rel).is_file():
+        raise SystemExit('ERROR: server bootstrap source missing: %s' % rel)
+
+lines = ['#!/usr/bin/env bash', 'set -euo pipefail', 'TMP="$(mktemp -d)"', 'trap \'rm -rf "$TMP"\' EXIT']
+for rel in files:
+    data = base64.b64encode(bundle_payload(rel)).decode()
+    parent = str(Path(rel).parent)
+    if parent != '.':
+        lines.append(f'mkdir -p "$TMP/{parent}"')
     lines.append(f"base64 -d >\"$TMP/{rel}\" <<'B64'")
-    for i in range(0,len(data),76): lines.append(data[i:i+76])
+    for i in range(0, len(data), 76):
+        lines.append(data[i:i + 76])
     lines.append('B64')
 for rel in files:
     if rel.endswith('.sh') or rel.startswith('tools/') or rel.endswith('.py'):
         lines.append(f'chmod +x "$TMP/{rel}"')
 lines.append('exec "$TMP/install-server.sh" "$@"')
-(dist/'bootstrap-server.sh').write_text('\n'.join(lines)+'\n')
-(dist/'bootstrap-server.sh').chmod(0o755)
+(dist / 'bootstrap-server.sh').write_text('\n'.join(lines) + '\n')
+(dist / 'bootstrap-server.sh').chmod(0o755)
 
-client_files=[
- 'VERSION',
- 'release-manifest.json',
- 'install-client.sh',
- 'lib/frp-common.sh',
- 'lib/frp-client-common.sh',
- 'lib/frp_mgmt_auth.py',
- 'lib/frp_data_plane_auth.py',
- 'lib/frp_clock_sync.py',
- 'lib/frp-doctor-common.sh',
- 'lib/frp_doctor.py',
- 'lib/frp_ctl_grammar.py',
- 'lib/frp_ctl_repl.py',
- 'lib/frp_project_files.py',
- 'lib/client-project-files.manifest',
- 'lib/frp-client-lifecycle.sh',
- 'lib/frp_client_lifecycle.py',
- 'uninstall-client.sh',
- 'tools/frp-client',
- 'tools/frpctl',
- 'tools/frpcli',
+client_files = [
+    'VERSION',
+    'release-manifest.json',
+    'install-client.sh',
+    'lib/frp-common.sh',
+    'lib/frp-client-common.sh',
+    'lib/frp_mgmt_auth.py',
+    'lib/frp_data_plane_auth.py',
+    'lib/frp_clock_sync.py',
+    'lib/frp-doctor-common.sh',
+    'lib/frp_doctor.py',
+    'lib/frp_ctl_grammar.py',
+    'lib/frp_ctl_repl.py',
+    'lib/frp_project_files.py',
+    'lib/client-project-files.manifest',
+    'lib/frp-client-lifecycle.sh',
+    'lib/frp_client_lifecycle.py',
+    'uninstall-client.sh',
+    'tools/frp-client',
+    'tools/frpctl',
+    'tools/frpcli',
 ]
-client_lines=['#!/usr/bin/env bash','set -euo pipefail','TMP="$(mktemp -d)"','trap \'rm -rf "$TMP"\' EXIT']
+client_lines = ['#!/usr/bin/env bash', 'set -euo pipefail', 'TMP="$(mktemp -d)"', 'trap \'rm -rf "$TMP"\' EXIT']
 for rel in client_files:
-    data=base64.b64encode(bundle_payload(rel)).decode()
-    parent=str(Path(rel).parent)
-    if parent!='.': client_lines.append(f'mkdir -p "$TMP/{parent}"')
+    data = base64.b64encode(bundle_payload(rel)).decode()
+    parent = str(Path(rel).parent)
+    if parent != '.':
+        client_lines.append(f'mkdir -p "$TMP/{parent}"')
     client_lines.append(f"base64 -d >\"$TMP/{rel}\" <<'B64'")
-    for i in range(0,len(data),76): client_lines.append(data[i:i+76])
+    for i in range(0, len(data), 76):
+        client_lines.append(data[i:i + 76])
     client_lines.append('B64')
 for rel in client_files:
     if rel.endswith('.sh') or rel.startswith('tools/'):
         client_lines.append(f'chmod +x "$TMP/{rel}"')
 client_lines.append('exec "$TMP/install-client.sh" "$@"')
-(dist/'bootstrap-client.sh').write_text('\n'.join(client_lines)+'\n')
-(dist/'bootstrap-client.sh').chmod(0o755)
+(dist / 'bootstrap-client.sh').write_text('\n'.join(client_lines) + '\n')
+(dist / 'bootstrap-client.sh').chmod(0o755)
 
 # Windows PowerShell bootstrap: embed windows/ tree, extract, run install-client.ps1.
 # Hand-edit of dist/bootstrap-client.ps1 is forbidden; regenerate via this script.
@@ -152,7 +114,7 @@ for rel in win_files:
     ps_lines.append('  New-Item -ItemType Directory -Force -Path $dir | Out-Null')
     ps_lines.append(f'  $out = Join-Path $tmp \'{out_rel}\'')
     # chunk base64 for readability
-    chunks = [data[i:i+120] for i in range(0, len(data), 120)]
+    chunks = [data[i:i + 120] for i in range(0, len(data), 120)]
     ps_lines.append('  $b64 = @\'')
     ps_lines.extend(chunks)
     ps_lines.append('\'@')

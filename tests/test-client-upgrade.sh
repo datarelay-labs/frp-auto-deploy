@@ -616,6 +616,35 @@ pass "IDENTITY_PRESERVED"
 pass "PORTS_PRESERVED"
 pass "VERSION_NOT_ADVANCED"
 
+# Candidate parser must be ignored during recovery (trusted snapshot/live parser only).
+BAD_PARSER_SRC="$WORKDIR/bad-parser-src"
+cp -a "$SRC_B" "$BAD_PARSER_SRC"
+python3 - "$BAD_PARSER_SRC/lib/frp_project_files.py" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+# Deliberately break snapshot parsing API if recovery ever imported the candidate.
+path.write_text(
+    "raise SystemExit('CANDIDATE_PARSER_MUST_NOT_RUN')\n",
+    encoding="utf-8",
+)
+PY
+printf 'mutated-again\n' >"$INT/usr/local/bin/frp-client"
+FRP_TXN_SNAPSHOT_PATH="$BACKUP" FRP_TXN_MUTATION_STARTED=true \
+  frp_txn_write client-update commit "1.1.0" "2.1.1"
+if ! "$ROOT/tools/frp-client" update --source "$BAD_PARSER_SRC" --check \
+  >"$WORKDIR/bad-parser.out" 2>"$WORKDIR/bad-parser.err"; then
+  cat "$WORKDIR/bad-parser.out" "$WORKDIR/bad-parser.err" >&2
+  fail "recovery must succeed despite broken candidate parser"
+fi
+grep -q 'CANDIDATE_PARSER_MUST_NOT_RUN' "$WORKDIR/bad-parser.out" "$WORKDIR/bad-parser.err" &&
+  fail "candidate parser was executed during recovery"
+[[ "$(file_sha "$INT/usr/local/bin/frp-client")" == "$CLIENT_BEFORE" ]] ||
+  fail "client not restored with trusted parser"
+echo "CLIENT_RECOVERY_SOURCE_INDEPENDENT=PASS"
+echo "CLIENT_RECOVERY_CANDIDATE_PARSER_IGNORED=PASS"
+echo "CLIENT_RECOVERY_SNAPSHOT_PATH_VALIDATION=PASS"
+
 # Malformed snapshot metadata must fail closed (no guessed recovery).
 BAD="$WORKDIR/bad-snap"
 mkdir -p "$BAD/files"

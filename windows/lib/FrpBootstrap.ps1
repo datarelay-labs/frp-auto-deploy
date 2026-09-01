@@ -140,11 +140,97 @@ function Get-FrpWindowsProjectManagedRelativePaths {
     )
 }
 
+function Get-FrpWindowsProjectOptionalRelativePaths {
+    <#
+    .SYNOPSIS
+      Explicitly optional managed paths (none today). Kept for future use so
+      Install-FrpWindowsProjectTree never treats required files as optional.
+    #>
+    return @()
+}
+
+function Assert-FrpWindowsManagedTreeComplete {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourceWindowsRoot
+    )
+    $optional = @{}
+    foreach ($rel in (Get-FrpWindowsProjectOptionalRelativePaths)) {
+        $optional[$rel] = $true
+    }
+    $missing = @()
+    foreach ($rel in (Get-FrpWindowsProjectManagedRelativePaths)) {
+        if ($optional.ContainsKey($rel)) { continue }
+        $src = Join-Path $SourceWindowsRoot ($rel -replace '/', [IO.Path]::DirectorySeparatorChar)
+        if (-not (Test-Path -LiteralPath $src)) {
+            $missing += $rel
+        }
+    }
+    if ($missing.Count -gt 0) {
+        throw ("ERROR: Windows project source is missing required managed file(s): {0}" -f ($missing -join ', '))
+    }
+}
+
+function Expand-FrpWindowsBootstrapTree {
+    <#
+    .SYNOPSIS
+      Materialize the embedded windows/ tree from a verified bootstrap-client.ps1
+      without executing the script (no Invoke-Expression / irm|iex).
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$BootstrapPath,
+        [Parameter(Mandatory = $true)][string]$DestinationDir
+    )
+    if (-not (Test-Path -LiteralPath $BootstrapPath)) {
+        throw ("ERROR: bootstrap artifact missing: {0}" -f $BootstrapPath)
+    }
+    $text = [System.IO.File]::ReadAllText($BootstrapPath)
+    if (-not (Test-Path -LiteralPath $DestinationDir)) {
+        New-Item -ItemType Directory -Path $DestinationDir -Force | Out-Null
+    }
+    $destRoot = (Resolve-Path -LiteralPath $DestinationDir).Path
+    # Single-quoted so $out/$tmp/$b64 are literal regex text, not PowerShell expansions.
+    $pattern = '(?ms)\$out\s*=\s*Join-Path\s+\$tmp\s+''(?<rel>windows/[^'']+)''\s*\r?\n\s*\$b64\s*=\s*@''(?<b64>.*?)''@\s*\r?\n\s*\[IO\.File\]::WriteAllBytes'
+    $matches = [regex]::Matches($text, $pattern)
+    if ($matches.Count -lt 1) {
+        throw 'ERROR: verified bootstrap does not contain an extractable windows/ payload'
+    }
+    $written = 0
+    foreach ($m in $matches) {
+        $rel = $m.Groups['rel'].Value -replace '\\', '/'
+        if ($rel.StartsWith('/') -or $rel.Contains('..') -or -not $rel.StartsWith('windows/')) {
+            throw ("ERROR: bootstrap payload path refused: {0}" -f $rel)
+        }
+        $b64 = ($m.Groups['b64'].Value -replace '\s', '')
+        if ([string]::IsNullOrWhiteSpace($b64)) {
+            throw ("ERROR: empty bootstrap payload for {0}" -f $rel)
+        }
+        $bytes = [Convert]::FromBase64String($b64)
+        $out = Join-Path $destRoot ($rel -replace '/', [IO.Path]::DirectorySeparatorChar)
+        $outFull = [System.IO.Path]::GetFullPath($out)
+        if (-not $outFull.StartsWith($destRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw ("ERROR: bootstrap extract path escapes destination: {0}" -f $rel)
+        }
+        $parent = Split-Path -Parent $outFull
+        if (-not (Test-Path -LiteralPath $parent)) {
+            New-Item -ItemType Directory -Path $parent -Force | Out-Null
+        }
+        [IO.File]::WriteAllBytes($outFull, $bytes)
+        $written++
+    }
+    $windowsRoot = Join-Path $destRoot 'windows'
+    if (-not (Test-Path -LiteralPath $windowsRoot)) {
+        throw 'ERROR: bootstrap extract did not produce a windows/ directory'
+    }
+    Assert-FrpWindowsManagedTreeComplete -SourceWindowsRoot $windowsRoot
+    return $windowsRoot
+}
+
 function Install-FrpWindowsProjectTree {
     <#
     .SYNOPSIS
       Copy managed PowerShell modules/tools from a windows/ source tree into the install root.
       Does not touch identity, state, config, pause marker, or frpc.exe.
+      Required managed files must all be present; missing files fail closed.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$SourceWindowsRoot
@@ -152,11 +238,19 @@ function Install-FrpWindowsProjectTree {
     if (-not (Test-Path -LiteralPath $SourceWindowsRoot)) {
         throw ("ERROR: Windows project source missing: {0}" -f $SourceWindowsRoot)
     }
+    Assert-FrpWindowsManagedTreeComplete -SourceWindowsRoot $SourceWindowsRoot
     Initialize-FrpDirectories
     $root = Get-FrpWindowsRoot
+    $optional = @{}
+    foreach ($rel in (Get-FrpWindowsProjectOptionalRelativePaths)) {
+        $optional[$rel] = $true
+    }
     foreach ($rel in (Get-FrpWindowsProjectManagedRelativePaths)) {
         $src = Join-Path $SourceWindowsRoot ($rel -replace '/', [IO.Path]::DirectorySeparatorChar)
-        if (-not (Test-Path -LiteralPath $src)) { continue }
+        if (-not (Test-Path -LiteralPath $src)) {
+            if ($optional.ContainsKey($rel)) { continue }
+            throw ("ERROR: Windows project source is missing required managed file: {0}" -f $rel)
+        }
         $dest = Join-Path $root ($rel -replace '/', [IO.Path]::DirectorySeparatorChar)
         $destDir = Split-Path -Parent $dest
         if (-not (Test-Path -LiteralPath $destDir)) {

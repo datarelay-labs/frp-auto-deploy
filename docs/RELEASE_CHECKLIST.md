@@ -24,10 +24,29 @@ release candidate or stable tag. Real-environment policy and evidence live in
 **Authoritative classification** is the Gate classification table in
 `docs/RELEASE_VALIDATION.md`.
 
-For stable **2.1.1**, the required real gates remain the Ubuntu 24.04 x86_64
-single-443 topology recorded PASS for 2.1.0 in that file, plus automated gates
-in this checklist. The following remain
-**RECOMMENDED / NOT_TESTED** and must **not** be advertised as field-validated:
+For stable **2.1.1**, historical 2.1.0 real Ubuntu E2E PASS is a
+**historical baseline / previous-release evidence only**. It does **not**
+satisfy the 2.1.1 stable real-validation gate for changed code.
+
+Required 2.1.1 path:
+
+```text
+Full Automated Gates
+        ↓ PASS
+candidate integration
+        ↓
+real 2.1.1 Ubuntu/OCI E2E
+        ↓ PASS
+main
+        ↓
+v2.1.1 stable tag
+```
+
+Windows client status remains honest: **CI-tested**; **real-environment
+validation pending**. Do not advertise Windows as field-validated Stable.
+
+The following remain **RECOMMENDED / NOT_TESTED** and must **not** be
+advertised as field-validated:
 
 - Rocky Linux 9 real VM / SELinux Enforcing
 - AlmaLinux 9 real VM / SELinux Enforcing
@@ -75,10 +94,12 @@ Semantics:
 - [ ] Do **not** claim Rocky/Alma SELinux, Amazon Linux real VM, ARM64 systemd,
   or OpenSSL 1.0.2 real TLS unless those columns are PASS
 
-For **2.1.1**, the required real gates chosen for the prior 2.1.0 tag (Ubuntu
-24.04 x86_64, direct public-IP server, enterprise-restricted client, single-443
-HTTPS/WSS/SSH, reboot recovery) remain the field baseline recorded PASS in
-`docs/RELEASE_VALIDATION.md`. Remaining recommended gates stay `NOT_TESTED`.
+For **2.1.1**, do **not** treat the recorded 2.1.0 Ubuntu real E2E PASS as
+sufficient real validation for changed 2.1.1 code. That block is historical
+baseline only. Stable `v2.1.1` requires a fresh **real 2.1.1 Ubuntu/OCI E2E
+PASS** after Full Automated Gates and candidate integration (see
+`docs/RELEASE_VALIDATION.md`). Remaining recommended gates stay `NOT_TESTED`.
+Windows remains **CI-tested / real-environment validation pending**.
 Re-confirm Zero-touch / enrollment installer URLs resolve to immutable
 `v2.1.1` after server project update.
 

@@ -29,7 +29,22 @@ printf '%s\n' "${PY_INVENTORY[@]}" | grep -qx 'lib/frp_server_config.py' \
 printf '%s\n' "${PY_INVENTORY[@]}" | grep -qx 'tools/frp-enrollment-purge' \
   || { echo "FAIL missing tools/frp-enrollment-purge in compile inventory" >&2; exit 1; }
 python3 -m py_compile "${PY_INVENTORY[@]}"
-python3 -m py_compile tests/test-allocator.py tests/test-enrollment-security.py tests/test-mgmt-identity.py tests/test-pki-https.py tests/test-bootstrap-ticket.py tests/test-frontend-proxy.py tests/test-client-registry.py tests/test-clock-skew-auth.py tests/test-deployment-mode-fail-closed.py tests/test-audit-log.py tests/test-audit-query.py tests/test-server-config-validation.py tests/test-canonical-registry-validation.py tests/test-pki-key-cert-pairs.py tests/test-config-setter-control-lock.py tests/test-restore-https-health.py tests/test-mgmt-nonce-ordering.py tests/test-enroll-bind-ordering.py
+python3 -m py_compile tests/test-allocator.py tests/test-enrollment-security.py tests/test-mgmt-identity.py tests/test-pki-https.py tests/test-bootstrap-ticket.py tests/test-frontend-proxy.py tests/test-client-registry.py tests/test-clock-skew-auth.py tests/test-deployment-mode-fail-closed.py tests/test-audit-log.py tests/test-audit-query.py tests/test-server-config-validation.py tests/test-canonical-registry-validation.py tests/test-pki-key-cert-pairs.py tests/test-config-setter-control-lock.py tests/test-restore-https-health.py tests/test-mgmt-nonce-ordering.py tests/test-enroll-bind-ordering.py tests/test-audit-followup-p1.py tests/test-frp-data-plane-auth.py tests/test-pre-e2e-remediation-five.py tests/test-frp-release-data-plane-auth.py tests/test-server-bundle-manifest-parity.py tests/test-server-snapshot-restore-validation.py
+
+# Mandatory security/remediation regression inventory (must stay in === tests ===).
+MANDATORY_SECURITY_TESTS=(
+  tests/test-audit-followup-p1.py
+  tests/test-frp-data-plane-auth.py
+  tests/test-pre-e2e-remediation-five.py
+  tests/test-frp-release-data-plane-auth.py
+  tests/test-server-bundle-manifest-parity.py
+  tests/test-allocator-runtime-restart.sh
+  tests/test-server-snapshot-restore-validation.py
+  tests/test-run-all-security-coverage.sh
+)
+for _sec in "${MANDATORY_SECURITY_TESTS[@]}"; do
+  [[ -f "$_sec" ]] || { echo "FAIL missing mandatory security test $_sec" >&2; exit 1; }
+done
 
 echo "=== tests ==="
 ./tests/test-server-migration.sh
@@ -118,6 +133,25 @@ python3 tests/test-audit-query.py
 ./tests/test-frp-compatibility.sh
 ./tests/test-backup-restore.sh
 python3 tests/test-restore-https-health.py
+python3 tests/test-audit-followup-p1.py
+python3 tests/test-frp-data-plane-auth.py
+python3 tests/test-pre-e2e-remediation-five.py
+python3 tests/test-frp-release-data-plane-auth.py
+python3 tests/test-server-bundle-manifest-parity.py
+./tests/test-allocator-runtime-restart.sh
+python3 tests/test-server-snapshot-restore-validation.py
+./tests/test-run-all-security-coverage.sh
+
+# Inventory guard: refuse silent omission of mandatory security regressions.
+RUN_ALL_BODY="$(sed -n '/^echo "=== tests ==="/,/^echo "=== secret scan ==="/p' "$0")"
+for _sec in "${MANDATORY_SECURITY_TESTS[@]}"; do
+  grep -Fq "$_sec" <<<"$RUN_ALL_BODY" \
+    || { echo "FAIL mandatory security test not executed by run-all: $_sec" >&2; exit 1; }
+done
+grep -Fq 'tests/test-frp-data-plane-auth.py' <<<"$RUN_ALL_BODY" \
+  || { echo "FAIL data-plane security tests missing from run-all" >&2; exit 1; }
+echo "RUN_ALL_SECURITY_REGRESSION_COVERAGE=PASS"
+echo "DATA_PLANE_SECURITY_TESTS_IN_RUN_ALL=PASS"
 
 echo "=== secret scan ==="
 ./scripts/secret-scan.sh

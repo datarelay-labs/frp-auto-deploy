@@ -16,8 +16,9 @@ mutate firewall/SELinux.
 
 | Item | Classification | Current support claim |
 | --- | --- | --- |
-| Ubuntu 22.04 / 24.04 real VM | REQUIRED_FOR_STABLE (live baseline) | documented PASS |
-| Ubuntu 24.04 x86_64 single-443 (direct public-IP, enterprise-restricted client) | REQUIRED_FOR_STABLE (2.1.0) | PASS (2026-08-29) |
+| Ubuntu 22.04 / 24.04 real VM | REQUIRED_FOR_STABLE (live baseline) | requires fresh PASS per release |
+| Ubuntu 24.04 x86_64 single-443 (direct public-IP, enterprise-restricted client) | REQUIRED_FOR_STABLE (2.1.1); 2.1.0 PASS is historical baseline only | 2.1.0 PASS (2026-08-29); **2.1.1 real E2E required before stable tag** |
+| Windows client | CI-tested; real-environment validation pending | do not claim Stable field validation |
 | Rocky 9 container | REQUIRED_FOR_STABLE (automated) | container PASS |
 | AlmaLinux 9 container | REQUIRED_FOR_STABLE (automated) | container PASS |
 | Amazon Linux 2023 container | REQUIRED_FOR_STABLE (automated) | container PASS |
@@ -30,6 +31,30 @@ mutate firewall/SELinux.
 | Amazon Linux 2 real VM / systemd 219 / TTY | RECOMMENDED | NOT_TESTED |
 | Native ARM64 systemd | RECOMMENDED | architecture mapping unit-tested only |
 | Real OpenSSL 1.0.2 TLS enrollment | RECOMMENDED | AL2 container userspace is not this gate |
+
+## 2.1.1 real E2E requirement
+
+For **2.1.1** stable release, historical 2.1.0 real Ubuntu E2E evidence is a
+**historical baseline / previous-release evidence** only. It does **not** prove
+the 2.1.1 code line.
+
+Required sequence:
+
+```text
+Full Automated Gates
+        ↓ PASS
+candidate integration
+        ↓
+real 2.1.1 Ubuntu/OCI E2E
+        ↓ PASS
+main
+        ↓
+v2.1.1 stable tag
+```
+
+Do not mark `STABLE_TAG_READY=YES` for 2.1.1 until the fresh real 2.1.1
+Ubuntu/OCI E2E records PASS. Windows remains **CI-tested** with
+**real-environment validation pending**.
 
 ## Result format
 
@@ -115,8 +140,9 @@ Until then: `REAL_OPENSSL_1_0_2_TLS_ENROLLMENT=NOT_TESTED`.
 
 ## 2.1.0 real-environment acceptance (2026-08-29)
 
-Field-validated topology only. Do **not** treat this block as covering DNAT,
-SELinux Enforcing, ARM64, or OpenSSL 1.0.2.
+**Historical baseline / previous-release evidence only.** This block records the
+2.1.0 field result. It must **not** be reused as sufficient real validation for
+changed **2.1.1** code. See **2.1.1 real E2E requirement** above.
 
 ```text
 REAL_SERVER_OS=Ubuntu 24.04.4 LTS x86_64

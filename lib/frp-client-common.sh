@@ -3606,6 +3606,33 @@ frp_client_project_files_py() {
   printf '%s' "${here}/frp_project_files.py"
 }
 
+# Parser used for interrupted recovery / rollback. Must NOT depend on the
+# update candidate source tree — Snapshot A semantics stay owned by trusted
+# installed or snapshot-bundled parser code.
+frp_client_recovery_project_files_py() {
+  local backup="${1:-}"
+  local snap_py live
+  if [[ -n "$backup" ]]; then
+    snap_py="${backup}/files/usr/local/lib/frp-auto-deploy/frp_project_files.py"
+    if [[ -f "$snap_py" && ! -L "$snap_py" ]]; then
+      printf '%s' "$snap_py"
+      return 0
+    fi
+  fi
+  live="$(frp_client_path /usr/local/lib/frp-auto-deploy/frp_project_files.py)"
+  if [[ -f "$live" && ! -L "$live" ]]; then
+    printf '%s' "$live"
+    return 0
+  fi
+  if [[ -n "${_FRP_CLIENT_COMMON_DIR:-}" && -f "${_FRP_CLIENT_COMMON_DIR}/frp_project_files.py" ]]; then
+    printf '%s' "${_FRP_CLIENT_COMMON_DIR}/frp_project_files.py"
+    return 0
+  fi
+  local here
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  printf '%s' "${here}/frp_project_files.py"
+}
+
 frp_client_install_management_files() {
   local source="$1"
   local libdir bindir rel mode src dest
@@ -3816,9 +3843,10 @@ PY
 
 frp_client_upgrade_snapshot_entries() {
   local backup="$1" py
-  py="$(frp_client_project_files_py "${_FRP_CLIENT_UPGRADE_SOURCE:-}")"
+  # Ignore _FRP_CLIENT_UPGRADE_SOURCE: recovery must not use the candidate parser.
+  py="$(frp_client_recovery_project_files_py "$backup")"
   [[ -f "$py" ]] || {
-    echo "ERROR: frp_project_files.py is unavailable" >&2
+    echo "ERROR: trusted frp_project_files.py is unavailable for snapshot recovery" >&2
     return 1
   }
   python3 "$py" client-upgrade-snapshot-entries --snapshot "$backup"

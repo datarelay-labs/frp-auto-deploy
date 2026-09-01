@@ -324,7 +324,17 @@ function Invoke-FrpClientProjectUpdate {
                     $sumsPath = Join-Path $tmpDir 'SHA256SUMS'
                     $bundlePath = Join-Path $tmpDir 'bootstrap-client.ps1'
                     Write-Host 'Downloading Windows project update artifact...'
-                    if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+                    if ($env:FRP_WINDOWS_PROJECT_UPDATE_MOCK_DIR -and
+                        (Test-Path -LiteralPath $env:FRP_WINDOWS_PROJECT_UPDATE_MOCK_DIR)) {
+                        $mockDir = $env:FRP_WINDOWS_PROJECT_UPDATE_MOCK_DIR.Trim()
+                        $mockSums = Join-Path $mockDir 'SHA256SUMS'
+                        $mockBundle = Join-Path $mockDir 'bootstrap-client.ps1'
+                        if (-not (Test-Path -LiteralPath $mockSums) -or -not (Test-Path -LiteralPath $mockBundle)) {
+                            throw 'ERROR: FRP_WINDOWS_PROJECT_UPDATE_MOCK_DIR must contain SHA256SUMS and bootstrap-client.ps1'
+                        }
+                        Copy-Item -LiteralPath $mockSums -Destination $sumsPath -Force
+                        Copy-Item -LiteralPath $mockBundle -Destination $bundlePath -Force
+                    } elseif (Get-Command curl.exe -ErrorAction SilentlyContinue) {
                         $p1 = Start-Process -FilePath 'curl.exe' -ArgumentList @(
                             '--fail', '--silent', '--show-error', '--location', '--proto', '=https',
                             '-o', $sumsPath, $metaUrl
@@ -353,17 +363,18 @@ function Invoke-FrpClientProjectUpdate {
                         throw 'ERROR: downloaded project update failed SHA256 verification'
                     }
                     $env:FRP_BUNDLE_SHA256 = $verifiedSha
-                    if ($env:FRP_WINDOWS_PROJECT_SOURCE -and (Test-Path -LiteralPath $env:FRP_WINDOWS_PROJECT_SOURCE)) {
-                        $installFrom = $env:FRP_WINDOWS_PROJECT_SOURCE.Trim()
-                    } else {
-                        throw 'ERROR: verified project bootstrap artifact, but no windows/ source tree was provided; set -SourceDir or FRP_WINDOWS_PROJECT_SOURCE to the extracted windows package root'
-                    }
+                    # Install code MUST come from the verified bootstrap artifact — never from an
+                    # independent FRP_WINDOWS_PROJECT_SOURCE tree after remote verification.
+                    $extractRoot = Join-Path $tmpDir 'extracted'
+                    $installFrom = Expand-FrpWindowsBootstrapTree -BootstrapPath $bundlePath -DestinationDir $extractRoot
                 } else {
+                    # Explicit local/development SourceDir mode — not a remote verified identity.
                     if (-not (Test-Path -LiteralPath $installFrom)) {
                         throw ("ERROR: project source directory missing: {0}" -f $installFrom)
                     }
+                    Write-Host ("Installing from local/development Windows source: {0}" -f $installFrom)
+                    Assert-FrpWindowsManagedTreeComplete -SourceWindowsRoot $installFrom
                     if (-not $verifiedSha) {
-                        # Local/fixture path: hash a marker file if provided, else hash SourceDir stamp file.
                         if ($env:FRP_BUNDLE_FILE -and (Test-Path -LiteralPath $env:FRP_BUNDLE_FILE)) {
                             $verifiedSha = Get-FrpSha256HexOfFile -Path $env:FRP_BUNDLE_FILE
                         } elseif ($expected) {

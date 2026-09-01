@@ -667,12 +667,16 @@ frp_server_apply_project_upgrade() {
 
   frp_server_upgrade_changed "$staged" etc/systemd/system/frps.service && restart_frps=1
   frp_server_upgrade_changed "$staged" etc/systemd/system/frp-port-allocator.service && restart_alloc=1
-  frp_server_upgrade_changed "$staged" usr/local/lib/frp-auto-deploy/frp-port-allocator.py && restart_alloc=1
-  for rel in frp_mgmt_auth.py frp_pki.py frp_client_registry.py; do
-    frp_server_upgrade_changed "$staged" "usr/local/lib/frp-auto-deploy/${rel}" && restart_alloc=1
-  done
+  while IFS= read -r rel; do
+    [[ -n "$rel" ]] || continue
+    frp_server_upgrade_changed "$staged" "$rel" && restart_alloc=1
+  done < <(python3 "$(_frp_project_files_py)" allocator-runtime-rels)
   if frp_server_upgrade_is_single443; then
     frp_server_upgrade_changed "$staged" etc/systemd/system/frp-frontend.service && restart_frontend=1
+    while IFS= read -r rel; do
+      [[ -n "$rel" ]] || continue
+      frp_server_upgrade_changed "$staged" "$rel" && restart_frontend=1
+    done < <(python3 "$(_frp_project_files_py)" frontend-runtime-rels)
   fi
 
   if [[ "$-" == *E* ]]; then

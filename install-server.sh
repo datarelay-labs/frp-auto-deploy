@@ -1821,14 +1821,28 @@ frp_server_main() {
   fi
 
   local hash_frps_before hash_toml_before hash_unit_frps_before hash_unit_alloc_before
-  local hash_alloc_py_before hash_frontend_conf_before hash_unit_frontend_before
+  local hash_frontend_conf_before hash_unit_frontend_before
+  local -a hash_alloc_runtime_rels=() hash_alloc_runtime_before=()
+  local -a hash_frontend_runtime_rels=() hash_frontend_runtime_before=()
   hash_frps_before="$(frp_file_sha256 "$(frp_server_fs /usr/local/bin/frps)")"
   hash_toml_before="$(frp_file_sha256 "$frps_toml")"
   hash_unit_frps_before="$(frp_file_sha256 "$unit_frps")"
   hash_unit_alloc_before="$(frp_file_sha256 "$unit_alloc")"
-  hash_alloc_py_before="$(frp_file_sha256 "${lib_dir}/frp-port-allocator.py")"
   hash_frontend_conf_before="$(frp_file_sha256 "$frontend_conf")"
   hash_unit_frontend_before="$(frp_file_sha256 "$unit_frontend")"
+  local _py_files
+  _py_files="$BASE_DIR/lib/frp_project_files.py"
+  [[ -f "$_py_files" ]] || _py_files="/usr/local/lib/frp-auto-deploy/frp_project_files.py"
+  while IFS= read -r rel; do
+    [[ -n "$rel" ]] || continue
+    hash_alloc_runtime_rels+=("$rel")
+    hash_alloc_runtime_before+=("$(frp_file_sha256 "$(frp_server_fs "/${rel}")")")
+  done < <(python3 "$_py_files" allocator-runtime-rels)
+  while IFS= read -r rel; do
+    [[ -n "$rel" ]] || continue
+    hash_frontend_runtime_rels+=("$rel")
+    hash_frontend_runtime_before+=("$(frp_file_sha256 "$(frp_server_fs "/${rel}")")")
+  done < <(python3 "$_py_files" frontend-runtime-rels)
 
   # Capture existing listeners before restarting an existing frps. On first migration,
   # this preserves ports such as 6000/6001 already used by unmanaged clients.
@@ -1945,9 +1959,13 @@ frp_server_main() {
     if [[ "$(frp_file_sha256 "$unit_alloc")" != "$hash_unit_alloc_before" ]]; then
       need_alloc_restart=1
     fi
-    if [[ "$(frp_file_sha256 "${lib_dir}/frp-port-allocator.py")" != "$hash_alloc_py_before" ]]; then
-      need_alloc_restart=1
-    fi
+    local _i
+    for ((_i = 0; _i < ${#hash_alloc_runtime_rels[@]}; _i++)); do
+      if [[ "$(frp_file_sha256 "$(frp_server_fs "/${hash_alloc_runtime_rels[$_i]}")")" != \
+            "${hash_alloc_runtime_before[$_i]}" ]]; then
+        need_alloc_restart=1
+      fi
+    done
     if [[ "${PKI_ACTION:-}" == "reissued-server" || "${PKI_ACTION:-}" == "generated" ]]; then
       need_alloc_restart=1
       if frp_mode_is_single443; then
@@ -1961,6 +1979,12 @@ frp_server_main() {
       if [[ "$(frp_file_sha256 "$unit_frontend")" != "$hash_unit_frontend_before" ]]; then
         need_frontend_restart=1
       fi
+      for ((_i = 0; _i < ${#hash_frontend_runtime_rels[@]}; _i++)); do
+        if [[ "$(frp_file_sha256 "$(frp_server_fs "/${hash_frontend_runtime_rels[$_i]}")")" != \
+              "${hash_frontend_runtime_before[$_i]}" ]]; then
+          need_frontend_restart=1
+        fi
+      done
     fi
     if [[ "${FRP_MODE_SWITCH:-0}" == "1" ]]; then
       need_frps_restart=1

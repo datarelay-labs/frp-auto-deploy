@@ -183,6 +183,81 @@ def dual_role_shared_lib_basenames(server_path=None, client_path=None):
     return tuple(sorted(server & client))
 
 
+# Runtime modules loaded by frp-port-allocator.py (direct + transitive).
+# Derived from actual import/dynamic-load closure — not every managed project file.
+# Changing any of these requires restarting frp-port-allocator so running identity
+# matches installed identity.
+ALLOCATOR_RUNTIME_LIB_BASENAMES = (
+    "frp-port-allocator.py",
+    "frp_mgmt_auth.py",
+    "frp_client_registry.py",
+    "frp_frontend.py",
+    "frp_server_config.py",
+    "frp_enrollment_lifecycle.py",
+    "frp_enroll_challenge.py",
+    "frp_audit.py",
+    "frp_plugin_server.py",
+    "frp_data_plane_auth.py",
+    "frp_proxy_leases.py",
+    "frp_control_locks.py",
+)
+
+# Modules whose change requires restarting frp-frontend (single443) in addition
+# to unit/config changes.
+FRONTEND_RUNTIME_LIB_BASENAMES = (
+    "frp_frontend.py",
+)
+
+# Bootstrap-only sources that are not install destinations but must ship in the
+# standalone server archive (initial install scaffolding).
+SERVER_BOOTSTRAP_ONLY_SOURCES = (
+    "VERSION",
+    "install-server.sh",
+    "server/migrate_token.py",
+)
+
+
+def allocator_runtime_dest_rels():
+    """Installed relative paths whose change forces frp-port-allocator restart."""
+    prefix = "usr/local/lib/frp-auto-deploy/"
+    return tuple(prefix + name for name in ALLOCATOR_RUNTIME_LIB_BASENAMES)
+
+
+def frontend_runtime_dest_rels():
+    """Installed relative paths whose change forces frp-frontend restart."""
+    prefix = "usr/local/lib/frp-auto-deploy/"
+    return tuple(prefix + name for name in FRONTEND_RUNTIME_LIB_BASENAMES)
+
+
+def server_bootstrap_source_rels(source_root=None, path=None):
+    """Canonical source files for dist/bootstrap-server.sh payload.
+
+    Every managed-class source (project/optional/unit/unit-single443) plus
+    bootstrap-only scaffolding. Excludes generated/binary/version/protected.
+    """
+    root = Path(source_root) if source_root else manifest_path(path).resolve().parent.parent
+    seen = set()
+    out = []
+
+    def _add(rel):
+        if not rel or rel in ("-",) or rel in seen:
+            return
+        seen.add(rel)
+        out.append(rel)
+
+    for rel in SERVER_BOOTSTRAP_ONLY_SOURCES:
+        _add(rel)
+    for entry in load_entries(path):
+        if entry.cls not in MANAGED_CLASSES:
+            continue
+        if entry.source in ("-", "", None):
+            continue
+        if entry.cls == "optional" and not (root / entry.source).is_file():
+            continue
+        _add(entry.source)
+    return out
+
+
 def protected_exact(path=None):
     return tuple(e.dest for e in load_entries(path) if e.cls == "protected")
 
@@ -472,6 +547,9 @@ def main(argv=None):
             "client-managed-rels",
             "client-uninstall-rels",
             "dual-role-shared-libs",
+            "allocator-runtime-rels",
+            "frontend-runtime-rels",
+            "server-bootstrap-sources",
             "validate-list",
             "client-upgrade-snapshot-entries",
             "client-upgrade-snapshot-validate",
@@ -521,6 +599,18 @@ def main(argv=None):
     if args.action == "dual-role-shared-libs":
         for name in dual_role_shared_lib_basenames(args.manifest, args.client_manifest):
             print(name)
+        return 0
+    if args.action == "allocator-runtime-rels":
+        for rel in allocator_runtime_dest_rels():
+            print(rel)
+        return 0
+    if args.action == "frontend-runtime-rels":
+        for rel in frontend_runtime_dest_rels():
+            print(rel)
+        return 0
+    if args.action == "server-bootstrap-sources":
+        for rel in server_bootstrap_source_rels(args.source, args.manifest):
+            print(rel)
         return 0
     if args.action == "validate-list":
         if not args.kind:

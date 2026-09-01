@@ -24,6 +24,8 @@ ensure_bundle() {
     need=1
   elif ! grep -q 'frpcli' "$bundle"; then
     need=1
+  elif ! grep -q 'frp_data_plane_auth.py' "$bundle"; then
+    need=1
   fi
   if [[ "$need" == "1" ]]; then
     bash "$ROOT/scripts/build-bundles.sh" >/dev/null
@@ -32,6 +34,10 @@ ensure_bundle() {
   grep -q 'frp_fleet.py' "$bundle" || fail "bundle missing frp_fleet.py"
   grep -q 'frp_server_lifecycle.py' "$bundle" || fail "bundle missing server lifecycle"
   grep -q 'tools/frpcli' "$bundle" || fail "bundle missing frpcli"
+  grep -q 'frp_data_plane_auth.py' "$bundle" || fail "bundle missing frp_data_plane_auth.py"
+  grep -q 'frp_proxy_leases.py' "$bundle" || fail "bundle missing frp_proxy_leases.py"
+  grep -q 'frp_plugin_server.py' "$bundle" || fail "bundle missing frp_plugin_server.py"
+  grep -q 'frp_release_guard.py' "$bundle" || fail "bundle missing frp_release_guard.py"
 }
 
 setup_server_tree() {
@@ -161,7 +167,16 @@ FRP_SERVER_TEST_ROOT="$SERVER" FRP_DEPLOY_TEST_ROOT="$SERVER" FRP_SKIP_SYSTEMD=1
 [[ -f "$SERVER/usr/local/lib/frp-auto-deploy/frp_fleet.py" ]] || fail "fleet module missing"
 [[ -f "$SERVER/usr/local/lib/frp-auto-deploy/frp_server_lifecycle.py" ]] \
   || fail "server lifecycle missing"
+[[ -f "$SERVER/usr/local/lib/frp-auto-deploy/frp_data_plane_auth.py" ]] \
+  || fail "installed frp_data_plane_auth.py missing"
+[[ -f "$SERVER/usr/local/lib/frp-auto-deploy/frp_proxy_leases.py" ]] \
+  || fail "installed frp_proxy_leases.py missing"
+[[ -f "$SERVER/usr/local/lib/frp-auto-deploy/frp_plugin_server.py" ]] \
+  || fail "installed frp_plugin_server.py missing"
+[[ -f "$SERVER/usr/local/lib/frp-auto-deploy/frp_release_guard.py" ]] \
+  || fail "installed frp_release_guard.py missing"
 pass "INSTALLED_FILES"
+pass "INSTALLED_DATA_PLANE_MODULES"
 
 export PATH="$SERVER/usr/local/sbin:$SERVER/usr/local/bin:/usr/bin:/bin"
 unset FRP_CTL_BIN_DIR || true
