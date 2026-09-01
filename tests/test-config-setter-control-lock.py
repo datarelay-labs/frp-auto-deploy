@@ -32,7 +32,7 @@ def main():
             'deployment_mode': 'direct',
             'frp_transport': 'tcp',
             'port_start': 6000,
-            'port_end': 6100,
+            'port_end': 6099,
             'frp_control_listen_port': 7000,
             'frp_control_public_port': 7000,
             'allocator_listen_port': 7500,
