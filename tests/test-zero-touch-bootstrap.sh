@@ -931,7 +931,7 @@ pass "PARTIAL_CLIENT_RECOVERY_PROTECTION"
 
 # Expired ticket via client.
 EXP="$WORKDIR/client-exp"
-issue_ticket >"$WORKDIR/exp-create.out"
+issue_ticket >"$WORKDIR/exp-create.out" || fail "exp ticket create"
 EXP_TICKET="$(python3 - "$WORKDIR/exp-create.out" <<'PY'
 import re, sys
 from pathlib import Path
@@ -940,9 +940,10 @@ m = re.search(r"FRP_BOOTSTRAP_TICKET=(?:'([^']+)'|\"([^\"]+)\"|(\S+))", text)
 print(next(g for g in m.groups() if g) if m else '')
 PY
 )"
+[[ -n "$EXP_TICKET" ]] || fail "exp ticket missing"
 EXP_ID="${EXP_TICKET#bt1.}"
 EXP_ID="${EXP_ID%%.*}"
-python3 - "$ALLOC_ROOT/bootstrap/${EXP_ID}.json" "$ALLOC_ROOT/enrollments" <<'PY'
+python3 - "$ALLOC_ROOT/bootstrap/${EXP_ID}.json" "$ALLOC_ROOT/enrollments" <<'PY' || fail "exp ticket expiry setup"
 import json, sys, time
 from pathlib import Path
 path = Path(sys.argv[1])
@@ -964,11 +965,14 @@ export FRP_BOOTSTRAP_TICKET="$EXP_TICKET"
 export FRP_ZERO_TOUCH=1
 export FRP_SSH_USER="$SSH_USER"
 export FRP_SSH_PORT="$LISTEN_PORT"
+export FRP_ALLOCATOR_URL="https://127.0.0.1:${ALLOC_PORT}/enroll"
 export FRP_ALLOCATOR_CA_SHA256="$LIVE_CA_FP"
 export FRP_CLIENT_HOOK_LOG="$WORKDIR/exp.hook"
 : >"$FRP_CLIENT_HOOK_LOG"
 set +e
-frp_client_main >"$WORKDIR/exp.out" 2>"$WORKDIR/exp.err" </dev/null
+(
+  frp_client_main
+) >"$WORKDIR/exp.out" 2>"$WORKDIR/exp.err" </dev/null
 exp_rc=$?
 set -e
 [[ "$exp_rc" -ne 0 ]] || fail "expired ticket should fail"

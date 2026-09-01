@@ -12,6 +12,15 @@ jobs:
     steps:
       # actions/checkout@v4.2.2
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Pin FRP 0.70.1 integration test binaries
+        run: |
+          FRP_VERSION=0.70.1
+          FRP_ARCH=amd64
+          curl -fsSL -o /tmp/frp.tgz \
+            "https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/frp_${FRP_VERSION}_linux_${FRP_ARCH}.tar.gz"
+          tar -xzf /tmp/frp.tgz -C /tmp
+          sudo install -m 0755 "/tmp/frp_${FRP_VERSION}_linux_${FRP_ARCH}/frps" /usr/local/bin/frps
+          test -x "/tmp/frp_${FRP_VERSION}_linux_${FRP_ARCH}/frpc"
       - name: Full local non-Docker suite
         run: ./tests/run-all.sh
       # Live distro containers cannot validate systemd unless PID 1 is systemd.
