@@ -3624,13 +3624,9 @@ frp_client_recovery_project_files_py() {
     printf '%s' "$live"
     return 0
   fi
-  if [[ -n "${_FRP_CLIENT_COMMON_DIR:-}" && -f "${_FRP_CLIENT_COMMON_DIR}/frp_project_files.py" ]]; then
-    printf '%s' "${_FRP_CLIENT_COMMON_DIR}/frp_project_files.py"
-    return 0
-  fi
-  local here
-  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  printf '%s' "${here}/frp_project_files.py"
+  # Fail closed: never fall back to the caller's source tree (may be a candidate).
+  echo "ERROR: trusted frp_project_files.py missing for recovery (snapshot/live only)" >&2
+  return 1
 }
 
 frp_client_install_management_files() {

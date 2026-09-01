@@ -1987,6 +1987,38 @@ def check_server(report, paths, facts, skip_network):
         if ports.get('deployment_mode') == 'single443':
             frontend_state = check_unit(report, facts, 'frp-frontend', 'frontend_service', 'frp-frontend.service')
             check_port_collision(report, facts, ports.get('frp_public'), frontend_state, 'frontend_listen_port', 'frontend')
+            listen_host = str(ports.get('listen_host') or cfg.get('listen_host') or '').strip()
+            bind_addr = str(
+                ports.get('frp_bind_addr')
+                or cfg.get('frp_control_bind_addr')
+                or listen_host
+                or ''
+            ).strip()
+            loopback = ('127.0.0.1', '::1', 'localhost')
+            if listen_host and listen_host not in loopback:
+                report.add(
+                    'single443_listen_bind', FAIL,
+                    'single-443 allocator listen_host must be loopback-only',
+                    listen_host,
+                    're-run installer or set listen_host=127.0.0.1',
+                    'security',
+                )
+            elif bind_addr and bind_addr not in loopback:
+                report.add(
+                    'single443_listen_bind', FAIL,
+                    'single-443 FRP control bind must be loopback-only',
+                    bind_addr,
+                    're-run installer or set frp_control_bind_addr=127.0.0.1',
+                    'security',
+                )
+            else:
+                report.add(
+                    'single443_listen_bind', PASS,
+                    'single-443 internal backends are loopback-bound',
+                    '%s / %s' % (listen_host or '127.0.0.1', bind_addr or '127.0.0.1'),
+                    '',
+                    'security',
+                )
             conf = paths.p('/etc/frp-auto-deploy/frontend.conf')
             if conf.is_file():
                 text = conf.read_text(encoding='utf-8', errors='replace')

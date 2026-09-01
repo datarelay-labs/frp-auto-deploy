@@ -251,7 +251,7 @@ for _ in $(seq 1 80); do
   sleep 0.05
 done
 [[ -f "$READY" ]] || { kill "$BACK_PID" 2>/dev/null || true; fail "backup lock hook"; }
-python3 - "$CONC" "$WORKDIR/writer.started" "$WORKDIR/writer.done" <<'PY' &
+python3 - "$CONC" "$WORKDIR/writer.started" "$WORKDIR/writer.done" <<'PY' >/dev/null 2>&1 &
 import json, os, sys, time
 from pathlib import Path
 root = Path(sys.argv[1])

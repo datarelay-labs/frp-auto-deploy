@@ -7,7 +7,18 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKDIR="$(mktemp -d)"
 ALLOC_PID=""
 LISTEN_PID=""
-trap '[[ -n "$ALLOC_PID" ]] && kill "$ALLOC_PID" 2>/dev/null || true; [[ -n "$LISTEN_PID" ]] && kill "$LISTEN_PID" 2>/dev/null || true; rm -rf "$WORKDIR"' EXIT
+cleanup_bg() {
+  if [[ -n "$ALLOC_PID" ]]; then
+    kill "$ALLOC_PID" 2>/dev/null || true
+    kill -9 "$ALLOC_PID" 2>/dev/null || true
+  fi
+  if [[ -n "$LISTEN_PID" ]]; then
+    kill "$LISTEN_PID" 2>/dev/null || true
+    kill -9 "$LISTEN_PID" 2>/dev/null || true
+  fi
+  rm -rf "$WORKDIR"
+}
+trap cleanup_bg EXIT
 
 pass() { echo "PASS $1"; }
 fail() { echo "FAIL $1" >&2; exit 1; }
@@ -29,7 +40,8 @@ EOF
 
 start_listener() {
   local port="$1"
-  python3 - "$port" <<'PY' &
+  # Keep orphans from holding a `run-all | tee` stdout pipe open.
+  python3 - "$port" <<'PY' >/dev/null 2>&1 &
 import socket, sys
 port = int(sys.argv[1])
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

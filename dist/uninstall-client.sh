@@ -183,14 +183,16 @@ else
   frp_u_rm_file "$(frp_u_path /usr/local/bin/frpcli)"
   libdir="$(frp_u_path /usr/local/lib/frp-auto-deploy)"
   if [[ -d "$libdir" && ! -L "$libdir" ]]; then
+    # Client-only fallback removals. Shared dual-role libs stay when KEEP_SHARED=1.
     for f in frp-client-common.sh frp-client-lifecycle.sh frp_client_lifecycle.py \
-      uninstall-client.sh frp_clock_sync.py frp-doctor-common.sh frp_doctor.py \
-      frp_ctl_grammar.py frp_ctl_repl.py; do
+      uninstall-client.sh frp_ctl_grammar.py frp_ctl_repl.py; do
       frp_u_rm_file "${libdir}/${f}"
     done
     if [[ "$KEEP_SHARED" != "1" ]]; then
-      frp_u_rm_file "${libdir}/frp_mgmt_auth.py"
-      frp_u_rm_file "${libdir}/frp-common.sh"
+      for f in frp_clock_sync.py frp-doctor-common.sh frp_doctor.py \
+        frp_mgmt_auth.py frp-common.sh; do
+        frp_u_rm_file "${libdir}/${f}"
+      done
     fi
   fi
 fi

@@ -3,8 +3,9 @@
 > **Document role:** Product Charter + Product Specification + Architecture Principles + Roadmap  
 > **Repository:** `datarelay-labs/frp-auto-deploy`  
 > **Document status:** Master / Living Document  
-> **Last updated:** 2026-08-31  
-> **Current stable baseline:** Project 2.1.0  
+> **Last updated:** 2026-09-01  
+> **Current project version:** 2.1.1  
+> **Last fully E2E-validated stable baseline:** Project 2.1.0 (historical)  
 > **Pinned upstream FRP:** 0.70.1  
 > **Primary management interface:** `sudo frpctl`
 
@@ -1472,12 +1473,15 @@ Prometheus/Grafana/RMM 형태의 motion
 
 ## Stable Baseline
 
-현재 repository 기준 stable baseline:
+현재 repository 기준 project version:
 
 ```text
-Project: 2.1.0
+Project: 2.1.1
 FRP:     0.70.1
 ```
+
+2.1.1 requires fresh real-environment E2E before promotion. Historical
+fully-validated stable baseline remains 2.1.0.
 
 2.1.0의 주요 stable milestone:
 

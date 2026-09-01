@@ -47,7 +47,7 @@ class AuditLogTests(unittest.TestCase):
             "enrollment.created",
             client_id="aabbccdd",
             details={
-                "ticket": "btck.0123456789abcdef.deadbeef",
+                "ticket": "bt1.0123456789abcdef.deadbeefcafebabe",
                 "label": "web01",
                 "note": "ok",
             },
@@ -59,7 +59,14 @@ class AuditLogTests(unittest.TestCase):
         self.assertEqual(record["event"], "enrollment.created")
         self.assertEqual(record["details"]["ticket"], "[REDACTED]")
         self.assertEqual(record["details"]["label"], "web01")
-        self.assertNotIn("deadbeef", path.read_text())
+        self.assertNotIn("deadbeefcafebabe", path.read_text())
+        # Value-pattern redaction also covers bare ticket strings outside key names.
+        ok2 = self.audit.emit(
+            "enrollment.note",
+            details={"msg": "issued bt1.0123456789abcdef.deadbeefcafebabe"},
+        )
+        self.assertTrue(ok2)
+        self.assertNotIn("deadbeefcafebabe", path.read_text())
 
     def test_write_failure_warns_not_raise(self):
         blocker = Path(self.root) / "blocked"

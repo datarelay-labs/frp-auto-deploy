@@ -240,6 +240,16 @@ def validate_server_config(cfg):
             raise ValueError('single443 internal backend ports collide with service port range')
         if control_listen == allocator_listen:
             raise ValueError('single443 internal allocator and FRP backends must remain separate')
+        # Fail closed: single443 backends must not bind publicly (6099/7000 exposure).
+        listen_host = str(cfg.get('listen_host') or '').strip() or '127.0.0.1'
+        control_bind = str(
+            cfg.get('frp_control_bind_addr') or cfg.get('bind_addr') or listen_host
+        ).strip() or '127.0.0.1'
+        loopback = ('127.0.0.1', '::1', 'localhost')
+        if listen_host not in loopback:
+            raise ValueError('single443 listen_host must be loopback-only')
+        if control_bind not in loopback:
+            raise ValueError('single443 frp_control_bind_addr must be loopback-only')
     else:
         # Direct mode: public ports must not collide with the service range
         # (already checked). Accidental public overlap with each other is a

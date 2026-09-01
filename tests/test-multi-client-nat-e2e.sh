@@ -126,7 +126,7 @@ PY
 
 start_identity() {
   local marker="$1" portfile="$2"
-  python3 - "$marker" "$portfile" <<'PY' &
+  python3 - "$marker" "$portfile" <<'PY' >/dev/null 2>&1 &
 import socket, sys
 from pathlib import Path
 marker, portfile = sys.argv[1], sys.argv[2]

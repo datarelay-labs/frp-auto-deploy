@@ -168,8 +168,23 @@ def test_core():
         base_direct(frp_plugin_listen_host=True),
         'frp_plugin_listen_host',
     )
+    expect_ok(
+        'SINGLE443_LOOPBACK_BINDS_OK',
+        base_single443(listen_host='127.0.0.1', frp_control_bind_addr='127.0.0.1'),
+    )
+    expect_fail(
+        'SINGLE443_PUBLIC_LISTEN_HOST_REJECTED',
+        base_single443(listen_host='0.0.0.0', frp_control_bind_addr='127.0.0.1'),
+        'listen_host must be loopback-only',
+    )
+    expect_fail(
+        'SINGLE443_PUBLIC_CONTROL_BIND_REJECTED',
+        base_single443(listen_host='127.0.0.1', frp_control_bind_addr='0.0.0.0'),
+        'frp_control_bind_addr must be loopback-only',
+    )
     pass_('DATA_PLANE_STRICT_BOOLEAN_VALIDATION')
     pass_('LEASE_DIR_VALIDATION')
+    pass_('SINGLE443_LOOPBACK_BIND_VALIDATION')
 
 
 def test_restore_rejects_unsafe():

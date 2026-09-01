@@ -22,7 +22,7 @@ SECRET_KEY_RE = re.compile(
     re.IGNORECASE,
 )
 SECRET_VALUE_RE = re.compile(
-    r"(BEGIN [A-Z ]*PRIVATE KEY|btck\.[0-9a-f]{16}\.|enroll-secret-)",
+    r"(BEGIN [A-Z ]*PRIVATE KEY|bt1\.[0-9a-f]{16}\.|btck\.[0-9a-f]{16}\.|enroll-secret-)",
     re.IGNORECASE,
 )
 

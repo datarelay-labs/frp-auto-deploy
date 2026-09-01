@@ -64,7 +64,7 @@ pass "PROBE_TCP_METACHAR_NO_EXEC"
 pass "PROBE_TCP_NO_FILE_CREATE"
 
 # Positive control: a free local listener should be reachable with argv-safe host/port.
-python3 - "$WORKDIR" <<'PY' &
+python3 - "$WORKDIR" <<'PY' >/dev/null 2>&1 &
 import socket, time, sys
 from pathlib import Path
 path = Path(sys.argv[1]) / 'port'
