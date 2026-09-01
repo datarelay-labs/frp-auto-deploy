@@ -3587,56 +3587,35 @@ frp_client_upgrade_source_version() {
   fi
 }
 
+frp_client_project_files_py() {
+  local source="${1:-}"
+  if [[ -n "$source" && -f "${source}/lib/frp_project_files.py" ]]; then
+    printf '%s' "${source}/lib/frp_project_files.py"
+    return 0
+  fi
+  if [[ -n "${_FRP_CLIENT_COMMON_DIR:-}" && -f "${_FRP_CLIENT_COMMON_DIR}/frp_project_files.py" ]]; then
+    printf '%s' "${_FRP_CLIENT_COMMON_DIR}/frp_project_files.py"
+    return 0
+  fi
+  if [[ -f /usr/local/lib/frp-auto-deploy/frp_project_files.py ]]; then
+    printf '%s' /usr/local/lib/frp-auto-deploy/frp_project_files.py
+    return 0
+  fi
+  local here
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  printf '%s' "${here}/frp_project_files.py"
+}
+
 frp_client_install_management_files() {
   local source="$1"
-  local libdir bindir
+  local libdir bindir rel mode src dest
   libdir="$(frp_client_lib_dir)"
   bindir="$(frp_client_path /usr/local/bin)"
   mkdir -p "$libdir" "$bindir"
-  [[ -f "${source}/lib/frp-client-common.sh" ]] || {
-    echo "ERROR: missing ${source}/lib/frp-client-common.sh" >&2
+  [[ -d "$source" ]] || {
+    echo "ERROR: client install source directory is required" >&2
     return 1
   }
-  [[ -f "${source}/lib/frp-common.sh" ]] || {
-    echo "ERROR: missing ${source}/lib/frp-common.sh" >&2
-    return 1
-  }
-  [[ -f "${source}/lib/frp_mgmt_auth.py" ]] || {
-    echo "ERROR: missing ${source}/lib/frp_mgmt_auth.py" >&2
-    return 1
-  }
-  [[ -f "${source}/lib/frp-doctor-common.sh" ]] || {
-    echo "ERROR: missing ${source}/lib/frp-doctor-common.sh" >&2
-    return 1
-  }
-  [[ -f "${source}/lib/frp_doctor.py" ]] || {
-    echo "ERROR: missing ${source}/lib/frp_doctor.py" >&2
-    return 1
-  }
-  [[ -f "${source}/lib/frp_ctl_grammar.py" ]] || {
-    echo "ERROR: missing ${source}/lib/frp_ctl_grammar.py" >&2
-    return 1
-  }
-  [[ -f "${source}/lib/frp_ctl_repl.py" ]] || {
-    echo "ERROR: missing ${source}/lib/frp_ctl_repl.py" >&2
-    return 1
-  }
-  [[ -f "${source}/tools/frp-client" ]] || {
-    echo "ERROR: missing ${source}/tools/frp-client" >&2
-    return 1
-  }
-  [[ -f "${source}/tools/frpctl" ]] || {
-    echo "ERROR: missing ${source}/tools/frpctl" >&2
-    return 1
-  }
-  install -m 0644 "${source}/lib/frp-client-common.sh" "${libdir}/frp-client-common.sh"
-  install -m 0644 "${source}/lib/frp-common.sh" "${libdir}/frp-common.sh"
-  install -m 0644 "${source}/lib/frp_mgmt_auth.py" "${libdir}/frp_mgmt_auth.py"
-  install -m 0644 "${source}/lib/frp_clock_sync.py" "${libdir}/frp_clock_sync.py"
-  install -m 0644 "${source}/lib/frp-doctor-common.sh" "${libdir}/frp-doctor-common.sh"
-  install -m 0644 "${source}/lib/frp_doctor.py" "${libdir}/frp_doctor.py"
-  install -m 0644 "${source}/lib/frp_ctl_grammar.py" "${libdir}/frp_ctl_grammar.py"
-  install -m 0644 "${source}/lib/frp_ctl_repl.py" "${libdir}/frp_ctl_repl.py"
   [[ -f "${source}/lib/frp_project_files.py" ]] || {
     echo "ERROR: missing ${source}/lib/frp_project_files.py" >&2
     return 1
@@ -3645,52 +3624,44 @@ frp_client_install_management_files() {
     echo "ERROR: missing ${source}/lib/client-project-files.manifest" >&2
     return 1
   }
-  install -m 0644 "${source}/lib/frp_project_files.py" "${libdir}/frp_project_files.py"
-  install -m 0644 "${source}/lib/client-project-files.manifest" "${libdir}/client-project-files.manifest"
-  [[ -f "${source}/lib/frp_client_lifecycle.py" ]] || {
-    echo "ERROR: missing ${source}/lib/frp_client_lifecycle.py" >&2
-    return 1
-  }
-  [[ -f "${source}/lib/frp-client-lifecycle.sh" ]] || {
-    echo "ERROR: missing ${source}/lib/frp-client-lifecycle.sh" >&2
-    return 1
-  }
-  install -m 0644 "${source}/lib/frp_client_lifecycle.py" "${libdir}/frp_client_lifecycle.py"
-  install -m 0644 "${source}/lib/frp-client-lifecycle.sh" "${libdir}/frp-client-lifecycle.sh"
-  [[ -f "${source}/uninstall-client.sh" ]] || {
-    echo "ERROR: missing ${source}/uninstall-client.sh" >&2
-    return 1
-  }
-  install -m 0755 "${source}/uninstall-client.sh" "${libdir}/uninstall-client.sh"
-  install -m 0755 "${source}/tools/frp-client" "${bindir}/frp-client"
-  install -m 0755 "${source}/tools/frpctl" "${bindir}/frpctl"
-  if [[ -f "${source}/tools/frpcli" ]]; then
-    install -m 0755 "${source}/tools/frpcli" "${bindir}/frpcli"
-  fi
+  local list
+  list="$(frp_client_upgrade_destinations "$source")" || return 1
+  while IFS=: read -r rel mode src; do
+    [[ -n "$rel" ]] || continue
+    [[ -f "${source}/${src}" ]] || {
+      echo "ERROR: install source is missing ${src}" >&2
+      return 1
+    }
+    dest="$(frp_client_path "/${rel}")"
+    mkdir -p "$(dirname "$dest")"
+    install -m "$mode" "${source}/${src}" "$dest"
+  done <<<"$list"
   frp_client_upgrade_source_version "$source"
   frp_client_write_version_file
 }
 
 frp_client_upgrade_destinations() {
-  # dest_rel:mode:source_rel
-  printf '%s\n' \
-    "usr/local/lib/frp-auto-deploy/frp-client-common.sh:0644:lib/frp-client-common.sh" \
-    "usr/local/lib/frp-auto-deploy/frp-common.sh:0644:lib/frp-common.sh" \
-    "usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py:0644:lib/frp_mgmt_auth.py" \
-    "usr/local/lib/frp-auto-deploy/frp_data_plane_auth.py:0644:lib/frp_data_plane_auth.py" \
-    "usr/local/lib/frp-auto-deploy/frp_clock_sync.py:0644:lib/frp_clock_sync.py" \
-    "usr/local/lib/frp-auto-deploy/frp-doctor-common.sh:0644:lib/frp-doctor-common.sh" \
-    "usr/local/lib/frp-auto-deploy/frp_doctor.py:0644:lib/frp_doctor.py" \
-    "usr/local/lib/frp-auto-deploy/frp_ctl_grammar.py:0644:lib/frp_ctl_grammar.py" \
-    "usr/local/lib/frp-auto-deploy/frp_ctl_repl.py:0644:lib/frp_ctl_repl.py" \
-    "usr/local/lib/frp-auto-deploy/frp_project_files.py:0644:lib/frp_project_files.py" \
-    "usr/local/lib/frp-auto-deploy/client-project-files.manifest:0644:lib/client-project-files.manifest" \
-    "usr/local/lib/frp-auto-deploy/frp_client_lifecycle.py:0644:lib/frp_client_lifecycle.py" \
-    "usr/local/lib/frp-auto-deploy/frp-client-lifecycle.sh:0644:lib/frp-client-lifecycle.sh" \
-    "usr/local/lib/frp-auto-deploy/uninstall-client.sh:0755:uninstall-client.sh" \
-    "usr/local/bin/frp-client:0755:tools/frp-client" \
-    "usr/local/bin/frpctl:0755:tools/frpctl" \
-    "usr/local/bin/frpcli:0755:tools/frpcli"
+  # dest_rel:mode:source_rel — derived from client-project-files.manifest
+  local source="${1:-}"
+  local py extra=() out
+  py="$(frp_client_project_files_py "$source")"
+  [[ -f "$py" ]] || {
+    echo "ERROR: frp_project_files.py is unavailable" >&2
+    return 1
+  }
+  if [[ -n "$source" ]]; then
+    extra+=(--source "$source")
+  fi
+  out="$(python3 "$py" client-project-destinations "${extra[@]}")" || return 1
+  [[ -n "$out" ]] || {
+    echo "ERROR: client project destination list is empty" >&2
+    return 1
+  }
+  if ! grep -q 'frp_data_plane_auth.py' <<<"$out"; then
+    echo "ERROR: client project destination list is missing frp_data_plane_auth.py" >&2
+    return 1
+  fi
+  printf '%s\n' "$out"
 }
 
 frp_client_upgrade_validate_existing() {
@@ -3715,7 +3686,7 @@ frp_client_upgrade_validate_existing() {
 }
 
 frp_client_upgrade_validate_staged() {
-  local staged="$1" rel mode src dest
+  local staged="$1" source="${2:-${_FRP_CLIENT_UPGRADE_SOURCE:-}}" rel mode src dest
   while IFS=: read -r rel mode src; do
     [[ -n "$rel" ]] || continue
     dest="${staged}/${rel}"
@@ -3723,13 +3694,14 @@ frp_client_upgrade_validate_staged() {
       echo "ERROR: staged update is missing ${rel}" >&2
       return 1
     }
-  done < <(frp_client_upgrade_destinations)
+  done < <(frp_client_upgrade_destinations "$source")
   bash -n "${staged}/usr/local/bin/frp-client" || return 1
   bash -n "${staged}/usr/local/bin/frpctl" || return 1
   bash -n "${staged}/usr/local/lib/frp-auto-deploy/frp-client-common.sh" || return 1
   bash -n "${staged}/usr/local/lib/frp-auto-deploy/frp-common.sh" || return 1
   bash -n "${staged}/usr/local/lib/frp-auto-deploy/frp-doctor-common.sh" || return 1
   python3 -m py_compile "${staged}/usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py" || return 1
+  python3 -m py_compile "${staged}/usr/local/lib/frp-auto-deploy/frp_data_plane_auth.py" || return 1
   python3 -m py_compile "${staged}/usr/local/lib/frp-auto-deploy/frp_doctor.py" || return 1
   python3 -m py_compile "${staged}/usr/local/lib/frp-auto-deploy/frp_ctl_grammar.py" || return 1
   python3 -m py_compile "${staged}/usr/local/lib/frp-auto-deploy/frp_ctl_repl.py" || return 1
@@ -3754,6 +3726,7 @@ frp_client_upgrade_validate_staged() {
 }
 
 frp_client_upgrade_backup_tools() {
+  local source="${1:-${_FRP_CLIENT_UPGRADE_SOURCE:-}}"
   local stamp dest live rel mode src base
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
   dest="$(frp_client_upgrade_backup_root)/${stamp}"
@@ -3770,7 +3743,7 @@ frp_client_upgrade_backup_tools() {
     else
       printf 'absent %s\n' "$base" >>"${dest}/manifest"
     fi
-  done < <(frp_client_upgrade_destinations)
+  done < <(frp_client_upgrade_destinations "$source")
   live="$(frp_client_version_file)"
   if [[ -f "$live" ]]; then
     install -m 0644 "$live" "${dest}/version"
@@ -3800,7 +3773,7 @@ PY
 }
 
 frp_client_upgrade_restore_tools() {
-  local backup="$1" live rel mode src base
+  local backup="$1" source="${2:-${_FRP_CLIENT_UPGRADE_SOURCE:-}}" live rel mode src base
   [[ -d "$backup" ]] || return 1
   if [[ "${FRP_CLIENT_UPGRADE_HOOK_ROLLBACK_FAIL:-}" == "1" ]]; then
     echo "ERROR: simulated update rollback failure" >&2
@@ -3815,7 +3788,7 @@ frp_client_upgrade_restore_tools() {
     else
       rm -f "$live"
     fi
-  done < <(frp_client_upgrade_destinations)
+  done < <(frp_client_upgrade_destinations "$source")
   live="$(frp_client_version_file)"
   if [[ -f "${backup}/version" ]]; then
     mkdir -p "$(dirname "$live")"
@@ -3832,7 +3805,7 @@ frp_client_upgrade_restore_tools() {
 }
 
 frp_client_upgrade_verify_restored() {
-  local backup="$1" live rel mode src base state
+  local backup="$1" source="${2:-${_FRP_CLIENT_UPGRADE_SOURCE:-}}" live rel mode src base state
   [[ -f "${backup}/manifest" ]] || return 1
   while IFS=: read -r rel mode src; do
     [[ -n "$rel" ]] || continue
@@ -3851,7 +3824,7 @@ frp_client_upgrade_verify_restored() {
         return 1
         ;;
     esac
-  done < <(frp_client_upgrade_destinations)
+  done < <(frp_client_upgrade_destinations "$source")
   live="$(frp_client_version_file)"
   state="$(awk '$2=="version" {print $1; exit}' "${backup}/manifest")"
   case "$state" in
@@ -3929,8 +3902,9 @@ frp_client_upgrade_rollback() {
 }
 
 frp_client_upgrade_stage() {
-  local source="$1" staged="$2" rel mode src
+  local source="$1" staged="$2" rel mode src list
   mkdir -p "$staged"
+  list="$(frp_client_upgrade_destinations "$source")" || return 1
   while IFS=: read -r rel mode src; do
     [[ -n "$rel" ]] || continue
     [[ -f "${source}/${src}" ]] || {
@@ -3939,12 +3913,13 @@ frp_client_upgrade_stage() {
     }
     mkdir -p "$(dirname "${staged}/${rel}")"
     install -m "$mode" "${source}/${src}" "${staged}/${rel}"
-  done < <(frp_client_upgrade_destinations)
+  done <<<"$list"
 }
 
 frp_client_upgrade_install_staged() {
-  local staged="$1" live rel mode src
+  local staged="$1" source="${2:-${_FRP_CLIENT_UPGRADE_SOURCE:-}}" live rel mode src list
   local replaced=0
+  list="$(frp_client_upgrade_destinations "$source")" || return 1
   while IFS=: read -r rel mode src; do
     [[ -n "$rel" ]] || continue
     live="$(frp_client_path "/${rel}")"
@@ -3954,12 +3929,12 @@ frp_client_upgrade_install_staged() {
       echo "ERROR: simulated tool install failure" >&2
       return 1
     fi
-  done < <(frp_client_upgrade_destinations)
+  done <<<"$list"
   return 0
 }
 
 frp_client_upgrade_verify() {
-  local ident_before="$1"
+  local ident_before="$1" source="${2:-${_FRP_CLIENT_UPGRADE_SOURCE:-}}"
   local live rel mode src
   while IFS=: read -r rel mode src; do
     [[ -n "$rel" ]] || continue
@@ -3968,7 +3943,7 @@ frp_client_upgrade_verify() {
       echo "ERROR: upgraded file missing: ${live}" >&2
       return 1
     }
-  done < <(frp_client_upgrade_destinations)
+  done < <(frp_client_upgrade_destinations "$source")
   [[ -x "$(frp_client_path /usr/local/bin/frp-client)" ]] || return 1
   [[ -x "$(frp_client_path /usr/local/bin/frpctl)" ]] || return 1
   frp_load_client_state "$(frp_client_state_path)" || return 1
@@ -4014,6 +3989,10 @@ frp_client_refresh_data_plane_proof_if_needed() {
   if ! frp_client_toml_needs_data_plane_refresh; then
     return 10
   fi
+  if [[ "${FRP_CLIENT_UPGRADE_HOOK_FAIL:-}" == "proof-refresh" ]]; then
+    echo "ERROR: simulated data-plane proof refresh failure" >&2
+    return 1
+  fi
   token="$(frp_read_existing_token 2>/dev/null || true)"
   if [[ -z "$token" ]]; then
     echo "ERROR: cannot refresh data-plane metadata without FRP token" >&2
@@ -4054,15 +4033,16 @@ if mod is None:
     raise SystemExit('ERROR: frp_data_plane_auth.py is unavailable')
 state = json.loads(Path(state_path).read_text(encoding='utf-8'))
 machine_id = str(state.get('machine_id') or '')
+host_id = str(state.get('host_id') or '') or None
 services = state.get('services') or {}
-enabled = []
+enabled = {}
 if isinstance(services, dict):
     for sid, rec in services.items():
         if not isinstance(rec, dict):
             continue
         if rec.get('enabled', True) is False:
             continue
-        enabled.append(str(rec.get('id') or sid).strip().lower())
+        enabled[str(rec.get('id') or sid).strip().lower()] = rec
 pub = Path(pub_path).read_text(encoding='utf-8') if Path(pub_path).is_file() else None
 try:
     mod.validate_frpc_data_plane_metadata(
@@ -4070,6 +4050,7 @@ try:
         machine_id,
         enabled,
         pub_pem=pub,
+        host_id=host_id,
     )
 except Exception as exc:
     print('ERROR: %s' % exc, file=sys.stderr)
@@ -4089,6 +4070,7 @@ frp_client_apply_upgrade() {
     echo "ERROR: update source directory is required" >&2
     return 1
   fi
+  _FRP_CLIENT_UPGRADE_SOURCE="$source"
   if [[ ${EUID} -ne 0 && -z "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
     echo "ERROR: run with sudo" >&2
     return 1
@@ -4225,17 +4207,18 @@ frp_client_apply_upgrade() {
   trap 'rm -rf "'"$staged"'"' RETURN
 
   echo "Staging new management files..."
+  _FRP_CLIENT_UPGRADE_SOURCE="$source"
   frp_client_upgrade_stage "$source" "$staged" || return 1
 
   echo "Validating staged files..."
-  if ! frp_client_upgrade_validate_staged "$staged"; then
+  if ! frp_client_upgrade_validate_staged "$staged" "$source"; then
     echo "ERROR: staged update failed validation; existing installation was not changed." >&2
     echo "UPGRADE_ROLLBACK=NOT_REQUIRED"
     return 1
   fi
 
   echo "Backing up replaceable project files..."
-  backup="$(frp_client_upgrade_backup_tools)" || return 1
+  backup="$(frp_client_upgrade_backup_tools "$source")" || return 1
   FRP_TXN_SNAPSHOT_PATH="$backup" \
   FRP_TXN_RELEASE_CHANNEL="$candidate_channel" \
   FRP_TXN_SOURCE_REF="$candidate_ref" \
@@ -4251,7 +4234,7 @@ frp_client_apply_upgrade() {
   fi
 
   echo "Installing management files..."
-  if ! frp_client_upgrade_install_staged "$staged"; then
+  if ! frp_client_upgrade_install_staged "$staged" "$source"; then
     echo "ERROR: tool install failed; restoring previous management files." >&2
     frp_client_upgrade_rollback "$backup" FILE_COMMIT_FAILED || return 2
     return 1
@@ -4314,7 +4297,7 @@ frp_client_apply_upgrade() {
   fi
 
   echo "Verifying upgrade..."
-  if ! frp_client_upgrade_verify "$ident_before"; then
+  if ! frp_client_upgrade_verify "$ident_before" "$source"; then
     echo "ERROR: post-upgrade verification failed; restoring previous management files." >&2
     frp_client_upgrade_rollback "$backup" HEALTH_CHECK_FAILED || return 2
     return 1

@@ -190,8 +190,21 @@ def parse_frpc_toml_sections(text):
     return global_kv, proxies
 
 
-def validate_frpc_data_plane_metadata(toml_text, machine_id, enabled_service_ids, pub_pem=None):
-    """Validate canonical TOML metadata after a data-plane-capable upgrade."""
+def validate_frpc_data_plane_metadata(
+    toml_text,
+    machine_id,
+    enabled_services,
+    pub_pem=None,
+    host_id=None,
+):
+    """Validate exact per-proxy service metadata mapping after data-plane upgrade.
+
+    enabled_services may be:
+      - dict of service_id -> service record (preferred; must include remote_port)
+      - iterable of service records with id/remote_port
+      - iterable of service id strings (remote_port required from matching proxy only
+        when records are unavailable — callers should pass records)
+    """
     cid = validate_client_id(machine_id)
     global_kv, proxies = parse_frpc_toml_sections(toml_text)
     if str(global_kv.get('clientID') or '') != cid:
@@ -203,19 +216,71 @@ def validate_frpc_data_plane_metadata(toml_text, machine_id, enabled_service_ids
     proof = str(global_kv.get('metadatas.%s' % META_PROOF) or '').strip()
     if not proof:
         raise ValueError('frpc.toml is missing frp_ad_proof')
-    expected = set()
-    for sid in enabled_service_ids or []:
-        expected.add(validate_service_id(str(sid).strip().lower()))
-    found = set()
+
+    expected = {}
+    if isinstance(enabled_services, dict):
+        iterator = enabled_services.items()
+        for sid, rec in iterator:
+            if not isinstance(rec, dict):
+                continue
+            if rec.get('enabled', True) is False:
+                continue
+            service_id = validate_service_id(str(rec.get('id') or sid).strip().lower())
+            if 'remote_port' not in rec or rec.get('remote_port') in (None, ''):
+                raise ValueError('enabled service %s is missing remote_port' % service_id)
+            expected[service_id] = int(rec['remote_port'])
+    else:
+        for item in enabled_services or []:
+            if isinstance(item, dict):
+                if item.get('enabled', True) is False:
+                    continue
+                service_id = validate_service_id(str(item.get('id') or '').strip().lower())
+                if 'remote_port' not in item or item.get('remote_port') in (None, ''):
+                    raise ValueError('enabled service %s is missing remote_port' % service_id)
+                expected[service_id] = int(item['remote_port'])
+            else:
+                service_id = validate_service_id(str(item).strip().lower())
+                expected[service_id] = None
+
+    found = {}
     for proxy in proxies:
         if str(proxy.get('type') or '').lower() not in ('', 'tcp'):
             continue
-        sid = str(proxy.get('metadatas.%s' % META_SERVICE_ID) or '').strip().lower()
-        if not sid:
+        sid_raw = str(proxy.get('metadatas.%s' % META_SERVICE_ID) or '').strip().lower()
+        if not sid_raw:
             raise ValueError('enabled proxy is missing frp_ad_service_id')
-        found.add(validate_service_id(sid))
-    if expected - found:
-        raise ValueError('enabled service missing from frpc.toml metadata: %s' % sorted(expected - found))
+        sid = validate_service_id(sid_raw)
+        if sid in found:
+            raise ValueError('duplicate frp_ad_service_id mapping for %s' % sid)
+        try:
+            remote_port = int(proxy.get('remotePort'))
+        except (TypeError, ValueError):
+            raise ValueError('proxy for service %s has invalid remotePort' % sid) from None
+        if not 1 <= remote_port <= 65535:
+            raise ValueError('proxy for service %s has invalid remotePort' % sid)
+        name = str(proxy.get('name') or '')
+        if host_id:
+            expected_name = '%s-%s' % (host_id, sid)
+            if name != expected_name:
+                raise ValueError(
+                    'proxy name for service %s does not match canonical identity' % sid
+                )
+        found[sid] = remote_port
+
+    missing = sorted(set(expected) - set(found))
+    if missing:
+        raise ValueError('enabled service missing from frpc.toml metadata: %s' % missing)
+    extra = sorted(set(found) - set(expected))
+    if extra:
+        raise ValueError('unexpected frp_ad_service_id mapping in frpc.toml: %s' % extra)
+    for sid, want_port in expected.items():
+        if want_port is None:
+            continue
+        if int(found[sid]) != int(want_port):
+            raise ValueError(
+                'remotePort for service %s does not match client state (%s != %s)'
+                % (sid, found[sid], want_port)
+            )
     if pub_pem:
         if not verify_proof(pub_pem, cid, proof):
             raise ValueError('frpc.toml data-plane proof did not verify')
@@ -359,8 +424,8 @@ def authorize_new_proxy(content, registry_state, cfg=None, lease_mod=None):
             time.sleep(2.0)
     if lease_mod is None:
         lease_mod = _load_leases()
-    lease_dir = lease_mod.lease_dir_from_cfg(cfg)
     try:
+        lease_dir = lease_mod.lease_dir_from_cfg(cfg)
         lease_mod.acquire_lease(
             lease_dir,
             client_id=client_id,
@@ -375,6 +440,8 @@ def authorize_new_proxy(content, registry_state, cfg=None, lease_mod=None):
         return False, 'LEASE_STORE_INVALID'
     except OSError:
         return False, 'failed to record authorization lease'
+    except ValueError as exc:
+        return False, str(exc)
 
     return True, None
 

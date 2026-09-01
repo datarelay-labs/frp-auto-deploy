@@ -45,15 +45,37 @@ class LeaseCapacityExceeded(ValueError):
     """Active unexpired leases already occupy MAX_LEASES."""
 
 
+def canonical_proxy_lease_dir(cfg=None):
+    """Return the persisted/canonical lease directory value (never cwd-relative)."""
+    if isinstance(cfg, dict) and 'proxy_lease_dir' in cfg and cfg.get('proxy_lease_dir') is not None:
+        value = cfg.get('proxy_lease_dir')
+        if not isinstance(value, str):
+            raise ValueError('proxy_lease_dir must be a string')
+        configured = value.strip()
+    else:
+        configured = DEFAULT_LEASE_DIR
+    if not configured:
+        configured = DEFAULT_LEASE_DIR
+    return configured
+
+
 def lease_dir_from_cfg(cfg=None):
+    """Resolve the runtime lease directory shared by NewProxy and release.
+
+    Persisted production config must use DEFAULT_LEASE_DIR. Under
+    FRP_DEPLOY_TEST_ROOT / FRP_SERVER_TEST_ROOT the same absolute path is
+    mapped beneath the test root without changing the config value.
+    Relative paths are never resolved against process cwd.
+    """
     root = os.environ.get('FRP_DEPLOY_TEST_ROOT') or os.environ.get('FRP_SERVER_TEST_ROOT') or ''
-    custom = ''
-    if isinstance(cfg, dict):
-        custom = str(cfg.get('proxy_lease_dir') or '').strip()
-    if custom:
-        rel = custom.lstrip('/')
-        return str(Path(root) / rel) if root else custom
-    return str(Path(root) / DEFAULT_LEASE_DIR.lstrip('/')) if root else DEFAULT_LEASE_DIR
+    configured = canonical_proxy_lease_dir(cfg)
+    if configured != DEFAULT_LEASE_DIR:
+        raise ValueError(
+            'proxy_lease_dir must be the canonical absolute path %s' % DEFAULT_LEASE_DIR
+        )
+    if root:
+        return str(Path(root) / configured.lstrip('/'))
+    return configured
 
 
 def _lock_path(lease_dir):

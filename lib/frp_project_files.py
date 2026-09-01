@@ -135,6 +135,22 @@ def client_managed_dests(source_root=None, path=None):
     return [entry.dest for entry in client_managed_entries(source_root, True, path)]
 
 
+def client_project_entries(source_root=None, path=None):
+    """Replaceable client management software (project + optional), excluding unit/binary."""
+    out = []
+    for entry in client_managed_entries(source_root, True, path):
+        if entry.cls in ("project", "optional"):
+            out.append(entry)
+    return out
+
+
+def client_project_destination_lines(source_root=None, path=None):
+    lines = []
+    for entry in client_project_entries(source_root, path):
+        lines.append("%s:%s:%s" % (entry.dest, entry.mode, entry.source))
+    return lines
+
+
 def uninstall_rels(single443=True, source_root=None, path=None):
     """Managed project/optional/unit paths removed by default server uninstall.
 
@@ -207,6 +223,7 @@ def main(argv=None):
             "managed-rels",
             "uninstall-rels",
             "client-destinations",
+            "client-project-destinations",
             "client-managed-rels",
             "client-uninstall-rels",
             "dual-role-shared-libs",
@@ -239,6 +256,10 @@ def main(argv=None):
         return 0
     if args.action == "client-destinations":
         for line in client_destination_lines(args.source, args.client_manifest):
+            print(line)
+        return 0
+    if args.action == "client-project-destinations":
+        for line in client_project_destination_lines(args.source, args.client_manifest):
             print(line)
         return 0
     if args.action == "client-managed-rels":

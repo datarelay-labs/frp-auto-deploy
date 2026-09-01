@@ -151,7 +151,7 @@ class Env:
         self.plugin_port = free_port()
         self.token = "p1l-data-plane-test-token"
         self.cfg = {
-            "proxy_lease_dir": "proxy-leases",
+            "proxy_lease_dir": LEASES.DEFAULT_LEASE_DIR,
             "data_plane_auth_strict": True,
             "port_start": 10000,
             "port_end": 65000,

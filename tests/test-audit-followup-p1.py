@@ -49,7 +49,7 @@ def write_json(path, data):
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + '\n', encoding='utf-8')
 
 
-def base_cfg(root, registry, lease_rel='leases', strict=True):
+def base_cfg(root, registry, lease_rel=None, strict=True):
     return {
         'deployment_mode': 'direct',
         'frp_transport': 'tcp',
@@ -60,7 +60,7 @@ def base_cfg(root, registry, lease_rel='leases', strict=True):
         'allocator_listen_port': 7500,
         'allocator_public_port': 7500,
         'registry_file': str(registry),
-        'proxy_lease_dir': lease_rel,
+        'proxy_lease_dir': lease_rel or LEASES.DEFAULT_LEASE_DIR,
         'data_plane_auth_strict': strict,
         'frp_plugin_listen_host': '127.0.0.1',
         'frp_plugin_listen_port': 6100,
@@ -168,7 +168,7 @@ def test_strict_false_release_tools():
             'groups': {},
             'clients': {mid: client},
         })
-        cfg = base_cfg(root, '/var/lib/frp-auto-deploy/registry.json', 'leases', strict=False)
+        cfg = base_cfg(root, '/var/lib/frp-auto-deploy/registry.json', strict=False)
         write_json(cfg_path, cfg)
         env = os.environ.copy()
         env['FRP_DEPLOY_TEST_ROOT'] = str(root)
@@ -217,7 +217,7 @@ def test_newproxy_release_lock_races():
         root = Path(tmp)
         os.environ['FRP_DEPLOY_TEST_ROOT'] = str(root)
         registry = root / 'registry.json'
-        lease_dir = root / 'leases'
+        lease_dir = Path(LEASES.lease_dir_from_cfg({'proxy_lease_dir': LEASES.DEFAULT_LEASE_DIR}))
         client, key, _pub, mid = make_client(root)
         write_json(registry, {
             'schema_version': 2,
@@ -225,7 +225,7 @@ def test_newproxy_release_lock_races():
             'groups': {},
             'clients': {mid: client},
         })
-        cfg = base_cfg(root, str(registry), 'leases', strict=True)
+        cfg = base_cfg(root, str(registry), strict=True)
         proof = DPA.sign_proof(key, mid)
         content = new_proxy_content(mid, proof)
         marker = root / 'hook.marker'
@@ -337,7 +337,7 @@ def test_newproxy_release_lock_races():
 
 
 def test_strict_boolean_validation():
-    cfg = base_cfg(Path('/tmp'), '/tmp/r.json', 'leases', strict=True)
+    cfg = base_cfg(Path('/tmp'), '/tmp/r.json', strict=True)
     try:
         SCFG.validate_server_config(cfg)
     except ValueError as exc:
@@ -392,8 +392,9 @@ def test_linux_proof_redaction_and_validation():
         DPA.validate_frpc_data_plane_metadata(
             toml.replace(leak, proof),
             mid,
-            ['ssh'],
+            {'ssh': {'id': 'ssh', 'remote_port': 6003, 'enabled': True}},
             pub_pem=pub.read_text(encoding='utf-8'),
+            host_id='host',
         )
         pass_('LINUX_PROOF_METADATA_VALIDATION')
 

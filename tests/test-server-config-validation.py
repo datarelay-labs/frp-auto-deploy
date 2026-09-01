@@ -140,12 +140,36 @@ def test_core():
     )
     expect_ok('DATA_PLANE_STRICT_BOOL_FALSE_OK', base_direct(data_plane_auth_strict=False))
     expect_ok('DATA_PLANE_STRICT_BOOL_TRUE_OK', base_direct(data_plane_auth_strict=True))
+    expect_ok(
+        'LEASE_DIR_DEFAULT_CANONICAL',
+        base_direct(),
+    )
+    expect_ok(
+        'LEASE_DIR_ABSOLUTE_CANONICAL',
+        base_direct(proxy_lease_dir='/run/frp-auto-deploy/proxy-leases'),
+    )
+    expect_fail(
+        'LEASE_DIR_RELATIVE_REJECTED',
+        base_direct(proxy_lease_dir='leases'),
+        'canonical absolute path',
+    )
+    expect_fail(
+        'LEASE_DIR_TRAVERSAL_REJECTED',
+        base_direct(proxy_lease_dir='../leases'),
+        'canonical absolute path',
+    )
+    expect_fail(
+        'LEASE_DIR_UNSAFE_LOCATION_REJECTED',
+        base_direct(proxy_lease_dir='/tmp/leases'),
+        'canonical absolute path',
+    )
     expect_fail(
         'PLUGIN_HOST_NON_STRING_REJECTED',
         base_direct(frp_plugin_listen_host=True),
         'frp_plugin_listen_host',
     )
     pass_('DATA_PLANE_STRICT_BOOLEAN_VALIDATION')
+    pass_('LEASE_DIR_VALIDATION')
 
 
 def test_restore_rejects_unsafe():

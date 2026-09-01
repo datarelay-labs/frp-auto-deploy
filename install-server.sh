@@ -1656,6 +1656,89 @@ frp_server_install_frp_binary() {
   }
 }
 
+# Strict data-plane auth is a one-way security cutover.
+# existing strict=true is always preserved; confirmation is only for legacy→strict.
+frp_resolve_data_plane_auth_strict() {
+  local reg="$1"
+  local existing_install="${2:-0}"
+  local config_path existing_strict count
+  config_path="$(frp_server_config_path)"
+
+  if [[ "$existing_install" != "1" ]]; then
+    export FRP_DATA_PLANE_AUTH_STRICT=1
+    return 0
+  fi
+
+  existing_strict="MISSING"
+  if [[ -f "$config_path" ]]; then
+    existing_strict="$(python3 - "$config_path" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+try:
+    cfg = json.loads(path.read_text(encoding='utf-8'))
+except Exception as exc:
+    sys.stderr.write('ERROR: existing server config is not valid JSON: %s\n' % exc)
+    raise SystemExit(2)
+if not isinstance(cfg, dict):
+    sys.stderr.write('ERROR: existing server config is not an object\n')
+    raise SystemExit(2)
+if 'data_plane_auth_strict' not in cfg:
+    print('MISSING')
+    raise SystemExit(0)
+val = cfg.get('data_plane_auth_strict')
+if val is True:
+    print('TRUE')
+    raise SystemExit(0)
+if val is False:
+    print('FALSE')
+    raise SystemExit(0)
+sys.stderr.write(
+    'ERROR: data_plane_auth_strict must be a JSON boolean (true or false)\n'
+)
+raise SystemExit(2)
+PY
+)" || {
+      echo "ERROR: refusing to continue with malformed data_plane_auth_strict in existing config." >&2
+      return 1
+    }
+  fi
+
+  if [[ "$existing_strict" == "TRUE" ]]; then
+    export FRP_DATA_PLANE_AUTH_STRICT=1
+    return 0
+  fi
+
+  # Legacy / non-strict (false or missing): cutover rules only.
+  count=0
+  if [[ -f "$reg" ]]; then
+    count="$(python3 - "$reg" <<'PY' || echo 0
+import json, sys
+from pathlib import Path
+try:
+    data = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+    clients = data.get('clients') or {}
+    print(len(clients) if isinstance(clients, dict) else 0)
+except Exception:
+    print(0)
+PY
+)"
+  fi
+  if [[ "${count:-0}" -le 0 ]]; then
+    export FRP_DATA_PLANE_AUTH_STRICT=1
+    return 0
+  fi
+  if [[ "${FRP_CONFIRM_DATA_PLANE_AUTH_CUTOVER:-}" == "yes" ]]; then
+    export FRP_DATA_PLANE_AUTH_STRICT=1
+    return 0
+  fi
+  echo "WARNING: registry contains enrolled clients; strict data-plane auth deferred." >&2
+  echo "WARNING: upgrade every client to 2.1.1 project code with data-plane proofs first." >&2
+  echo "WARNING: then re-run with FRP_CONFIRM_DATA_PLANE_AUTH_CUTOVER=yes to enable strict mode." >&2
+  export FRP_DATA_PLANE_AUTH_STRICT=0
+  return 0
+}
+
 frp_server_main() {
   if [[ ${EUID} -ne 0 ]] && ! frp_server_test_mode; then
     echo "ERROR: run with sudo" >&2
@@ -1721,40 +1804,7 @@ frp_server_main() {
     existing_install=1
   fi
 
-  frp_confirm_data_plane_auth_cutover() {
-    local reg="$1"
-    [[ -f "$reg" ]] || return 0
-    local count
-    count="$(python3 - "$reg" <<'PY' || echo 0
-import json, sys
-from pathlib import Path
-try:
-    data = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
-    clients = data.get('clients') or {}
-    print(len(clients) if isinstance(clients, dict) else 0)
-except Exception:
-    print(0)
-PY
-)"
-    if [[ "${count:-0}" -le 0 ]]; then
-      export FRP_DATA_PLANE_AUTH_STRICT=1
-      return 0
-    fi
-    if [[ "${FRP_CONFIRM_DATA_PLANE_AUTH_CUTOVER:-}" == "yes" ]]; then
-      export FRP_DATA_PLANE_AUTH_STRICT=1
-      return 0
-    fi
-    echo "WARNING: registry contains enrolled clients; strict data-plane auth deferred." >&2
-    echo "WARNING: upgrade every client to 2.1.1 project code with data-plane proofs first." >&2
-    echo "WARNING: then re-run with FRP_CONFIRM_DATA_PLANE_AUTH_CUTOVER=yes to enable strict mode." >&2
-    export FRP_DATA_PLANE_AUTH_STRICT=0
-  }
-
-  if [[ "$existing_install" == "1" ]]; then
-    frp_confirm_data_plane_auth_cutover "$registry_file"
-  else
-    export FRP_DATA_PLANE_AUTH_STRICT=1
-  fi
+  frp_resolve_data_plane_auth_strict "$registry_file" "$existing_install" || return 1
 
   local previous_project
   previous_project="$(frp_read_kv_file "$version_file" PROJECT_VERSION)"

@@ -136,7 +136,8 @@ function Test-FrpClientTomlDataPlaneMetadata {
     param(
         [string]$TomlPath,
         [string]$MachineId,
-        [object]$Services
+        [object]$Services,
+        [string]$HostId
     )
     if (-not $TomlPath) { $TomlPath = Get-FrpTomlPath }
     if (-not (Test-Path -LiteralPath $TomlPath)) {
@@ -163,15 +164,88 @@ function Test-FrpClientTomlDataPlaneMetadata {
     if ([string]::IsNullOrWhiteSpace($proof)) {
         throw 'ERROR: frpc.toml is missing frp_ad_proof'
     }
+
+    $proxies = New-Object System.Collections.Generic.List[hashtable]
+    $current = $null
+    foreach ($raw in ($text -split "`r?`n")) {
+        $line = $raw.Trim()
+        if ([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith('#')) { continue }
+        if ($line -eq '[[proxies]]') {
+            if ($null -ne $current) { [void]$proxies.Add($current) }
+            $current = @{}
+            continue
+        }
+        if ($line.StartsWith('[')) {
+            if ($null -ne $current) { [void]$proxies.Add($current); $current = $null }
+            continue
+        }
+        if ($line -notmatch '^\s*([^=]+?)\s*=\s*(.*)$') { continue }
+        $key = $Matches[1].Trim()
+        $value = $Matches[2].Trim()
+        if ($value.StartsWith('"') -and $value.EndsWith('"') -and $value.Length -ge 2) {
+            $value = $value.Substring(1, $value.Length - 2).Replace('\"', '"').Replace('\\', '\')
+        }
+        if ($null -ne $current) {
+            $current[$key] = $value
+        }
+    }
+    if ($null -ne $current) { [void]$proxies.Add($current) }
+
     $map = ConvertTo-FrpServiceMap -Services $Services
+    $expected = @{}
     foreach ($sid in $map.Keys) {
         $item = $map[$sid]
         if ($item.enabled -eq $false) { continue }
-        $escaped = [regex]::Escape([string]$item.id)
-        if ($text -notmatch ('(?m)^metadatas\.frp_ad_service_id\s*=\s*"{0}"' -f $escaped)) {
-            throw ("ERROR: enabled proxy '{0}' is missing frp_ad_service_id" -f $item.id)
+        if ($null -eq $item.remote_port) {
+            throw ("ERROR: enabled service '{0}' is missing remote_port" -f $item.id)
+        }
+        $expected[[string]$item.id] = [int]$item.remote_port
+    }
+
+    $found = @{}
+    foreach ($proxy in $proxies) {
+        $ptype = ''
+        if ($proxy.ContainsKey('type')) { $ptype = ([string]$proxy['type']).ToLowerInvariant() }
+        if ($ptype -and $ptype -ne 'tcp') { continue }
+        if (-not $proxy.ContainsKey('metadatas.frp_ad_service_id') -or [string]::IsNullOrWhiteSpace([string]$proxy['metadatas.frp_ad_service_id'])) {
+            throw 'ERROR: enabled proxy is missing frp_ad_service_id'
+        }
+        $sid = ([string]$proxy['metadatas.frp_ad_service_id']).Trim().ToLowerInvariant()
+        if ($found.ContainsKey($sid)) {
+            throw ("ERROR: duplicate frp_ad_service_id mapping for '{0}'" -f $sid)
+        }
+        if (-not $proxy.ContainsKey('remotePort')) {
+            throw ("ERROR: proxy for service '{0}' has invalid remotePort" -f $sid)
+        }
+        $remotePort = 0
+        if (-not [int]::TryParse([string]$proxy['remotePort'], [ref]$remotePort) -or $remotePort -lt 1 -or $remotePort -gt 65535) {
+            throw ("ERROR: proxy for service '{0}' has invalid remotePort" -f $sid)
+        }
+        if (-not [string]::IsNullOrWhiteSpace($HostId)) {
+            $wantName = '{0}-{1}' -f $HostId, $sid
+            $haveName = ''
+            if ($proxy.ContainsKey('name')) { $haveName = [string]$proxy['name'] }
+            if ($haveName -ne $wantName) {
+                throw ("ERROR: proxy name for service '{0}' does not match canonical identity" -f $sid)
+            }
+        }
+        $found[$sid] = $remotePort
+    }
+
+    foreach ($sid in $expected.Keys) {
+        if (-not $found.ContainsKey($sid)) {
+            throw ("ERROR: enabled proxy '{0}' is missing frp_ad_service_id" -f $sid)
+        }
+        if ([int]$found[$sid] -ne [int]$expected[$sid]) {
+            throw ("ERROR: remotePort for service '{0}' does not match client state" -f $sid)
         }
     }
+    foreach ($sid in $found.Keys) {
+        if (-not $expected.ContainsKey($sid)) {
+            throw ("ERROR: unexpected frp_ad_service_id mapping in frpc.toml: {0}" -f $sid)
+        }
+    }
+
     $pubPath = Get-FrpIdentityPubPath
     if (Test-Path -LiteralPath $pubPath) {
         $pub = [System.IO.File]::ReadAllText($pubPath)
@@ -212,6 +286,7 @@ function Update-FrpClientDataPlaneMetadataIfNeeded {
     New-FrpClientToml -ServerAddr ([string]$state.frp_server) -ServerPort ([int]$state.frp_server_port) `
         -Token $token -HostId ([string]$state.host_id) -Services $state.services `
         -MachineId ([string]$state.machine_id) -Transport $transport | Out-Null
-    Test-FrpClientTomlDataPlaneMetadata -TomlPath $toml -MachineId ([string]$state.machine_id) -Services $state.services | Out-Null
+    Test-FrpClientTomlDataPlaneMetadata -TomlPath $toml -MachineId ([string]$state.machine_id) `
+        -Services $state.services -HostId ([string]$state.host_id) | Out-Null
     return $true
 }

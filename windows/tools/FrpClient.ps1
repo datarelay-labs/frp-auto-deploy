@@ -423,7 +423,9 @@ function Invoke-FrpClientProjectUpdate {
                         }
                         if ($null -ne $stateForMeta -and $stateForMeta.machine_id) {
                             Test-FrpClientTomlDataPlaneMetadata -TomlPath (Get-FrpTomlPath) `
-                                -MachineId ([string]$stateForMeta.machine_id) -Services $stateForMeta.services | Out-Null
+                                -MachineId ([string]$stateForMeta.machine_id) `
+                                -Services $stateForMeta.services `
+                                -HostId ([string]$stateForMeta.host_id) | Out-Null
                         }
                     }
 

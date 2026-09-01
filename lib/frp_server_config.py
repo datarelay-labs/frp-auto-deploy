@@ -15,8 +15,10 @@ if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
 import frp_frontend as FRONTEND  # noqa: E402
+from frp_proxy_leases import DEFAULT_LEASE_DIR  # noqa: E402
 
 _TCP_PORT_RE = re.compile(r'^[0-9]+$')
+CANONICAL_PROXY_LEASE_DIR = DEFAULT_LEASE_DIR
 
 
 def require_tcp_port(value, field):
@@ -73,6 +75,23 @@ def require_json_bool(cfg, key, default=None):
     if value is True or value is False:
         return value
     raise ValueError('%s must be a JSON boolean (true or false)' % key)
+
+
+def require_canonical_proxy_lease_dir(cfg):
+    """Production proxy_lease_dir must be the absolute canonical runtime path."""
+    if not isinstance(cfg, dict):
+        raise ValueError('server config is not an object')
+    if 'proxy_lease_dir' not in cfg or cfg.get('proxy_lease_dir') is None:
+        return CANONICAL_PROXY_LEASE_DIR
+    value = cfg.get('proxy_lease_dir')
+    if not isinstance(value, str):
+        raise ValueError('proxy_lease_dir must be a string')
+    text = value.strip()
+    if text != CANONICAL_PROXY_LEASE_DIR:
+        raise ValueError(
+            'proxy_lease_dir must be the canonical absolute path %s' % CANONICAL_PROXY_LEASE_DIR
+        )
+    return text
 
 
 def extract_ports(cfg):
@@ -154,6 +173,7 @@ def validate_server_config(cfg):
     if not isinstance(cfg, dict):
         raise ValueError('server config is not an object')
     require_json_bool(cfg, 'data_plane_auth_strict', True)
+    require_canonical_proxy_lease_dir(cfg)
     ports = extract_ports(cfg)
     mode = ports['deployment_mode']
     start = ports['port_start']
