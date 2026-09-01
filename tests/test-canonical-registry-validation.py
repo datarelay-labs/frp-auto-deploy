@@ -15,7 +15,7 @@ import frp_client_registry as creg  # noqa: E402
 MID = 'aabbccdd00112233445566778899aabb'
 CFG = {
     'port_start': 6000,
-    'port_end': 6100,
+    'port_end': 6099,
     'allocator_listen_port': 7500,
     'frp_control_listen_port': 6050,
     'allocator_public_port': 7500,

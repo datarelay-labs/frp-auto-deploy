@@ -17,7 +17,7 @@ tree = Path(__import__("sys").argv[1])
 (tree / "etc/frp-auto-deploy/config.json").write_text(json.dumps({
     "public_host": "203.0.113.10",
     "port_start": 6000,
-    "port_end": 6100,
+    "port_end": 6099,
     "allocator_listen_port": 7500,
     "frp_control_listen_port": 7000,
     "registry_file": "/var/lib/frp-auto-deploy/registry.json",
