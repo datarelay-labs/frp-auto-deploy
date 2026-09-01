@@ -3727,37 +3727,78 @@ frp_client_upgrade_validate_staged() {
 
 frp_client_upgrade_backup_tools() {
   local source="${1:-${_FRP_CLIENT_UPGRADE_SOURCE:-}}"
-  local stamp dest live rel mode src base
+  local stamp dest live rel mode src backup_rel py
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
   dest="$(frp_client_upgrade_backup_root)/${stamp}"
-  mkdir -p "$dest"
+  mkdir -p "$dest/files" "$dest/extras"
   chmod 700 "$(frp_client_upgrade_backup_root)" 2>/dev/null || true
   chmod 700 "$dest"
-  while IFS=: read -r rel mode src; do
-    [[ -n "$rel" ]] || continue
-    live="$(frp_client_path "/${rel}")"
-    base="$(basename "$rel")"
-    if [[ -f "$live" ]]; then
-      install -m "$mode" "$live" "${dest}/${base}"
-      printf 'present %s\n' "$base" >>"${dest}/manifest"
-    else
-      printf 'absent %s\n' "$base" >>"${dest}/manifest"
-    fi
-  done < <(frp_client_upgrade_destinations "$source")
-  live="$(frp_client_version_file)"
-  if [[ -f "$live" ]]; then
-    install -m 0644 "$live" "${dest}/version"
-    printf 'present version\n' >>"${dest}/manifest"
-  else
-    printf 'absent version\n' >>"${dest}/manifest"
-  fi
-  live="$(frp_client_toml_path)"
-  if [[ -f "$live" ]]; then
-    install -m 0600 "$live" "${dest}/frpc.toml"
-    printf 'present frpc.toml\n' >>"${dest}/manifest"
-  else
-    printf 'absent frpc.toml\n' >>"${dest}/manifest"
-  fi
+  py="$(frp_client_project_files_py "$source")"
+  [[ -f "$py" ]] || {
+    echo "ERROR: frp_project_files.py is unavailable" >&2
+    return 1
+  }
+  # Build a self-describing snapshot: destinations come from the update source
+  # only while creating the snapshot; restore/verify never consult a source.
+  python3 - "$py" "$dest" "$source" <<'PY' || return 1
+import json, os, shutil, sys
+from pathlib import Path
+
+py_path, dest_s, source = sys.argv[1:4]
+sys.path.insert(0, str(Path(py_path).resolve().parent))
+import frp_project_files as pf
+
+dest = Path(dest_s)
+root = Path(os.environ.get("FRP_CLIENT_TEST_ROOT") or "/")
+files = []
+for line in pf.client_project_destination_lines(source):
+    rel, mode, _src = line.split(":", 2)
+    rel = pf.validate_client_upgrade_dest(rel)
+    mode = pf._normalize_mode(mode)
+    live = root / rel
+    if live.is_file() and not live.is_symlink():
+        backup_rel = "files/%s" % rel
+        target = dest / backup_rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(str(live), str(target))
+        os.chmod(target, int(mode, 8))
+        files.append({"dest": rel, "mode": mode, "state": "present", "backup": backup_rel})
+    else:
+        files.append({"dest": rel, "mode": mode, "state": "absent", "backup": None})
+
+extras = []
+for extra_id, (extra_dest, default_mode) in pf.CLIENT_UPGRADE_EXTRA_ALLOWED.items():
+    mode = pf._normalize_mode(default_mode)
+    live = root / extra_dest
+    if live.is_file() and not live.is_symlink():
+        backup_rel = "extras/%s" % extra_id
+        target = dest / backup_rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(str(live), str(target))
+        os.chmod(target, int(mode, 8))
+        extras.append(
+            {
+                "id": extra_id,
+                "dest": extra_dest,
+                "mode": mode,
+                "state": "present",
+                "backup": backup_rel,
+            }
+        )
+    else:
+        extras.append(
+            {
+                "id": extra_id,
+                "dest": extra_dest,
+                "mode": mode,
+                "state": "absent",
+                "backup": None,
+            }
+        )
+
+pf.write_client_upgrade_snapshot_metadata(dest, files, extras)
+PY
+  # prune old snapshots
   python3 - "$(frp_client_upgrade_backup_root)" "$FRP_CLIENT_UPGRADE_BACKUP_KEEP" <<'PY'
 import shutil, sys
 from pathlib import Path
@@ -3769,52 +3810,67 @@ dirs = sorted([p for p in root.iterdir() if p.is_dir()], key=lambda p: p.name)
 for extra in dirs[: max(0, len(dirs) - keep)]:
     shutil.rmtree(extra, ignore_errors=True)
 PY
+  [[ -f "${dest}/metadata.json" ]] || return 1
   printf '%s' "$dest"
 }
 
+frp_client_upgrade_snapshot_entries() {
+  local backup="$1" py
+  py="$(frp_client_project_files_py "${_FRP_CLIENT_UPGRADE_SOURCE:-}")"
+  [[ -f "$py" ]] || {
+    echo "ERROR: frp_project_files.py is unavailable" >&2
+    return 1
+  }
+  python3 "$py" client-upgrade-snapshot-entries --snapshot "$backup"
+}
+
 frp_client_upgrade_restore_tools() {
-  local backup="$1" source="${2:-${_FRP_CLIENT_UPGRADE_SOURCE:-}}" live rel mode src base
+  local backup="$1" live state mode dest_rel backup_rel entries
   [[ -d "$backup" ]] || return 1
   if [[ "${FRP_CLIENT_UPGRADE_HOOK_ROLLBACK_FAIL:-}" == "1" ]]; then
     echo "ERROR: simulated update rollback failure" >&2
     return 1
   fi
-  while IFS=: read -r rel mode src; do
-    [[ -n "$rel" ]] || continue
-    live="$(frp_client_path "/${rel}")"
-    base="$(basename "$rel")"
-    if [[ -f "${backup}/${base}" ]]; then
-      install -m "$mode" "${backup}/${base}" "$live"
-    else
-      rm -f "$live"
-    fi
-  done < <(frp_client_upgrade_destinations "$source")
-  live="$(frp_client_version_file)"
-  if [[ -f "${backup}/version" ]]; then
-    mkdir -p "$(dirname "$live")"
-    install -m 0644 "${backup}/version" "$live"
-  else
-    rm -f "$live"
-  fi
-  live="$(frp_client_toml_path)"
-  if [[ -f "${backup}/frpc.toml" ]]; then
-    mkdir -p "$(dirname "$live")"
-    install -m 0600 "${backup}/frpc.toml" "$live"
-  fi
+  # Restore set is owned by the snapshot metadata — never the current source.
+  entries="$(frp_client_upgrade_snapshot_entries "$backup")" || {
+    echo "ERROR: client update snapshot metadata is unusable; refusing guessed recovery." >&2
+    return 1
+  }
+  [[ -n "$entries" ]] || {
+    echo "ERROR: client update snapshot restore set is empty." >&2
+    return 1
+  }
+  while IFS='|' read -r state mode dest_rel backup_rel; do
+    [[ -n "$dest_rel" ]] || continue
+    live="$(frp_client_path "/${dest_rel}")"
+    case "$state" in
+      present)
+        mkdir -p "$(dirname "$live")"
+        install -m "$mode" "${backup}/${backup_rel}" "$live" || return 1
+        ;;
+      absent)
+        rm -f "$live"
+        ;;
+      *)
+        echo "ERROR: malformed snapshot restore entry" >&2
+        return 1
+        ;;
+    esac
+  done <<<"$entries"
   return 0
 }
 
 frp_client_upgrade_verify_restored() {
-  local backup="$1" source="${2:-${_FRP_CLIENT_UPGRADE_SOURCE:-}}" live rel mode src base state
-  [[ -f "${backup}/manifest" ]] || return 1
-  while IFS=: read -r rel mode src; do
-    [[ -n "$rel" ]] || continue
-    live="$(frp_client_path "/${rel}")"
-    base="$(basename "$rel")"
-    state="$(awk -v b="$base" '$2==b {print $1; exit}' "${backup}/manifest")"
+  local backup="$1" live state mode dest_rel backup_rel entries
+  [[ -d "$backup" ]] || return 1
+  entries="$(frp_client_upgrade_snapshot_entries "$backup")" || return 1
+  [[ -n "$entries" ]] || return 1
+  while IFS='|' read -r state mode dest_rel backup_rel; do
+    [[ -n "$dest_rel" ]] || continue
+    live="$(frp_client_path "/${dest_rel}")"
     case "$state" in
       present)
-        [[ -f "$live" && "$(frp_client_digest "$live")" == "$(frp_client_digest "${backup}/${base}")" ]] \
+        [[ -f "$live" && "$(frp_client_digest "$live")" == "$(frp_client_digest "${backup}/${backup_rel}")" ]] \
           || return 1
         ;;
       absent)
@@ -3824,35 +3880,8 @@ frp_client_upgrade_verify_restored() {
         return 1
         ;;
     esac
-  done < <(frp_client_upgrade_destinations "$source")
-  live="$(frp_client_version_file)"
-  state="$(awk '$2=="version" {print $1; exit}' "${backup}/manifest")"
-  case "$state" in
-    present)
-      [[ -f "$live" && "$(frp_client_digest "$live")" == "$(frp_client_digest "${backup}/version")" ]] \
-        || return 1
-      ;;
-    absent)
-      [[ ! -e "$live" ]] || return 1
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-  live="$(frp_client_toml_path)"
-  state="$(awk '$2=="frpc.toml" {print $1; exit}' "${backup}/manifest")"
-  case "$state" in
-    present)
-      [[ -f "$live" && "$(frp_client_digest "$live")" == "$(frp_client_digest "${backup}/frpc.toml")" ]] \
-        || return 1
-      ;;
-    absent|'')
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+  done <<<"$entries"
+  return 0
 }
 
 frp_client_upgrade_post_mutation_guard() {

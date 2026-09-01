@@ -464,4 +464,182 @@ pass "CLIENT_UPDATE_UNEXPECTED_FAILURE_ROLLBACK"
 [[ -f "$ROLL_FAIL/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "client rollback left no pending marker"
 pass "CLIENT_UPDATE_ROLLBACK_FAILURE"
 
+# --- E. Interrupted recovery uses snapshot-owned metadata (source-independent)
+
+SNAP_SRC_A="$WORKDIR/source-a"
+mkdir -p "$SNAP_SRC_A/lib" "$SNAP_SRC_A/tools" "$SNAP_SRC_A/dist"
+cp -a "$ROOT/lib/frp-client-common.sh" "$ROOT/lib/frp-common.sh" \
+  "$ROOT/lib/frp_project_files.py" "$ROOT/lib/client-project-files.manifest" \
+  "$ROOT/lib/frp_mgmt_auth.py" "$ROOT/lib/frp_data_plane_auth.py" \
+  "$ROOT/lib/frp_clock_sync.py" "$ROOT/lib/frp-doctor-common.sh" \
+  "$ROOT/lib/frp_doctor.py" "$ROOT/lib/frp_ctl_grammar.py" \
+  "$ROOT/lib/frp_ctl_repl.py" "$ROOT/lib/frp_client_lifecycle.py" \
+  "$ROOT/lib/frp-client-lifecycle.sh" \
+  "$SNAP_SRC_A/lib/"
+cp -a "$ROOT/uninstall-client.sh" "$SNAP_SRC_A/"
+cp -a "$ROOT/tools/frp-client" "$ROOT/tools/frpctl" "$SNAP_SRC_A/tools/"
+[[ -f "$ROOT/tools/frpcli" ]] && cp -a "$ROOT/tools/frpcli" "$SNAP_SRC_A/tools/" || true
+cp -a "$ROOT/VERSION" "$ROOT/release-manifest.json" "$SNAP_SRC_A/"
+
+INT="$WORKDIR/interrupted"
+write_client_fixture "$INT" 1 1
+# Ensure a managed file that Source B will omit is present and unique in Snapshot A.
+printf 'snapshot-a-only-common\n' >"$INT/usr/local/lib/frp-auto-deploy/frp-client-common.sh"
+chmod 0644 "$INT/usr/local/lib/frp-auto-deploy/frp-client-common.sh"
+TOML_BEFORE="$(file_sha "$INT/etc/frp/frpc.toml")"
+STATE_BEFORE="$(file_sha "$INT/etc/frp/client-state.json")"
+KEY_BEFORE="$(file_sha "$INT/etc/frp/client-identity.key")"
+PUB_BEFORE="$(file_sha "$INT/etc/frp/client-identity.pub")"
+MAC_BEFORE="$(file_sha "$INT/etc/frp/client-identity.mac")"
+VERSION_BEFORE="$(cat "$INT/etc/frp-auto-deploy/version")"
+COMMON_BEFORE="$(file_sha "$INT/usr/local/lib/frp-auto-deploy/frp-client-common.sh")"
+CLIENT_BEFORE="$(file_sha "$INT/usr/local/bin/frp-client")"
+PORT_BEFORE="$(python3 - "$INT/etc/frp/client-state.json" <<'PY'
+import json,sys
+from pathlib import Path
+d=json.loads(Path(sys.argv[1]).read_text())
+print(d['services']['ssh']['remote_port'])
+PY
+)"
+
+export FRP_CLIENT_TEST_ROOT="$INT"
+# shellcheck disable=SC1091
+. "$ROOT/lib/frp-client-common.sh"
+BACKUP="$(frp_client_upgrade_backup_tools "$SNAP_SRC_A")" || fail "snapshot A backup"
+[[ -f "$BACKUP/metadata.json" ]] || fail "snapshot metadata missing"
+python3 - "$BACKUP/metadata.json" <<'PY' || fail "SNAPSHOT_MANIFEST_SELF_CONTAINED"
+import json, sys
+from pathlib import Path
+meta = json.loads(Path(sys.argv[1]).read_text())
+assert meta.get("kind") == "client-upgrade-snapshot", meta
+assert int(meta.get("schema_version") or 0) == 1, meta
+files = meta.get("files") or []
+assert files, meta
+for item in files:
+    assert "dest" in item and "mode" in item and "state" in item and "backup" in item, item
+    assert "/" in item["dest"] or item["dest"].startswith("usr/"), item
+    assert not item["dest"].startswith("/"), item
+    if item["state"] == "present":
+        assert item["backup"] and "/" in item["backup"], item
+print("OK")
+PY
+pass "SNAPSHOT_MANIFEST_SELF_CONTAINED"
+
+# Simulate interruption after project-file mutation (live tree diverges from Snapshot A).
+printf 'mutated-by-interrupted-update\n' >"$INT/usr/local/bin/frp-client"
+printf 'mutated-common\n' >"$INT/usr/local/lib/frp-auto-deploy/frp-client-common.sh"
+# Leave a pending transaction pointing at Snapshot A.
+FRP_TXN_SNAPSHOT_PATH="$BACKUP" FRP_TXN_MUTATION_STARTED=true \
+  frp_txn_write client-update commit "1.1.0" "2.1.1"
+[[ -f "$INT/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "pending marker missing"
+
+# Source B: same release identity, but client project manifest differs (add fake, remove one A entry).
+SRC_B="$WORKDIR/source-b"
+cp -a "$SNAP_SRC_A" "$SRC_B"
+python3 - "$SRC_B/lib/client-project-files.manifest" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+lines = path.read_text(encoding="utf-8").splitlines()
+out = []
+removed = False
+for line in lines:
+    if (not removed) and line.startswith("project ") and "frp-client-common.sh" in line:
+        removed = True
+        continue
+    out.append(line)
+out.append(
+    "project usr/local/lib/frp-auto-deploy/frp_fake_new_only.py 0644 lib/frp_fake_new_only.py python"
+)
+path.write_text("\n".join(out) + "\n", encoding="utf-8")
+assert removed, "failed to remove Source A entry from Source B manifest"
+PY
+printf 'fake-new-only\n' >"$SRC_B/lib/frp_fake_new_only.py"
+
+# Retry recovery via update --check with Source B (must restore Snapshot A, ignore B manifest).
+if ! "$ROOT/tools/frp-client" update --source "$SRC_B" --check \
+  >"$WORKDIR/interrupt-recover.out" 2>"$WORKDIR/interrupt-recover.err"; then
+  cat "$WORKDIR/interrupt-recover.out" "$WORKDIR/interrupt-recover.err" >&2
+  fail "interrupted recovery with Source B"
+fi
+grep -q 'Restored the previous management files from backup' \
+  "$WORKDIR/interrupt-recover.out" "$WORKDIR/interrupt-recover.err" ||
+  fail "missing restore message"
+[[ ! -f "$INT/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "pending left after recovery"
+[[ ! -f "$INT/usr/local/lib/frp-auto-deploy/frp_fake_new_only.py" ]] ||
+  fail "Source B fake file installed during recovery"
+[[ "$(file_sha "$INT/usr/local/lib/frp-auto-deploy/frp-client-common.sh")" == "$COMMON_BEFORE" ]] ||
+  fail "common not restored from Snapshot A"
+[[ "$(file_sha "$INT/usr/local/bin/frp-client")" == "$CLIENT_BEFORE" ]] ||
+  fail "frp-client not restored from Snapshot A"
+[[ "$(file_sha "$INT/etc/frp/frpc.toml")" == "$TOML_BEFORE" ]] || fail "toml digest"
+[[ "$(cat "$INT/etc/frp/frpc.toml")" == "$(cat "$BACKUP/extras/frpc.toml")" ]] ||
+  fail "toml byte-for-byte"
+[[ "$(file_sha "$INT/etc/frp/client-state.json")" == "$STATE_BEFORE" ]] || fail "state changed"
+[[ "$(file_sha "$INT/etc/frp/client-identity.key")" == "$KEY_BEFORE" ]] || fail "key changed"
+[[ "$(file_sha "$INT/etc/frp/client-identity.pub")" == "$PUB_BEFORE" ]] || fail "pub changed"
+[[ "$(file_sha "$INT/etc/frp/client-identity.mac")" == "$MAC_BEFORE" ]] || fail "mac changed"
+[[ "$(cat "$INT/etc/frp-auto-deploy/version")" == "$VERSION_BEFORE" ]] || fail "version advanced"
+PORT_AFTER="$(python3 - "$INT/etc/frp/client-state.json" <<'PY'
+import json,sys
+from pathlib import Path
+d=json.loads(Path(sys.argv[1]).read_text())
+print(d['services']['ssh']['remote_port'])
+PY
+)"
+[[ "$PORT_AFTER" == "$PORT_BEFORE" ]] || fail "ports changed"
+
+# Exact fileset: every present snapshot entry restored; Source-B-only dest absent.
+python3 - "$BACKUP" "$INT" <<'PY' || fail "SNAPSHOT_RESTORE_EXACT_FILESET"
+import json, hashlib, sys
+from pathlib import Path
+backup = Path(sys.argv[1])
+tree = Path(sys.argv[2])
+meta = json.loads((backup / "metadata.json").read_text())
+for item in meta["files"]:
+    live = tree / item["dest"]
+    if item["state"] == "present":
+        assert live.is_file(), item
+        b = (backup / item["backup"]).read_bytes()
+        assert hashlib.sha256(live.read_bytes()).digest() == hashlib.sha256(b).digest(), item
+    else:
+        assert not live.exists(), item
+assert not (tree / "usr/local/lib/frp-auto-deploy/frp_fake_new_only.py").exists()
+print("OK")
+PY
+
+pass "INTERRUPTED_RECOVERY_SOURCE_INDEPENDENT"
+pass "SNAPSHOT_RESTORE_EXACT_FILESET"
+pass "FRPC_TOML_RESTORED_BYTE_FOR_BYTE"
+pass "CLIENT_STATE_PRESERVED"
+pass "IDENTITY_PRESERVED"
+pass "PORTS_PRESERVED"
+pass "VERSION_NOT_ADVANCED"
+
+# Malformed snapshot metadata must fail closed (no guessed recovery).
+BAD="$WORKDIR/bad-snap"
+mkdir -p "$BAD/files"
+printf '%s\n' '{"schema_version":1,"kind":"client-upgrade-snapshot","files":[{"dest":"../etc/passwd","mode":"0644","state":"absent","backup":null}],"extras":[]}' \
+  >"$BAD/metadata.json"
+export FRP_CLIENT_TEST_ROOT="$INT"
+if frp_client_upgrade_restore_tools "$BAD" >"$WORKDIR/trav.out" 2>"$WORKDIR/trav.err"; then
+  fail "traversal snapshot should be rejected"
+fi
+grep -qi 'ERROR' "$WORKDIR/trav.err" "$WORKDIR/trav.out" || fail "traversal error missing"
+pass "SNAPSHOT_MANIFEST_TRAVERSAL_REJECTED"
+
+MAL="$WORKDIR/mal-snap"
+mkdir -p "$MAL"
+printf '%s\n' 'not-json{' >"$MAL/metadata.json"
+FRP_TXN_SNAPSHOT_PATH="$MAL" FRP_TXN_MUTATION_STARTED=true \
+  frp_txn_write client-update commit "1.1.0" "2.1.1"
+if "$ROOT/tools/frp-client" update --source "$SRC_B" --check \
+  >"$WORKDIR/mal.out" 2>"$WORKDIR/mal.err"; then
+  fail "malformed snapshot should block recovery"
+fi
+grep -q 'RECOVERY_REQUIRED' "$WORKDIR/mal.out" "$WORKDIR/mal.err" ||
+  fail "malformed snapshot RECOVERY_REQUIRED"
+pass "SNAPSHOT_MANIFEST_MALFORMED_FAIL_CLOSED"
+frp_txn_clear || true
+
 echo "CLIENT_UPGRADE_TESTS=PASS"

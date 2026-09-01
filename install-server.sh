@@ -1132,7 +1132,8 @@ transport.tls.force = false
 allowPorts = [
   { start = ${FRP_PORT_START}, end = ${FRP_PORT_END} }
 ]
-${plugin_block}EOF2
+${plugin_block}
+EOF2
   else
     frp_atomic_write "$dest" 0600 <<EOF2
 bindPort = ${FRP_CONTROL_LISTEN_PORT}
@@ -1146,7 +1147,8 @@ transport.tls.force = true
 allowPorts = [
   { start = ${FRP_PORT_START}, end = ${FRP_PORT_END} }
 ]
-${plugin_block}EOF2
+${plugin_block}
+EOF2
   fi
 }
 

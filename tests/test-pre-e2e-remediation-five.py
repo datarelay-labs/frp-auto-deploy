@@ -198,19 +198,49 @@ printf 'STRICT=%%s\n' "${FRP_DATA_PLANE_AUTH_STRICT}"
         # Actual project-update path preserves strict=true in config.json
         upd = base / 'proj-upd'
         seed_server_tree(upd, strict=True)
-        subprocess.run(
+        (upd / 'etc/frp-auto-deploy/version').write_text(
+            'PROJECT_VERSION=2.0.0\n'
+            'FRP_VERSION=0.70.1\n'
+            'RELEASE_CHANNEL=stable\n'
+            'SOURCE_REF=v2.1.1\n'
+            'BUNDLE_SHA256='
+            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n',
+            encoding='utf-8',
+        )
+        frps = upd / 'usr/local/bin/frps'
+        frps.write_text(
+            '#!/bin/sh\n[[ "${1:-}" = "--version" ]] && echo 0.70.1\nexit 0\n',
+            encoding='utf-8',
+        )
+        frps.chmod(0o755)
+        (upd / 'usr/local/lib/frp-auto-deploy/frp-port-allocator.py').write_text(
+            'print("old-allocator")\n', encoding='utf-8'
+        )
+        (upd / 'etc/systemd/system/frp-port-allocator.service').write_text(
+            'old-unit\n', encoding='utf-8'
+        )
+        (upd / 'var/lib/frp-auto-deploy/enrollments').mkdir(parents=True, exist_ok=True)
+        (upd / 'var/lib/frp-auto-deploy/bootstrap').mkdir(parents=True, exist_ok=True)
+        proc = subprocess.run(
             ['bash', str(ROOT / 'install-server.sh'), '--upgrade', '--source', str(ROOT)],
             env={
                 **os.environ,
                 'FRP_SERVER_TEST_ROOT': str(upd),
                 'FRP_INSTALL_HOOK_SKIP_SYSTEMD': '1',
                 'FRP_SKIP_SYSTEMD': '1',
+                'FRP_RELEASE_CHANNEL': 'stable',
             },
             capture_output=True,
             text=True,
             check=False,
         )
-        # Whether update needed or not, config must remain strict true.
+        if proc.returncode != 0:
+            fail(
+                'STRICT_ACTUAL_PROJECT_UPDATE_SUCCESS',
+                'upgrade failed rc=%s\nstdout:\n%s\nstderr:\n%s'
+                % (proc.returncode, proc.stdout, proc.stderr),
+            )
+        pass_('STRICT_ACTUAL_PROJECT_UPDATE_SUCCESS')
         cfg = json.loads((upd / 'etc/frp-auto-deploy/config.json').read_text(encoding='utf-8'))
         if cfg.get('data_plane_auth_strict') is not True:
             fail('EXISTING_STRICT_TRUE_PROJECT_UPDATE_STAYS_TRUE', cfg)
