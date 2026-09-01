@@ -919,6 +919,7 @@ if frp_client_main >"$WORKDIR/rerun.out" 2>"$WORKDIR/rerun.err"; then
 fi
 grep -q 'already has an FRP client installed' "$WORKDIR/rerun.err" || fail "refuse message"
 grep -q 'sudo frpctl update' "$WORKDIR/rerun.err" || fail "directs to update"
+unset FRP_CLIENT_SOURCED || true
 pass "CLIENT_REINSTALL_SAFE"
 
 # ---------------------------------------------------------------------------
@@ -997,7 +998,7 @@ grep -q "${PROJECT_VERSION} -> ${PROJECT_VERSION}" "$WORKDIR/same.out" || fail "
 [[ "$(frp_file_sha256 "$UP/etc/frp/client-state.json")" == "$STATE_BEFORE" ]] || fail "same-version mutated state"
 pass "SAME_VERSION_UPDATE_IDEMPOTENT"
 
-# 1.9.1 -> current (2.0.0) preserves identity, CA, state, and ports
+# 1.9.1 -> current preserves identity, CA, state, and ports
 UP191="$WORKDIR/client-191"
 mkdir -p "$UP191/etc/frp" "$UP191/etc/frp-auto-deploy" "$UP191/usr/local/bin" "$UP191/usr/local/lib/frp-auto-deploy"
 write_dummy_frpc "$UP191/usr/local/bin/frpc"
@@ -1007,13 +1008,36 @@ echo old-client-191
 EOF
 chmod 0755 "$UP191/usr/local/bin/frp-client"
 echo old191 >"$UP191/usr/local/lib/frp-auto-deploy/frp-client-common.sh"
-cp -a "$UP/etc/frp/client-state.json" "$UP191/etc/frp/client-state.json"
-cp -a "$UP/etc/frp/frpc.toml" "$UP191/etc/frp/frpc.toml"
-cp -a "$UP/etc/frp/access-info.txt" "$UP191/etc/frp/access-info.txt"
-cp -a "$UP/etc/frp-auto-deploy/allocator-ca.crt" "$UP191/etc/frp-auto-deploy/allocator-ca.crt"
-cp -a "$UP/etc/frp/client-identity.key" "$UP191/etc/frp/client-identity.key"
-cp -a "$UP/etc/frp/client-identity.pub" "$UP191/etc/frp/client-identity.pub"
-cp -a "$UP/etc/frp/client-identity.mac" "$UP191/etc/frp/client-identity.mac"
+echo old191 >"$UP191/usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py"
+python3 - "$UP191/etc/frp/client-state.json" <<'PY'
+import json, sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps({
+    "schema_version": 1,
+    "allocator_url": "https://203.0.113.10:6099/enroll",
+    "frp_server": "203.0.113.10",
+    "frp_server_port": 443,
+    "hostname": "p191",
+    "machine_id": "bbccddeeff00112233445566778899aa",
+    "host_id": "p191-bbccddee",
+    "services": {"ssh": {"id": "ssh", "remote_port": 6004, "enabled": True, "local_ip": "127.0.0.1", "local_port": 22}},
+}, indent=2) + "\n")
+PY
+chmod 600 "$UP191/etc/frp/client-state.json"
+cat >"$UP191/etc/frp/frpc.toml" <<'EOF'
+serverAddr = "203.0.113.10"
+serverPort = 443
+auth.method = "token"
+auth.token = "test-frp-token-do-not-use"
+EOF
+chmod 600 "$UP191/etc/frp/frpc.toml"
+echo access191 >"$UP191/etc/frp/access-info.txt"
+echo ca-191 >"$UP191/etc/frp-auto-deploy/allocator-ca.crt"
+python3 "$ROOT/lib/frp_mgmt_auth.py" gen-key \
+  "$UP191/etc/frp/client-identity.key" "$UP191/etc/frp/client-identity.pub"
+chmod 600 "$UP191/etc/frp/client-identity.key"
+echo bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb >"$UP191/etc/frp/client-identity.mac"
+chmod 600 "$UP191/etc/frp/client-identity.mac"
 cat >"$UP191/etc/frp-auto-deploy/version" <<'EOF'
 PROJECT_VERSION=1.9.1
 FRP_VERSION=0.70.1
@@ -1022,6 +1046,7 @@ STATE191="$(frp_file_sha256 "$UP191/etc/frp/client-state.json")"
 CA191="$(frp_file_sha256 "$UP191/etc/frp-auto-deploy/allocator-ca.crt")"
 KEY191="$(frp_file_sha256 "$UP191/etc/frp/client-identity.key")"
 export FRP_CLIENT_TEST_ROOT="$UP191"
+export FRP_CLIENT_LIB="$ROOT/lib/frp-client-common.sh"
 if ! "$ROOT/tools/frp-client" update --source "$ROOT" >"$WORKDIR/up191.out" 2>"$WORKDIR/up191.err"; then
   cat "$WORKDIR/up191.out" "$WORKDIR/up191.err" >&2
   fail "1.9.1 to ${PROJECT_VERSION} update"

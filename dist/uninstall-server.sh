@@ -161,7 +161,9 @@ done < <(python3 "$PROJECT_FILES_PY" uninstall-rels)
 # Runtime binary (not in managed project/optional/unit set).
 frp_u_rm_file "$(frp_u_path /usr/local/bin/frps)"
 # Keep any distro-installed nginx package; only the project frontend unit
-# is removed via the manifest. Generated frontend.conf is preserved unless --purge.
+# is removed via the manifest. Generated frontend.conf is software-owned and
+# must leave with the unit on non-purge uninstall (purge still clears secrets).
+frp_u_rm_file "$(frp_u_path /etc/frp-auto-deploy/frontend.conf)"
 
 libdir="$(frp_u_path /usr/local/lib/frp-auto-deploy)"
 if [[ -d "$libdir" && ! -L "$libdir" ]]; then
