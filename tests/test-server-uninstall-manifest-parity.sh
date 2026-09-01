@@ -36,14 +36,8 @@ text = (root / "uninstall-server.sh").read_text(encoding="utf-8")
 for needle in ("uninstall-rels", "dual-role-shared-libs", "frp_project_files.py"):
     if needle not in text:
         raise SystemExit("uninstall-server.sh missing %s" % needle)
-if "frontend.conf" in text.split("if [[ \"$PURGE\" == true ]]")[0]:
-    # Default (non-purge) path must not delete generated frontend.conf.
-    before_purge = text.split("if [[ \"$PURGE\" == true ]]")[0]
-    if "frontend.conf" in before_purge and "frp_u_rm_file" in before_purge:
-        # only flag explicit removal helpers referencing frontend.conf before purge
-        for line in before_purge.splitlines():
-            if "frontend.conf" in line and "frp_u_rm_file" in line:
-                raise SystemExit("default uninstall deletes generated frontend.conf")
+if "frontend.conf" not in text.split("if [[ \"$PURGE\" == true ]]")[0]:
+    raise SystemExit("default uninstall must remove generated frontend.conf")
 
 print("PARITY_OK")
 PY
@@ -83,7 +77,7 @@ export FRP_PROJECT_FILES_PY="$ROOT/lib/frp_project_files.py"
 [[ -f "$TREE/usr/local/lib/frp-auto-deploy/frp-common.sh" ]] || fail "dual-role lost frp-common.sh"
 [[ -f "$TREE/usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py" ]] || fail "dual-role lost frp_mgmt_auth.py"
 [[ -f "$TREE/usr/local/lib/frp-auto-deploy/frp-client-common.sh" ]] || fail "dual-role lost client common"
-[[ -f "$TREE/etc/frp-auto-deploy/frontend.conf" ]] || fail "default uninstall deleted generated frontend.conf"
+[[ ! -f "$TREE/etc/frp-auto-deploy/frontend.conf" ]] || fail "default uninstall kept generated frontend.conf"
 [[ -f "$TREE/etc/frp-auto-deploy/config.json" ]] || fail "default uninstall deleted config"
 [[ -f "$TREE/etc/frp/server_token" ]] || fail "default uninstall deleted token"
 pass "SERVER_UNINSTALL_DUAL_ROLE_AND_PERSISTENCE"
