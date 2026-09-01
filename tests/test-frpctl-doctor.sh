@@ -4,7 +4,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKDIR="$(mktemp -d)"
-trap 'rm -rf "$WORKDIR"' EXIT
+PLUGIN_MOCK_PID=""
+trap '[[ -n "$PLUGIN_MOCK_PID" ]] && kill "$PLUGIN_MOCK_PID" 2>/dev/null || true; rm -rf "$WORKDIR"' EXIT
 
 pass() { echo "PASS $1"; }
 fail() { echo "FAIL $1" >&2; exit 1; }
@@ -163,7 +164,15 @@ write_server_healthy() {
   write_unit "$tree/etc/systemd/system/frp-port-allocator.service"
   echo 'test-frp-token-do-not-use' >"$tree/etc/frp/server_token"
   chmod 600 "$tree/etc/frp/server_token"
-  echo 'bindPort = 443' >"$tree/etc/frp/frps.toml"
+  cat >"$tree/etc/frp/frps.toml" <<'EOF'
+bindPort = 443
+
+[[httpPlugins]]
+name = "frp-auto-deploy-port-authorizer"
+addr = "127.0.0.1:6100"
+path = "/handler"
+ops = ["NewProxy"]
+EOF
   chmod 600 "$tree/etc/frp/frps.toml"
   gen_pki "$tree/etc/frp-auto-deploy/pki" "203.0.113.10"
   python3 - "$tree/etc/frp-auto-deploy/config.json" <<'PY'
@@ -181,6 +190,8 @@ Path(sys.argv[1]).write_text(json.dumps({
     "allocator_listen_port": 6099,
     "listen_port": 6099,
     "allocator_public_url": "https://203.0.113.10:9443/enroll",
+    "data_plane_auth_strict": True,
+    "frp_plugin_listen_port": 6100,
     "registry_file": "/var/lib/frp-auto-deploy/registry.json",
     "token_file": "/etc/frp/server_token",
     "tls_ca_cert": "/etc/frp-auto-deploy/pki/ca.crt",
@@ -357,8 +368,30 @@ pass "UNINSTALLED_HOST"
 # ---------------------------------------------------------------------------
 # Healthy server
 # ---------------------------------------------------------------------------
+start_plugin_listener() {
+  python3 <<'PY' &
+import socket, time
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", 6100))
+s.listen(8)
+while True:
+    time.sleep(3600)
+PY
+  PLUGIN_MOCK_PID=$!
+  local i
+  for i in $(seq 1 30); do
+    if python3 -c 'import socket; s=socket.socket(); s.settimeout(0.2); s.connect(("127.0.0.1", 6100)); s.close()'; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  fail "plugin listener did not start"
+}
+
 SRV="$WORKDIR/server"
 write_server_healthy "$SRV"
+start_plugin_listener
 snapshot "$SRV" "$WORKDIR/server.before"
 rc=0
 run_json "$SRV" "$WORKDIR/server.json" || rc=$?

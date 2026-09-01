@@ -1781,8 +1781,9 @@ def check_server(report, paths, facts, skip_network):
                         're-run server install/project-update to regenerate frps.toml',
                         'security',
                     )
-                listen = facts.get('listening') or {}
-                if listen.get(plugin_port):
+                listeners = facts.get('listeners') or {}
+                info = listeners.get(str(plugin_port)) or listeners.get(plugin_port) or {}
+                if info.get('listening'):
                     report.add(
                         'data_plane_authorizer', PASS,
                         'data-plane authorizer is listening on loopback',

@@ -273,7 +273,7 @@ path.write_text(json.dumps(facts) + "\n", encoding="utf-8")
 PY
 
   # Local listen probes for configured server ports. Read-only TCP connect.
-  local cfg listen_frp listen_alloc listen_frontend
+  local cfg listen_frp listen_alloc listen_frontend listen_plugin
   cfg="$(frp_doctor_fs /etc/frp-auto-deploy/config.json)"
   if [[ -f "$cfg" ]]; then
     eval "$(python3 - "$cfg" <<'PY'
@@ -299,15 +299,20 @@ if mode in ('single443', 'enterprise', 'enterprisesingle443'):
     frontend = port(cfg.get('frp_control_public_port')) or port(cfg.get('control_port'))
 elif mode not in ('direct', ''):
     mode = None
+plugin = None
+if cfg.get('data_plane_auth_strict', True):
+    plugin = port(cfg.get('frp_plugin_listen_port')) or 6100
 if frp:
     print('listen_frp=%s' % frp)
 if alloc:
     print('listen_alloc=%s' % alloc)
 if frontend:
     print('listen_frontend=%s' % frontend)
+if plugin:
+    print('listen_plugin=%s' % plugin)
 PY
 )"
-    python3 - "$facts_file" "${listen_frp:-}" "${listen_alloc:-}" "${listen_frontend:-}" <<'PY'
+    python3 - "$facts_file" "${listen_frp:-}" "${listen_alloc:-}" "${listen_frontend:-}" "${listen_plugin:-}" <<'PY'
 import json, re, shutil, subprocess, sys
 from pathlib import Path
 path = Path(sys.argv[1])
