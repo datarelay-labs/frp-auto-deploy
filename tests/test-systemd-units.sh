@@ -42,20 +42,21 @@ unit_has_kv() {
   return 1
 }
 
-unit_has_kv "$ROOT/server/frps.service" After "network-online.target" \
-  || fail "frps After=network-online.target"
-unit_has_kv "$ROOT/server/frps.service" Wants "network-online.target" \
-  || fail "frps Wants=network-online.target"
+unit_has_kv "$ROOT/server/frps.service" After "network-online.target frp-port-allocator.service" \
+  || fail "frps After=allocator"
+unit_has_kv "$ROOT/server/frps.service" Wants "network-online.target frp-port-allocator.service" \
+  || fail "frps Wants=allocator"
 unit_has_kv "$ROOT/server/frps.service" ExecStart "/usr/local/bin/frps -c /etc/frp/frps.toml" \
   || fail "frps ExecStart"
 grep -q '^NoNewPrivileges=true' "$ROOT/server/frps.service" || fail "frps NoNewPrivileges"
 grep -q '^PrivateTmp=true' "$ROOT/server/frps.service" || fail "frps PrivateTmp"
 pass "frps.service static keys"
 
-unit_has_kv "$ROOT/server/frp-port-allocator.service" After "network-online.target frps.service" \
+unit_has_kv "$ROOT/server/frp-port-allocator.service" After "network-online.target" \
   || fail "allocator After"
 unit_has_kv "$ROOT/server/frp-port-allocator.service" Wants "network-online.target" \
   || fail "allocator Wants"
+grep -q '^Type=notify' "$ROOT/server/frp-port-allocator.service" || fail "allocator Type=notify"
 unit_has_kv "$ROOT/server/frp-port-allocator.service" ExecStart \
   "/usr/bin/python3 /usr/local/lib/frp-auto-deploy/frp-port-allocator.py --config /etc/frp-auto-deploy/config.json" \
   || fail "allocator ExecStart"
@@ -82,8 +83,15 @@ grep -q '^NoNewPrivileges=true' "$ROOT/client/frpc.service" || fail "frpc NoNewP
 grep -q '^PrivateTmp=true' "$ROOT/client/frpc.service" || fail "frpc PrivateTmp"
 pass "frpc.service static keys"
 
-# Ordering intent encoded in After= lines above.
-pass "unit dependency ordering"
+# Ordering: plugin/allocator becomes ready (Type=notify) before frps starts.
+# Frontend still depends on both units; there is no allocator↔frps cycle.
+if grep -q 'After=.*frps.service' "$ROOT/server/frp-port-allocator.service"; then
+  fail "allocator must not After=frps.service (cycle with frps After=allocator)"
+fi
+if grep -q 'After=.*frp-frontend.service' "$ROOT/server/frps.service"; then
+  fail "frps must not After=frontend"
+fi
+pass "SYSTEMD_PLUGIN_ORDERING_TEST"
 
 if ! command -v systemd-analyze >/dev/null 2>&1; then
   skip "systemd-analyze verify (systemd-analyze not installed)"

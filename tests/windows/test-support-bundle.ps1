@@ -9,6 +9,9 @@ try {
     Set-Content -LiteralPath (Get-FrpTomlPath) -Value @"
 serverAddr = `"secret.example.test`"
 auth.token = `"$token`"
+metadatas.frp_ad_client_id = `"client-diag`"
+metadatas.frp_ad_proof_schema = `"1`"
+metadatas.frp_ad_proof = `"FRP_AD_PROOF_TEST_DO_NOT_LEAK_ABCDEF123456`"
 "@
     $mid = Get-FrpOrCreateClientId
     Save-FrpClientState -AllocatorUrl 'https://example.test/enroll' -FrpServer 'example.test' `
@@ -57,6 +60,12 @@ auth.token = `"$token`"
         ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw }) -join "`n"
     Assert-FrpTrue ($blob -notmatch [regex]::Escape($token)) 'token secret not in zip'
     Assert-FrpTrue ($blob -notmatch 'FRP_TOKEN_TEST_') 'FRP_TOKEN_TEST fixture not in zip'
+    Assert-FrpTrue ($blob -notmatch 'FRP_AD_PROOF_TEST_DO_NOT_LEAK_') 'data-plane proof not in zip'
+    Assert-FrpTrue ($blob -match 'frp_ad_client_id') 'client id diagnostic retained'
+    Assert-FrpTrue ($blob -match 'frp_ad_proof_schema') 'proof schema diagnostic retained'
+    Assert-FrpTrue ($blob -match 'metadatas\.frp_ad_proof = "\[redacted\]"') 'proof redacted marker present'
+    Write-FrpTestPass 'WINDOWS_SUPPORT_BUNDLE_PROOF_REDACTED'
+    Write-FrpTestPass 'WINDOWS_PROOF_REDACTION_TEST'
 
     Remove-Item -LiteralPath $extract -Recurse -Force -ErrorAction SilentlyContinue
     # Clean GUID zips created by this test (best-effort).

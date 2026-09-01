@@ -1,10 +1,10 @@
 [Unit]
 Description=FRP Auto Deploy Port Allocator
-After=network-online.target frps.service
+After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
 ExecStart=/usr/bin/python3 /usr/local/lib/frp-auto-deploy/frp-port-allocator.py --config /etc/frp-auto-deploy/config.json
 Restart=always
 RestartSec=5

@@ -74,7 +74,9 @@ MONTHS = {
 
 SECRET_RE = re.compile(
     r'(BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY|'
-    r'auth\.token\s*=\s*\S+|'
+    r'auth\.token\s*=\s*(?!"\[redacted\]")\S+|'
+    r'metadatas\.frp_ad_proof\s*=\s*(?!"\[redacted\]")\S+|'
+    r'(?<![A-Za-z0-9_])frp_ad_proof\s*=\s*(?!"\[redacted\]")\S+|'
     r'mgmt_mac_key|'
     r'FRP_BOOTSTRAP_TICKET=|'
     r'bt1\.[0-9a-f]{16}\.[0-9a-f]{32,}|'
@@ -136,6 +138,11 @@ def redact(text):
     text = str(text)
     text = SECRET_RE.sub('[redacted]', text)
     text = re.sub(r'auth\.token\s*=\s*".*?"', 'auth.token = "[redacted]"', text)
+    text = re.sub(
+        r'metadatas\.frp_ad_proof\s*=\s*".*?"',
+        'metadatas.frp_ad_proof = "[redacted]"',
+        text,
+    )
     return text
 
 
@@ -1733,6 +1740,12 @@ def check_server(report, paths, facts, skip_network):
                     'network',
                 )
             strict = cfg.get('data_plane_auth_strict', True)
+            if strict is True:
+                report.display['DATA_PLANE_AUTH_STRICT'] = 'YES'
+                report.display['PORT_RELEASE_SAFE'] = 'YES'
+            else:
+                report.display['DATA_PLANE_AUTH_STRICT'] = 'NO'
+                report.display['PORT_RELEASE_SAFE'] = 'NO'
             plugin_port = int(cfg.get('frp_plugin_listen_port') or 6100)
             toml_abs = '/etc/frp/frps.toml'
             toml_text = paths.read_text(toml_abs) or ''
@@ -2532,6 +2545,8 @@ def render_human(report, quiet=False, verbose=False):
             'Source ref      : %s' % (getattr(report, 'source_ref', None) or 'unknown'),
             'FRP version     : %s' % (report.frp_version or report.pinned_frp),
             'Bundle SHA256   : %s' % (getattr(report, 'bundle_sha256', None) or 'unknown'),
+            'DATA_PLANE_AUTH_STRICT=%s' % (report.display.get('DATA_PLANE_AUTH_STRICT') or 'n/a'),
+            'PORT_RELEASE_SAFE=%s' % (report.display.get('PORT_RELEASE_SAFE') or 'n/a'),
             '',
         ])
         role_check = next((c for c in report.checks if c['id'] == 'host_role'), None)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import socket
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -88,6 +89,25 @@ def make_handler(ctx):
                 pass
 
     return Handler
+
+
+def systemd_notify_ready():
+    """Notify systemd that this Type=notify service is ready (no-op outside systemd)."""
+    addr = os.environ.get('NOTIFY_SOCKET')
+    if not addr:
+        return
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        try:
+            if addr.startswith('@'):
+                sock.connect('\0' + addr[1:])
+            else:
+                sock.connect(addr)
+            sock.sendall(b'READY=1')
+        finally:
+            sock.close()
+    except OSError:
+        pass
 
 
 def start_plugin_server(registry_loader, cfg, host='127.0.0.1', port=6100):

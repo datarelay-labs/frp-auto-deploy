@@ -61,7 +61,65 @@ def _load_leases():
 
 
 MGMT = _load_mgmt()
-CREG = _load_creg()
+CREG = None
+
+MACHINE_ID_MAX_LEN = 128
+MACHINE_ID_SAFE_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$')
+SERVICE_ID_RE = re.compile(r'^[a-z0-9][a-z0-9._-]{0,31}$')
+
+
+def _creg():
+    global CREG
+    if CREG is None:
+        CREG = _load_creg()
+    return CREG
+
+
+def _load_locks():
+    path = _LIB / 'frp_control_locks.py'
+    spec = importlib.util.spec_from_file_location('frp_control_locks', str(path))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def validate_client_id(value):
+    try:
+        return _creg().validate_machine_id(str(value))
+    except ValueError:
+        raise
+    except Exception:
+        pass
+    if value is None:
+        raise ValueError('machine_id is required')
+    text = str(value).strip()
+    if not text:
+        raise ValueError('machine_id is required')
+    if len(text) > MACHINE_ID_MAX_LEN:
+        raise ValueError('machine_id exceeds maximum length')
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in text):
+        raise ValueError('machine_id contains control characters')
+    if any(ch in text for ch in '/\\'):
+        raise ValueError('machine_id contains path separators')
+    if not MACHINE_ID_SAFE_RE.fullmatch(text):
+        raise ValueError('machine_id contains unsafe characters')
+    return text
+
+
+def validate_service_id(value, field='service id'):
+    try:
+        return _creg().require_canonical_service_id(value, field=field)
+    except ValueError:
+        raise
+    except Exception:
+        pass
+    if not isinstance(value, str):
+        raise ValueError('%s must be a string' % field)
+    if value != value.strip() or value != value.lower():
+        raise ValueError('noncanonical %s' % field)
+    if not SERVICE_ID_RE.fullmatch(value):
+        raise ValueError('invalid %s; use [a-z0-9][a-z0-9._-]{0,31}' % field)
+    return value
 
 
 def canonical_json(data):
@@ -82,20 +140,86 @@ def proof_message_bytes(client_id):
 
 
 def sign_proof(key_path, client_id):
-    CREG.validate_machine_id(str(client_id))
+    validate_client_id(str(client_id))
     MGMT.validate_private_key(key_path)
     return MGMT.sign_message(key_path, proof_message_bytes(client_id))
 
 
 def verify_proof(pub_pem, client_id, signature_b64):
     try:
-        CREG.validate_machine_id(str(client_id))
+        validate_client_id(str(client_id))
     except ValueError:
         return False
     try:
         return MGMT.verify_signature(pub_pem, proof_message_bytes(client_id), signature_b64)
     except ValueError:
         return False
+
+
+def parse_frpc_toml_sections(text):
+    global_kv = {}
+    proxies = []
+    current = None
+    for raw in str(text or '').splitlines():
+        line = raw.strip()
+        if not line or line.startswith('#'):
+            continue
+        if line.startswith('[[proxies]]'):
+            if current is not None:
+                proxies.append(current)
+            current = {}
+            continue
+        if line.startswith('['):
+            if current is not None:
+                proxies.append(current)
+                current = None
+            continue
+        if '=' not in line:
+            continue
+        key, value = line.split('=', 1)
+        key = key.strip()
+        value = value.strip()
+        if value.startswith('"') and value.endswith('"') and len(value) >= 2:
+            value = value[1:-1].replace('\\"', '"').replace('\\\\', '\\')
+        if current is not None:
+            current[key] = value
+        else:
+            global_kv[key] = value
+    if current is not None:
+        proxies.append(current)
+    return global_kv, proxies
+
+
+def validate_frpc_data_plane_metadata(toml_text, machine_id, enabled_service_ids, pub_pem=None):
+    """Validate canonical TOML metadata after a data-plane-capable upgrade."""
+    cid = validate_client_id(machine_id)
+    global_kv, proxies = parse_frpc_toml_sections(toml_text)
+    if str(global_kv.get('clientID') or '') != cid:
+        raise ValueError('frpc.toml clientID does not match machine_id')
+    if str(global_kv.get('metadatas.%s' % META_CLIENT_ID) or '') != cid:
+        raise ValueError('frpc.toml frp_ad_client_id does not match machine_id')
+    if str(global_kv.get('metadatas.%s' % META_PROOF_SCHEMA) or '') != str(DATA_PLANE_SCHEMA):
+        raise ValueError('frpc.toml frp_ad_proof_schema is not the expected schema')
+    proof = str(global_kv.get('metadatas.%s' % META_PROOF) or '').strip()
+    if not proof:
+        raise ValueError('frpc.toml is missing frp_ad_proof')
+    expected = set()
+    for sid in enabled_service_ids or []:
+        expected.add(validate_service_id(str(sid).strip().lower()))
+    found = set()
+    for proxy in proxies:
+        if str(proxy.get('type') or '').lower() not in ('', 'tcp'):
+            continue
+        sid = str(proxy.get('metadatas.%s' % META_SERVICE_ID) or '').strip().lower()
+        if not sid:
+            raise ValueError('enabled proxy is missing frp_ad_service_id')
+        found.add(validate_service_id(sid))
+    if expected - found:
+        raise ValueError('enabled service missing from frpc.toml metadata: %s' % sorted(expected - found))
+    if pub_pem:
+        if not verify_proof(pub_pem, cid, proof):
+            raise ValueError('frpc.toml data-plane proof did not verify')
+    return True
 
 
 def _toml_escape(value):
@@ -183,13 +307,13 @@ def authorize_new_proxy(content, registry_state, cfg=None, lease_mod=None):
         return False, 'missing service identity metadata'
 
     try:
-        client_id = CREG.validate_machine_id(client_id)
-        service_id = CREG.require_canonical_service_id(service_id, field='service id')
+        client_id = validate_client_id(client_id)
+        service_id = validate_service_id(service_id, field='service id')
     except ValueError as exc:
         return False, str(exc)
 
     try:
-        CREG.validate_registry_or_raise(registry_state, cfg)
+        _creg().validate_registry_or_raise(registry_state, cfg)
     except ValueError as exc:
         return False, 'registry is invalid: %s' % exc
 
@@ -224,33 +348,47 @@ def authorize_new_proxy(content, registry_state, cfg=None, lease_mod=None):
         return False, 'remote_port does not match registry reservation'
 
     run_id = str(user.get('run_id') or '').strip()
+    hook = os.environ.get('FRP_DATA_PLANE_HOOK_AFTER_REGISTRY_AUTH_BEFORE_LEASE') or ''
+    if hook:
+        marker = os.environ.get('FRP_DATA_PLANE_HOOK_MARKER') or ''
+        if marker:
+            Path(marker).write_text('holding-registry-lock\n', encoding='utf-8')
+        try:
+            time.sleep(float(hook))
+        except ValueError:
+            time.sleep(2.0)
     if lease_mod is None:
         lease_mod = _load_leases()
     lease_dir = lease_mod.lease_dir_from_cfg(cfg)
-    if not lease_mod.acquire_lease(
-        lease_dir,
-        client_id=client_id,
-        service_id=service_id,
-        remote_port=remote_port,
-        run_id=run_id,
-        ttl_sec=LEASE_TTL_SEC,
-    ):
+    try:
+        lease_mod.acquire_lease(
+            lease_dir,
+            client_id=client_id,
+            service_id=service_id,
+            remote_port=remote_port,
+            run_id=run_id,
+            ttl_sec=LEASE_TTL_SEC,
+        )
+    except getattr(lease_mod, 'LeaseCapacityExceeded', tuple()):
+        return False, 'authorization lease capacity exceeded'
+    except getattr(lease_mod, 'LeaseStoreInvalid', tuple()):
+        return False, 'LEASE_STORE_INVALID'
+    except OSError:
         return False, 'failed to record authorization lease'
 
     return True, None
 
 
-def handle_close_proxy(content, cfg=None, lease_mod=None):
-    if not isinstance(content, dict):
-        return _allow()
-    user = content.get('user') if isinstance(content.get('user'), dict) else {}
-    proxy_name = str(content.get('proxy_name') or '')
-    run_id = str(user.get('run_id') or '').strip()
-    if lease_mod is None:
-        lease_mod = _load_leases()
-    lease_dir = lease_mod.lease_dir_from_cfg(cfg)
-    lease_mod.release_leases_for_proxy(lease_dir, proxy_name=proxy_name, run_id=run_id)
-    return _allow()
+def registry_file_from_cfg(cfg):
+    path = ''
+    if isinstance(cfg, dict):
+        path = str(cfg.get('registry_file') or '').strip()
+    root = os.environ.get('FRP_DEPLOY_TEST_ROOT') or os.environ.get('FRP_SERVER_TEST_ROOT') or ''
+    if not path:
+        return ''
+    if root and not path.startswith(root):
+        return str(Path(root) / path.lstrip('/'))
+    return path
 
 
 def handle_plugin_http(method, path, query, body_bytes, registry_loader, cfg=None):
@@ -277,10 +415,12 @@ def handle_plugin_http(method, path, query, body_bytes, registry_loader, cfg=Non
         return 400, _reject('missing op')
 
     content = payload.get('content')
-    strict = bool((cfg or {}).get('data_plane_auth_strict', True))
+    strict = (cfg or {}).get('data_plane_auth_strict', True) is True
 
+    # v2.1.1: NewProxy-only. Do not delete leases on CloseProxy (one run_id
+    # covers multiple proxies). Expired leases clean up by TTL.
     if op == 'CloseProxy':
-        return 200, handle_close_proxy(content, cfg=cfg)
+        return 200, _allow()
 
     if op != 'NewProxy':
         return 400, _reject('unsupported op')
@@ -288,23 +428,31 @@ def handle_plugin_http(method, path, query, body_bytes, registry_loader, cfg=Non
     if not strict:
         return 200, _allow()
 
-    try:
-        registry_state = registry_loader()
-    except Exception:
-        return 200, _reject('registry unavailable')
+    registry_file = registry_file_from_cfg(cfg)
+    if not registry_file:
+        return 200, _reject('registry path is not configured')
 
-    allowed, reason = authorize_new_proxy(content, registry_state, cfg=cfg)
-    if not allowed:
-        return 200, _reject(reason or 'authorization denied')
-    return 200, _allow()
+    locks = _load_locks()
+    with locks.acquire_registry_lock(registry_file):
+        try:
+            registry_state = registry_loader()
+        except Exception:
+            return 200, _reject('registry unavailable')
+        allowed, reason = authorize_new_proxy(content, registry_state, cfg=cfg)
+        if not allowed:
+            return 200, _reject(reason or 'authorization denied')
+        return 200, _allow()
 
 
 def assert_port_releasable(remote_port, cfg=None, lease_mod=None):
-    """Raise ValueError when release must be refused (live proxy or active lease)."""
+    """Raise ValueError when release must be refused (live proxy or active lease).
+
+    Caller must already hold registry.lock. Malformed lease state fails closed.
+    """
     if remote_port is None:
         return
     port = int(remote_port)
-    state = CREG.passive_port_state(port)
+    state = _creg().passive_port_state(port)
     if state != 'offline':
         raise ValueError(
             'port %s is %s; stop publishing before release' % (port, state)
@@ -312,8 +460,14 @@ def assert_port_releasable(remote_port, cfg=None, lease_mod=None):
     if lease_mod is None:
         lease_mod = _load_leases()
     lease_dir = lease_mod.lease_dir_from_cfg(cfg)
-    lease_mod.expire_stale(lease_dir)
-    if lease_mod.has_active_lease(lease_dir, remote_port=port):
+    try:
+        lease_mod.expire_stale(lease_dir)
+        active = lease_mod.has_active_lease(lease_dir, remote_port=port)
+    except Exception as exc:
+        if type(exc).__name__ == 'LeaseStoreInvalid' or 'LEASE_STORE_INVALID' in str(exc):
+            raise ValueError('LEASE_STORE_INVALID: RELEASE_REFUSED') from exc
+        raise
+    if active:
         raise ValueError(
             'port %s has an active authorization lease; retry after proxy bind completes or expires'
             % port

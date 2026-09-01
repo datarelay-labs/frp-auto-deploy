@@ -132,12 +132,63 @@ function Get-FrpTokenFromToml {
     return $null
 }
 
+function Test-FrpClientTomlDataPlaneMetadata {
+    param(
+        [string]$TomlPath,
+        [string]$MachineId,
+        [object]$Services
+    )
+    if (-not $TomlPath) { $TomlPath = Get-FrpTomlPath }
+    if (-not (Test-Path -LiteralPath $TomlPath)) {
+        throw 'ERROR: frpc.toml is missing; cannot validate data-plane metadata'
+    }
+    $mid = [string]$MachineId
+    if ([string]::IsNullOrWhiteSpace($mid)) {
+        throw 'ERROR: machine_id is required for data-plane metadata validation'
+    }
+    $text = [System.IO.File]::ReadAllText($TomlPath)
+    if ($text -notmatch ('(?m)^clientID\s*=\s*"{0}"' -f [regex]::Escape($mid))) {
+        throw 'ERROR: frpc.toml clientID does not match machine_id'
+    }
+    if ($text -notmatch ('(?m)^metadatas\.frp_ad_client_id\s*=\s*"{0}"' -f [regex]::Escape($mid))) {
+        throw 'ERROR: frpc.toml frp_ad_client_id does not match machine_id'
+    }
+    if ($text -notmatch '(?m)^metadatas\.frp_ad_proof_schema\s*=\s*"1"') {
+        throw 'ERROR: frpc.toml frp_ad_proof_schema is not the expected schema'
+    }
+    if ($text -notmatch '(?m)^metadatas\.frp_ad_proof\s*=\s*"([^"]+)"') {
+        throw 'ERROR: frpc.toml is missing frp_ad_proof'
+    }
+    $proof = [string]$Matches[1]
+    if ([string]::IsNullOrWhiteSpace($proof)) {
+        throw 'ERROR: frpc.toml is missing frp_ad_proof'
+    }
+    $map = ConvertTo-FrpServiceMap -Services $Services
+    foreach ($sid in $map.Keys) {
+        $item = $map[$sid]
+        if ($item.enabled -eq $false) { continue }
+        $escaped = [regex]::Escape([string]$item.id)
+        if ($text -notmatch ('(?m)^metadatas\.frp_ad_service_id\s*=\s*"{0}"' -f $escaped)) {
+            throw ("ERROR: enabled proxy '{0}' is missing frp_ad_service_id" -f $item.id)
+        }
+    }
+    $pubPath = Get-FrpIdentityPubPath
+    if (Test-Path -LiteralPath $pubPath) {
+        $pub = [System.IO.File]::ReadAllText($pubPath)
+        $msg = Get-FrpCanonicalJson -Object (Get-FrpDataPlaneProofObject -MachineId $mid)
+        if (-not (Test-FrpSignature -PublicPem $pub -Message $msg -SignatureBase64 $proof)) {
+            throw 'ERROR: frpc.toml data-plane proof did not verify'
+        }
+    }
+    return $true
+}
+
 function Test-FrpClientTomlNeedsDataPlaneRefresh {
     param([string]$TomlPath)
     if (-not $TomlPath) { $TomlPath = Get-FrpTomlPath }
     if (-not (Test-Path -LiteralPath $TomlPath)) { return $false }
     $text = [System.IO.File]::ReadAllText($TomlPath)
-    return ($text -notmatch 'frp_ad_proof' -or $text -notmatch 'frp_ad_service_id')
+    return ($text -notmatch '(?m)^metadatas\.frp_ad_proof\s*=' -or $text -notmatch 'frp_ad_service_id')
 }
 
 function Update-FrpClientDataPlaneMetadataIfNeeded {
@@ -158,8 +209,9 @@ function Update-FrpClientDataPlaneMetadataIfNeeded {
     if ($state.PSObject.Properties.Name -contains 'frp_transport' -and $state.frp_transport) {
         $transport = [string]$state.frp_transport
     }
-    New-FrpClientToml -ServerAddr [string]$state.frp_server -ServerPort ([int]$state.frp_server_port) `
-        -Token $token -HostId [string]$state.host_id -Services $state.services `
-        -MachineId [string]$state.machine_id -Transport $transport | Out-Null
+    New-FrpClientToml -ServerAddr ([string]$state.frp_server) -ServerPort ([int]$state.frp_server_port) `
+        -Token $token -HostId ([string]$state.host_id) -Services $state.services `
+        -MachineId ([string]$state.machine_id) -Transport $transport | Out-Null
+    Test-FrpClientTomlDataPlaneMetadata -TomlPath $toml -MachineId ([string]$state.machine_id) -Services $state.services | Out-Null
     return $true
 }

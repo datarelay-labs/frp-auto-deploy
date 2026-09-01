@@ -1,7 +1,7 @@
 [Unit]
 Description=FRP Server
-After=network-online.target
-Wants=network-online.target
+After=network-online.target frp-port-allocator.service
+Wants=network-online.target frp-port-allocator.service
 
 [Service]
 Type=simple

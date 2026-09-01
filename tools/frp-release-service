@@ -112,6 +112,10 @@ def ensure_releasable(service, force=False):
 
 
 cfg = json.loads(Path(ROOT + '/etc/frp-auto-deploy/config.json').read_text())
+try:
+    RG.ensure_strict_release_enabled(cfg)
+except ValueError as exc:
+    raise SystemExit('ERROR: %s' % exc)
 path = Path(cfg['registry_file'])
 if ROOT and not str(path).startswith(ROOT):
     path = Path(ROOT + str(path))
@@ -142,6 +146,10 @@ if answer != 'RELEASE':
 
 lock_fd = lock_registry(path)
 try:
+    try:
+        RG.ensure_strict_release_enabled(cfg)
+    except ValueError as exc:
+        raise SystemExit('ERROR: %s' % exc)
     state = json.loads(path.read_text())
     require_valid_registry(state, cfg)
     mid, client = CREG.resolve_client_id_only_or_exit(state, args.query)

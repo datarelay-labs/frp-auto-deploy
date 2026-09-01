@@ -2088,10 +2088,10 @@ render_frpc_toml() {
       return 1
     fi
   fi
-  python3 - "$dest" "$server" "$server_port" "$token" "$host_id" "$services_json_file" "$transport" "$ca_file" "$machine_id" "$identity_key" "${_FRP_CLIENT_COMMON_DIR}/.." <<'PY'
+  python3 - "$dest" "$server" "$server_port" "$token" "$host_id" "$services_json_file" "$transport" "$ca_file" "$machine_id" "$identity_key" "${_FRP_CLIENT_COMMON_DIR}" <<'PY'
 import importlib.util, json, os, sys
 from pathlib import Path
-dest, server, server_port, token, host_id, svc_path, transport, ca_file, machine_id, identity_key, root_dir = sys.argv[1:12]
+dest, server, server_port, token, host_id, svc_path, transport, ca_file, machine_id, identity_key, common_dir = sys.argv[1:12]
 raw = json.loads(Path(svc_path).read_text(encoding='utf-8'))
 if isinstance(raw, dict) and 'services' in raw:
     services = []
@@ -2116,16 +2116,24 @@ if transport == 'wss':
         f'transport.tls.trustedCaFile = "{ca_file}"',
     ])
 proof_lines = []
+mod = None
 if machine_id and identity_key and Path(identity_key).is_file():
-    lib = Path(root_dir) / 'lib' / 'frp_data_plane_auth.py'
-    if not lib.is_file():
-        lib = Path('/usr/local/lib/frp-auto-deploy/frp_data_plane_auth.py')
-    if lib.is_file():
-        spec = importlib.util.spec_from_file_location('frp_data_plane_auth', str(lib))
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        proof = mod.sign_proof(identity_key, machine_id)
-        proof_lines = mod.frpc_global_metadata_lines(machine_id, proof)
+    common = Path(common_dir)
+    candidates = [
+        common / 'frp_data_plane_auth.py',
+        common.parent / 'lib' / 'frp_data_plane_auth.py',
+        Path('/usr/local/lib/frp-auto-deploy/frp_data_plane_auth.py'),
+    ]
+    lib = next((p for p in candidates if p.is_file()), None)
+    if lib is None:
+        raise SystemExit('ERROR: frp_data_plane_auth.py is unavailable; cannot emit data-plane proof')
+    spec = importlib.util.spec_from_file_location('frp_data_plane_auth', str(lib))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    proof = mod.sign_proof(identity_key, machine_id)
+    proof_lines = mod.frpc_global_metadata_lines(machine_id, proof)
+    if not proof_lines:
+        raise SystemExit('ERROR: failed to generate data-plane proof metadata')
 if proof_lines:
     lines.append('')
     lines.extend(proof_lines)
@@ -2144,10 +2152,7 @@ for item in services:
     if proof_lines:
         sid = str(item.get('id') or '').strip().lower()
         if sid:
-            try:
-                lines.extend(mod.frpc_proxy_metadata_lines(sid))
-            except Exception:
-                lines.append(f'metadatas.frp_ad_service_id = "{sid}"')
+            lines.extend(mod.frpc_proxy_metadata_lines(sid))
 text = '\n'.join(lines) + '\n'
 path = Path(dest)
 path.parent.mkdir(parents=True, exist_ok=True)
@@ -3672,6 +3677,7 @@ frp_client_upgrade_destinations() {
     "usr/local/lib/frp-auto-deploy/frp-client-common.sh:0644:lib/frp-client-common.sh" \
     "usr/local/lib/frp-auto-deploy/frp-common.sh:0644:lib/frp-common.sh" \
     "usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py:0644:lib/frp_mgmt_auth.py" \
+    "usr/local/lib/frp-auto-deploy/frp_data_plane_auth.py:0644:lib/frp_data_plane_auth.py" \
     "usr/local/lib/frp-auto-deploy/frp_clock_sync.py:0644:lib/frp_clock_sync.py" \
     "usr/local/lib/frp-auto-deploy/frp-doctor-common.sh:0644:lib/frp-doctor-common.sh" \
     "usr/local/lib/frp-auto-deploy/frp_doctor.py:0644:lib/frp_doctor.py" \
@@ -3772,6 +3778,13 @@ frp_client_upgrade_backup_tools() {
   else
     printf 'absent version\n' >>"${dest}/manifest"
   fi
+  live="$(frp_client_toml_path)"
+  if [[ -f "$live" ]]; then
+    install -m 0600 "$live" "${dest}/frpc.toml"
+    printf 'present frpc.toml\n' >>"${dest}/manifest"
+  else
+    printf 'absent frpc.toml\n' >>"${dest}/manifest"
+  fi
   python3 - "$(frp_client_upgrade_backup_root)" "$FRP_CLIENT_UPGRADE_BACKUP_KEEP" <<'PY'
 import shutil, sys
 from pathlib import Path
@@ -3810,6 +3823,11 @@ frp_client_upgrade_restore_tools() {
   else
     rm -f "$live"
   fi
+  live="$(frp_client_toml_path)"
+  if [[ -f "${backup}/frpc.toml" ]]; then
+    mkdir -p "$(dirname "$live")"
+    install -m 0600 "${backup}/frpc.toml" "$live"
+  fi
   return 0
 }
 
@@ -3843,6 +3861,20 @@ frp_client_upgrade_verify_restored() {
       ;;
     absent)
       [[ ! -e "$live" ]] || return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  live="$(frp_client_toml_path)"
+  state="$(awk '$2=="frpc.toml" {print $1; exit}' "${backup}/manifest")"
+  case "$state" in
+    present)
+      [[ -f "$live" && "$(frp_client_digest "$live")" == "$(frp_client_digest "${backup}/frpc.toml")" ]] \
+        || return 1
+      ;;
+    absent|'')
+      return 0
       ;;
     *)
       return 1
@@ -3962,15 +3994,26 @@ frp_client_toml_needs_data_plane_refresh() {
 import sys
 from pathlib import Path
 text = Path(sys.argv[1]).read_text(encoding='utf-8')
-if 'frp_ad_proof' not in text or 'frp_ad_service_id' not in text:
-    raise SystemExit(0)
-raise SystemExit(1)
+needed = False
+if 'frp_ad_proof =' not in text or 'frp_ad_service_id' not in text:
+    needed = True
+if 'frp_ad_proof_schema' not in text or 'frp_ad_client_id' not in text:
+    needed = True
+raise SystemExit(0 if needed else 1)
 PY
 }
 
+# 0 = refreshed, 10 = already valid / not needed, 1 = failure
 frp_client_refresh_data_plane_proof_if_needed() {
-  local token
-  frp_client_toml_needs_data_plane_refresh || return 1
+  local token toml rc
+  toml="$(frp_client_toml_path)"
+  if [[ ! -f "$toml" ]]; then
+    echo "ERROR: frpc.toml is missing; cannot refresh data-plane metadata" >&2
+    return 1
+  fi
+  if ! frp_client_toml_needs_data_plane_refresh; then
+    return 10
+  fi
   token="$(frp_read_existing_token 2>/dev/null || true)"
   if [[ -z "$token" ]]; then
     echo "ERROR: cannot refresh data-plane metadata without FRP token" >&2
@@ -3982,6 +4025,56 @@ frp_client_refresh_data_plane_proof_if_needed() {
   fi
   echo "Refreshed frpc.toml with data-plane authorization metadata."
   return 0
+}
+
+frp_client_validate_data_plane_toml_metadata() {
+  local toml state key pub
+  toml="$(frp_client_toml_path)"
+  state="$(frp_client_state_path)"
+  [[ -f "$toml" && -f "$state" ]] || {
+    echo "ERROR: cannot validate data-plane metadata; frpc.toml or client-state.json is missing" >&2
+    return 1
+  }
+  key="$(frp_client_identity_key_path)"
+  pub="$(frp_client_identity_pub_path)"
+  python3 - "$toml" "$state" "$key" "$pub" "${_FRP_CLIENT_COMMON_DIR:-}/frp_data_plane_auth.py" <<'PY' || return 1
+import importlib.util, json, sys
+from pathlib import Path
+toml_path, state_path, key_path, pub_path, lib_path = sys.argv[1:6]
+candidates = [Path(lib_path)] if lib_path else []
+candidates.append(Path('/usr/local/lib/frp-auto-deploy/frp_data_plane_auth.py'))
+mod = None
+for lib in candidates:
+    if lib.is_file():
+        spec = importlib.util.spec_from_file_location('frp_data_plane_auth', str(lib))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        break
+if mod is None:
+    raise SystemExit('ERROR: frp_data_plane_auth.py is unavailable')
+state = json.loads(Path(state_path).read_text(encoding='utf-8'))
+machine_id = str(state.get('machine_id') or '')
+services = state.get('services') or {}
+enabled = []
+if isinstance(services, dict):
+    for sid, rec in services.items():
+        if not isinstance(rec, dict):
+            continue
+        if rec.get('enabled', True) is False:
+            continue
+        enabled.append(str(rec.get('id') or sid).strip().lower())
+pub = Path(pub_path).read_text(encoding='utf-8') if Path(pub_path).is_file() else None
+try:
+    mod.validate_frpc_data_plane_metadata(
+        Path(toml_path).read_text(encoding='utf-8'),
+        machine_id,
+        enabled,
+        pub_pem=pub,
+    )
+except Exception as exc:
+    print('ERROR: %s' % exc, file=sys.stderr)
+    raise SystemExit(1)
+PY
 }
 
 frp_client_apply_upgrade() {
@@ -4169,8 +4262,55 @@ frp_client_apply_upgrade() {
     return 1
   fi
 
-  if frp_client_refresh_data_plane_proof_if_needed; then
-    toml_refresh=1
+  # Prefer just-installed helpers in a subshell so the first upgrade that
+  # delivers this fix gets fail-closed proof refresh without redefining the
+  # in-flight upgrade function / ERR trap.
+  _live_common="$(frp_client_path /usr/local/lib/frp-auto-deploy/frp-client-common.sh)"
+
+  local proof_rc=0
+  if [[ "$ident_before" == enrolled ]]; then
+    set +e
+    if [[ -f "$_live_common" ]]; then
+      (
+        FRP_CLIENT_COMMON_LOADED=
+        # shellcheck disable=SC1090
+        . "$_live_common"
+        frp_client_refresh_data_plane_proof_if_needed
+      )
+      proof_rc=$?
+    else
+      frp_client_refresh_data_plane_proof_if_needed
+      proof_rc=$?
+    fi
+    set -e
+    if [[ "$proof_rc" -eq 0 ]]; then
+      toml_refresh=1
+    elif [[ "$proof_rc" -eq 10 ]]; then
+      toml_refresh=0
+    else
+      echo "ERROR: data-plane proof refresh failed; restoring previous management files." >&2
+      frp_client_upgrade_rollback "$backup" HEALTH_CHECK_FAILED || return 2
+      return 1
+    fi
+    set +e
+    if [[ -f "$_live_common" ]]; then
+      (
+        FRP_CLIENT_COMMON_LOADED=
+        # shellcheck disable=SC1090
+        . "$_live_common"
+        frp_client_validate_data_plane_toml_metadata
+      )
+      meta_rc=$?
+    else
+      frp_client_validate_data_plane_toml_metadata
+      meta_rc=$?
+    fi
+    set -e
+    if [[ "$meta_rc" -ne 0 ]]; then
+      echo "ERROR: data-plane metadata validation failed; restoring previous management files." >&2
+      frp_client_upgrade_rollback "$backup" HEALTH_CHECK_FAILED || return 2
+      return 1
+    fi
   fi
 
   echo "Verifying upgrade..."

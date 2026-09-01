@@ -1,13 +1,22 @@
 #!/usr/bin/env python3
 """Shared control-state locks for backup, restore, and registry writers.
 
-Lock order (mandatory whenever an operation takes both):
+Canonical lock order (mandatory; never invert):
 
   1. server-lifecycle.lock
+     backup, restore, and other lifecycle mutations only.
   2. registry.lock
+     NewProxy authorization (load + validate + lease create),
+     service/client port release, and allocator HTTP registry writers.
+  3. proxy-leases/.leases.lock
+     only while already holding registry.lock for authorization or
+     release-safety lease inspection/creation.
 
-Allocator HTTP writers take only registry.lock (plus an in-process thread
-lock). They must never acquire the lifecycle lock after registry.lock.
+Allocator HTTP writers and the NewProxy plugin take only registry.lock
+(plus an in-process thread lock / lease lock). They must never acquire
+the lifecycle lock after registry.lock.
+
+Release tools take only registry.lock, then inspect leases.
 
 Backup and restore take lifecycle then registry, with a timeout, so they
 cannot block network operations indefinitely if a lifecycle holder is stuck.
@@ -83,3 +92,46 @@ def acquire_control_locks(root, timeout=DEFAULT_TIMEOUT_SEC, registry_rel="var/l
     with ExclusiveFileLock(lifecycle_lock_path(root), timeout=timeout) as life:
         with ExclusiveFileLock(registry_lock_path(root, registry_rel), timeout=timeout) as reg:
             yield (life, reg)
+
+
+def registry_lock_path_for_file(registry_file):
+    return Path(registry_file).resolve().parent / "registry.lock"
+
+
+class BlockingFileLock:
+    """Blocking fcntl exclusive lock. Same primitive as allocator FileLock and release tools."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self.fd = None
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.fd = os.open(str(self.path), os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(self.fd, fcntl.LOCK_EX)
+        except Exception:
+            os.close(self.fd)
+            self.fd = None
+            raise
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.fd is not None:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+            self.fd = None
+        return False
+
+
+@contextmanager
+def acquire_registry_lock(registry_file):
+    """Blocking exclusive lock on the canonical registry.lock next to registry.json."""
+    with BlockingFileLock(registry_lock_path_for_file(registry_file)) as lock:
+        yield lock

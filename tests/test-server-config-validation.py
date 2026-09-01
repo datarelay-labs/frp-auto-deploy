@@ -128,6 +128,24 @@ def test_core():
         base_direct(deployment_mode='weird'),
         'deployment_mode',
     )
+    expect_fail(
+        'DATA_PLANE_STRICT_STRING_FALSE_REJECTED',
+        base_direct(data_plane_auth_strict='false'),
+        'boolean',
+    )
+    expect_fail(
+        'DATA_PLANE_STRICT_STRING_TRUE_REJECTED',
+        base_direct(data_plane_auth_strict='true'),
+        'boolean',
+    )
+    expect_ok('DATA_PLANE_STRICT_BOOL_FALSE_OK', base_direct(data_plane_auth_strict=False))
+    expect_ok('DATA_PLANE_STRICT_BOOL_TRUE_OK', base_direct(data_plane_auth_strict=True))
+    expect_fail(
+        'PLUGIN_HOST_NON_STRING_REJECTED',
+        base_direct(frp_plugin_listen_host=True),
+        'frp_plugin_listen_host',
+    )
+    pass_('DATA_PLANE_STRICT_BOOLEAN_VALIDATION')
 
 
 def test_restore_rejects_unsafe():

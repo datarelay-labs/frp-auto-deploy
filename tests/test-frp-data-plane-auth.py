@@ -156,6 +156,7 @@ class Env:
             "port_start": 10000,
             "port_end": 65000,
             "frp_plugin_listen_port": self.plugin_port,
+            "registry_file": str(self.registry_path),
         }
         self.keys = {}
         self.procs = ProcGroup()
@@ -168,6 +169,8 @@ class Env:
         os.environ.pop("FRP_DEPLOY_TEST_ROOT", None)
         os.environ.pop("FRP_DATA_PLANE_HOOK_DELAY_AFTER_LEASE", None)
         os.environ.pop("FRP_DATA_PLANE_HOOK_FORCE_REJECT", None)
+        os.environ.pop("FRP_DATA_PLANE_HOOK_AFTER_REGISTRY_AUTH_BEFORE_LEASE", None)
+        os.environ.pop("FRP_DATA_PLANE_HOOK_MARKER", None)
         self.tmp.cleanup()
 
     def keypair(self, client_id):
@@ -310,7 +313,7 @@ class Env:
                 'name = "frp-auto-deploy-port-authorizer"',
                 'addr = "%s"' % plugin_addr,
                 'path = "/handler"',
-                'ops = ["NewProxy", "CloseProxy"]',
+                'ops = ["NewProxy"]',
                 "",
             ]
         )
@@ -504,6 +507,7 @@ def run_plugin_http_tests(env):
 
 
 def run_integration_stale_client(env):
+    """Product release-service state: client A remains, service ssh is removed."""
     env.reset_plugin_port()
     env.clear_leases()
     client_a = "client-a"
@@ -511,13 +515,27 @@ def run_integration_stale_client(env):
     env.set_registry(
         base_registry(
             {
-                client_b: env.client_record(
-                    client_b,
+                client_a: env.client_record(
+                    client_a,
                     {"ssh": base_service(env.remote_port)},
                 ),
             }
         )
     )
+    # Simulate release-service: keep client A, drop only ssh.
+    state = env.load_registry()
+    state["clients"][client_a]["services"] = {}
+    state["clients"][client_b] = env.client_record(
+        client_b,
+        {"ssh": base_service(env.remote_port)},
+    )
+    env.set_registry(state)
+    if "client-a" not in env.load_registry()["clients"]:
+        fail("integration_release_service_client_missing")
+    if "ssh" in (env.load_registry()["clients"]["client-a"].get("services") or {}):
+        fail("integration_release_service_ssh_still_present")
+    pass_("RELEASE_SERVICE_STATE_TEST")
+
     env.start_plugin()
     env.start_frps()
     stale_toml = env.root / "frpc-stale-a.toml"
@@ -527,10 +545,11 @@ def run_integration_stale_client(env):
     )
     _proc, log_path = env.start_frpc(stale_toml, log_name="frpc-stale.log")
     if wait_listen(env.remote_port, timeout=6.0):
-        fail("integration_stale_client_bound")
+        fail("integration_stale_service_bound")
     log_text = log_path.read_text(encoding="utf-8", errors="replace")
-    if "unknown client" not in log_text:
-        fail("integration_stale_client_error", log_text[:800])
+    if "unknown service" not in log_text:
+        fail("integration_stale_service_error", log_text[:800])
+    pass_("STALE_RELEASED_SERVICE_REJECTED")
     pass_("INTEGRATION_STALE_RELEASED_CLIENT_REJECTED")
     try:
         _proc.send_signal(signal.SIGTERM)
@@ -544,6 +563,7 @@ def run_integration_stale_client(env):
     if not wait_listen(env.remote_port, timeout=12.0):
         fail("integration_reallocated_client_bind", b_log.read_text()[:800])
     pass_("INTEGRATION_RELEASED_PORT_REALLOCATED_TO_NEW_CLIENT")
+    pass_("RELEASED_PORT_REALLOCATED_TO_NEW_CLIENT")
 
     stale2_toml = env.root / "frpc-stale-a-again.toml"
     write(stale2_toml, env.frpc_toml(client_a, proof=env.proof(client_a)))
@@ -552,13 +572,52 @@ def run_integration_stale_client(env):
     if not wait_listen(env.remote_port, timeout=2.0):
         fail("integration_reallocated_port_lost", b_log.read_text()[:800])
     rejected = False
-    for needle in ("unknown client", "invalid data-plane proof", "proxy name"):
+    for needle in ("unknown service", "unknown client", "invalid data-plane proof", "proxy name"):
         if env.frpc_error_seen(log2, needle, timeout=3.0):
             rejected = True
             break
     if not rejected:
         fail("integration_old_client_reclaim", log2.read_text()[:800])
     pass_("INTEGRATION_OLD_CLIENT_CANNOT_RECLAIM_REALLOCATED_PORT")
+
+
+def run_integration_release_client_state(env):
+    """Product release-client state: client A remains with empty services."""
+    env.reset_plugin_port()
+    env.clear_leases()
+    client_a = "client-a"
+    env.set_registry(
+        base_registry(
+            {
+                client_a: env.client_record(
+                    client_a,
+                    {
+                        "ssh": base_service(env.remote_port),
+                        "https": base_service(env.remote_port + 1, id="https", preset="https"),
+                    },
+                ),
+            }
+        )
+    )
+    state = env.load_registry()
+    state["clients"][client_a]["services"] = {}
+    env.set_registry(state)
+    if "client-a" not in env.load_registry()["clients"]:
+        fail("release_client_state_client_deleted")
+    if env.load_registry()["clients"]["client-a"].get("services"):
+        fail("release_client_state_services_not_empty")
+    pass_("RELEASE_CLIENT_STATE_TEST")
+
+    env.start_plugin()
+    env.start_frps()
+    stale_toml = env.root / "frpc-release-client.toml"
+    write(stale_toml, env.frpc_toml(client_a, proof=env.proof(client_a)))
+    _proc, log_path = env.start_frpc(stale_toml, log_name="frpc-release-client.log")
+    if wait_listen(env.remote_port, timeout=6.0):
+        fail("release_client_stale_bound")
+    if "unknown service" not in log_path.read_text(encoding="utf-8", errors="replace"):
+        fail("release_client_stale_error", log_path.read_text()[:800])
+    pass_("STALE_RELEASED_CLIENT_REJECTED")
 
 
 def run_integration_impersonation(env):
@@ -718,6 +777,10 @@ def main():
         env.stop_plugin()
 
         run_integration_stale_client(env)
+        env.procs.stop()
+        env.stop_plugin()
+
+        run_integration_release_client_state(env)
         env.procs.stop()
         env.stop_plugin()
 

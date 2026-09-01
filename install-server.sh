@@ -1114,7 +1114,7 @@ write_frps_toml() {
 name = \"frp-auto-deploy-port-authorizer\"
 addr = \"${plugin_host}:${plugin_port}\"
 path = \"/handler\"
-ops = [\"NewProxy\", \"CloseProxy\"]
+ops = [\"NewProxy\"]
 "
   fi
   if frp_mode_is_single443; then

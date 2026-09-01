@@ -191,6 +191,7 @@ function Protect-FrpRedactText {
     $out = $Text
     $out = [regex]::Replace($out, '(?im)^(auth\.)?token\s*=\s*.+$', 'auth.token = "[redacted]"')
     $out = [regex]::Replace($out, '(?im)^token\s*=\s*.+$', 'token = "[redacted]"')
+    $out = [regex]::Replace($out, '(?im)^metadatas\.frp_ad_proof\s*=\s*.+$', 'metadatas.frp_ad_proof = "[redacted]"')
     $out = [regex]::Replace($out, '(?i)(Authorization\s*[:=]\s*).+$', '$1[redacted]')
     $out = [regex]::Replace($out, '(?i)Enrollment\s+Code\s*[:=]\s*\S+', 'Enrollment Code: [redacted]')
     $out = [regex]::Replace($out, '(?i)(password|passwd|secret|private[_-]?key|enrollment[_-]?code|bootstrap[_-]?ticket|mgmt_mac_key|auth_token|server_token)\s*[:=]\s*\S+', '$1=[redacted]')
@@ -211,7 +212,7 @@ function Protect-FrpRedactJsonObject {
         $out = [ordered]@{}
         foreach ($key in $Obj.Keys) {
             $k = [string]$key
-            if ($k -match '(?i)token|secret|password|passwd|private.?key|authorization|enrollment.?code|bootstrap|hmac|auth_token|server_token') {
+            if ($k -match '(?i)^(token|secret|password|passwd|private.?key|authorization|enrollment.?code|bootstrap|hmac|auth_token|server_token|frp_ad_proof)$') {
                 $out[$k] = '[redacted]'
             } else {
                 $out[$k] = Protect-FrpRedactJsonObject -Obj $Obj[$key]

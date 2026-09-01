@@ -1712,10 +1712,11 @@ def main():
         raise SystemExit(f'ERROR: {exc}') from exc
     allocator.cleanup_expired_enrollments()
     plugin_srv = None
-    if allocator.cfg.get('data_plane_auth_strict', True) is not False:
-        plugin_mod = _load_lib_module('frp_plugin_server', 'frp_plugin_server.py')
-        if plugin_mod is None:
-            raise SystemExit('ERROR: frp_plugin_server.py is unavailable; refusing strict data-plane auth')
+    plugin_mod = _load_lib_module('frp_plugin_server', 'frp_plugin_server.py')
+    strict = allocator.cfg.get('data_plane_auth_strict', True) is True
+    if strict and plugin_mod is None:
+        raise SystemExit('ERROR: frp_plugin_server.py is unavailable; refusing strict data-plane auth')
+    if plugin_mod is not None:
         try:
             phost, pport = plugin_mod.plugin_listen_from_cfg(allocator.cfg)
             plugin_srv, _plugin_thread = plugin_mod.start_plugin_server(
@@ -1730,7 +1731,9 @@ def main():
                 flush=True,
             )
         except Exception as exc:
-            raise SystemExit('ERROR: failed to start data-plane authorizer: %s' % exc) from exc
+            if strict:
+                raise SystemExit('ERROR: failed to start data-plane authorizer: %s' % exc) from exc
+            print('WARNING: data-plane authorizer not started: %s' % exc, flush=True)
     host = allocator.cfg.get('listen_host', '0.0.0.0')
     port = cfg_allocator_listen_port(allocator.cfg)
     if port is None:
@@ -1743,6 +1746,8 @@ def main():
     server = ThreadingHTTPServer((host, port), make_handler(allocator))
     server.socket = context.wrap_socket(server.socket, server_side=True)
     print(f'FRP allocator listening on https://{host}:{port}', flush=True)
+    if plugin_mod is not None and hasattr(plugin_mod, 'systemd_notify_ready'):
+        plugin_mod.systemd_notify_ready()
     server.serve_forever()
 
 

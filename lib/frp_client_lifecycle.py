@@ -25,12 +25,14 @@ PAUSE_SCHEMA = 1
 SENSITIVE_KEY_RE = re.compile(
     r'^(token|secret|password|passwd|private_key|private-key|authorization|'
     r'enrollment_code|enrollment-code|bootstrap_ticket|bootstrap-ticket|'
-    r'mgmt_mac_key|auth_token|server_token|install_key)$',
+    r'mgmt_mac_key|auth_token|server_token|install_key|frp_ad_proof)$',
     re.IGNORECASE,
 )
 SENSITIVE_VALUE_RE = re.compile(
     r'(BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY|'
-    r'auth\.token\s*=\s*\S+|'
+    r'auth\.token\s*=\s*(?!"\[redacted\]")\S+|'
+    r'metadatas\.frp_ad_proof\s*=\s*(?!"\[redacted\]")\S+|'
+    r'(?<![A-Za-z0-9_])frp_ad_proof\s*=\s*(?!"\[redacted\]")\S+|'
     r'bt1\.[0-9a-f]{16}\.[0-9a-f]{32,}|'
     r'Enrollment Code:\s*\S+)',
     re.IGNORECASE,
@@ -201,6 +203,8 @@ def redact_toml(text):
             lines.append('token = "[redacted]"')
         elif re.match(r'^\s*auth\.token\s*=', line, re.IGNORECASE):
             lines.append('auth.token = "[redacted]"')
+        elif re.match(r'^\s*metadatas\.frp_ad_proof\s*=', line, re.IGNORECASE):
+            lines.append('metadatas.frp_ad_proof = "[redacted]"')
         else:
             lines.append(redact_text(line))
     return '\n'.join(lines) + ('\n' if text and str(text).endswith('\n') else '')
@@ -495,8 +499,11 @@ def collect_support_bundle(out_path, anonymize=False):
                 if item.get('local_ip'):
                     ips.add(str(item['local_ip']))
 
-        def write_text(name, content):
-            text = redact_text(content)
+        def write_text(name, content, *, already_redacted=False):
+            # TOML/JSON helpers already redact; a second pass would turn
+            # auth.token = "[redacted]" / metadatas.frp_ad_proof = "[redacted]"
+            # into a bare [redacted] via SECRET_RE.
+            text = content if already_redacted else redact_text(content)
             if anonymize:
                 text = anonymize_text(text, hostnames, ips)
             path = bundle_dir / name
@@ -545,10 +552,15 @@ def collect_support_bundle(out_path, anonymize=False):
             write_text(
                 'client-state.redacted.json',
                 json.dumps(redact_json_obj(json.loads(state_path.read_text(encoding='utf-8'))), indent=2, sort_keys=True) + '\n',
+                already_redacted=True,
             )
         toml_path = _path('/etc/frp/frpc.toml')
         if toml_path.is_file():
-            write_text('frpc.redacted.toml', redact_toml(toml_path.read_text(encoding='utf-8')))
+            write_text(
+                'frpc.redacted.toml',
+                redact_toml(toml_path.read_text(encoding='utf-8')),
+                already_redacted=True,
+            )
 
         uname = subprocess.run(['uname', '-a'], capture_output=True, text=True)
         write_text('system.txt', uname.stdout or '')

@@ -66,6 +66,15 @@ def normalize_mode_and_transport(cfg):
     return mode, transport
 
 
+def require_json_bool(cfg, key, default=None):
+    if key not in cfg:
+        return default
+    value = cfg.get(key)
+    if value is True or value is False:
+        return value
+    raise ValueError('%s must be a JSON boolean (true or false)' % key)
+
+
 def extract_ports(cfg):
     """Return normalized port roles from a server config object."""
     if not isinstance(cfg, dict):
@@ -109,9 +118,16 @@ def extract_ports(cfg):
         if allocator_public is None and allocator_listen is not None:
             allocator_public = allocator_listen
     plugin_listen = _optional_port(cfg, 'frp_plugin_listen_port')
-    if plugin_listen is None and cfg.get('data_plane_auth_strict', True) is not False:
+    strict = require_json_bool(cfg, 'data_plane_auth_strict', True)
+    if plugin_listen is None and strict is not False:
         plugin_listen = 6100
-    plugin_host = str(cfg.get('frp_plugin_listen_host') or '127.0.0.1').strip()
+    if 'frp_plugin_listen_host' in cfg:
+        raw_host = cfg.get('frp_plugin_listen_host')
+        if not isinstance(raw_host, str):
+            raise ValueError('frp_plugin_listen_host must be a string')
+        plugin_host = raw_host.strip()
+    else:
+        plugin_host = '127.0.0.1'
     if plugin_host not in ('127.0.0.1', '::1', 'localhost'):
         raise ValueError('frp_plugin_listen_host must be loopback-only')
     return {
@@ -135,6 +151,9 @@ def _in_service_range(port, start, end):
 
 def validate_server_config(cfg):
     """Fail closed on unsafe persisted/candidate server configuration."""
+    if not isinstance(cfg, dict):
+        raise ValueError('server config is not an object')
+    require_json_bool(cfg, 'data_plane_auth_strict', True)
     ports = extract_ports(cfg)
     mode = ports['deployment_mode']
     start = ports['port_start']

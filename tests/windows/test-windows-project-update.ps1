@@ -17,7 +17,7 @@ try {
         -FrpServerPort 7000 -Hostname 'win' -MachineId $mid -HostId 'abcd' `
         -Services $services -Transport 'tcp' -InstallStatus 'installed' | Out-Null
     New-FrpClientToml -ServerAddr 'example.test' -ServerPort 7000 -Token 'tok-original' `
-        -HostId 'abcd' -Services $services -Transport 'tcp' | Out-Null
+        -HostId 'abcd' -Services $services -Transport 'tcp' -MachineId $mid | Out-Null
     New-Item -ItemType Directory -Path (Get-FrpBinDir) -Force | Out-Null
     Set-Content -LiteralPath (Get-FrpFrpcPath) -Value 'ORIGINAL_BINARY'
     $env:FRP_RELEASE_CHANNEL = 'dev'

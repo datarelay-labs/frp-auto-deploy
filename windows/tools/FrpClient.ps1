@@ -416,6 +416,16 @@ function Invoke-FrpClientProjectUpdate {
                         $tomlRefresh = $true
                         Write-Host 'Refreshed frpc.toml with data-plane authorization metadata.'
                     }
+                    if (Test-Path -LiteralPath (Get-FrpTomlPath)) {
+                        $stateForMeta = $null
+                        if (Test-Path -LiteralPath (Get-FrpStatePath)) {
+                            $stateForMeta = Get-Content -LiteralPath (Get-FrpStatePath) -Raw | ConvertFrom-Json
+                        }
+                        if ($null -ne $stateForMeta -and $stateForMeta.machine_id) {
+                            Test-FrpClientTomlDataPlaneMetadata -TomlPath (Get-FrpTomlPath) `
+                                -MachineId ([string]$stateForMeta.machine_id) -Services $stateForMeta.services | Out-Null
+                        }
+                    }
 
                     $prevChannel = $env:FRP_RELEASE_CHANNEL
                     $prevRef = $env:FRP_SOURCE_REF

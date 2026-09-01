@@ -25,8 +25,11 @@ mkdir -p "$CLIENT/etc/frp" "$CLIENT/etc/frp-auto-deploy" \
 
 install_tree() {
   install -m 0644 "$ROOT/lib/frp-client-common.sh" "$CLIENT/usr/local/lib/frp-auto-deploy/"
+  install -m 0644 "$ROOT/lib/frp-common.sh" "$CLIENT/usr/local/lib/frp-auto-deploy/"
   install -m 0644 "$ROOT/lib/frp-client-lifecycle.sh" "$CLIENT/usr/local/lib/frp-auto-deploy/"
   install -m 0644 "$ROOT/lib/frp_client_lifecycle.py" "$CLIENT/usr/local/lib/frp-auto-deploy/"
+  install -m 0644 "$ROOT/lib/frp_mgmt_auth.py" "$CLIENT/usr/local/lib/frp-auto-deploy/"
+  install -m 0644 "$ROOT/lib/frp_data_plane_auth.py" "$CLIENT/usr/local/lib/frp-auto-deploy/"
   install -m 0644 "$ROOT/lib/frp-doctor-common.sh" "$CLIENT/usr/local/lib/frp-auto-deploy/" 2>/dev/null || true
   install -m 0644 "$ROOT/lib/frp_doctor.py" "$CLIENT/usr/local/lib/frp-auto-deploy/" 2>/dev/null || true
   install -m 0644 "$ROOT/lib/frp_ctl_grammar.py" "$CLIENT/usr/local/lib/frp-auto-deploy/"
@@ -61,15 +64,21 @@ cat >"$CLIENT/etc/frp/frpc.toml" <<'EOF'
 serverAddr = "203.0.113.10"
 serverPort = 443
 auth.token = "test-token-should-redact"
+
+[[proxies]]
+name = "lc-client-00112233-ssh"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 22
+remotePort = 6002
 EOF
 chmod 600 "$CLIENT/etc/frp/frpc.toml"
 
-cat >"$CLIENT/etc/frp/client-identity.key" <<'EOF'
-TEST-IDENTITY-KEY-FIXTURE-NOT-A-REAL-KEY
-EOF
+python3 "$ROOT/lib/frp_mgmt_auth.py" gen-key \
+  "$CLIENT/etc/frp/client-identity.key" "$CLIENT/etc/frp/client-identity.pub"
 chmod 600 "$CLIENT/etc/frp/client-identity.key"
-echo 'pub' >"$CLIENT/etc/frp/client-identity.pub"
 echo 'mac' >"$CLIENT/etc/frp/client-identity.mac"
+chmod 600 "$CLIENT/etc/frp/client-identity.mac"
 cat >"$CLIENT/etc/frp-auto-deploy/version" <<'EOF'
 PROJECT_VERSION=2.1.1
 FRP_VERSION=0.70.1
@@ -159,6 +168,26 @@ fi
 if tar -xOzf "$WORKDIR/bundle.tar.gz" frpc.redacted.toml 2>/dev/null | grep -q 'test-token-should-redact'; then
   fail "bundle secret leak toml"
 fi
+PROOF_LEAK='FRP_AD_PROOF_TEST_DO_NOT_LEAK_LIFECYCLE'
+python3 - "$CLIENT/etc/frp/frpc.toml" "$PROOF_LEAK" <<'PY'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+leak = sys.argv[2]
+text = p.read_text()
+text += '\nmetadatas.frp_ad_client_id = "00112233445566778899aabbccddeeff"\n'
+text += 'metadatas.frp_ad_proof_schema = "1"\n'
+text += 'metadatas.frp_ad_proof = "%s"\n' % leak
+p.write_text(text)
+PY
+run_ctl support-bundle --output "$WORKDIR/bundle2.tar.gz" >"$WORKDIR/bundle2.out" 2>&1 || fail "support-bundle proof"
+if tar -xOzf "$WORKDIR/bundle2.tar.gz" 2>/dev/null | grep -F "$PROOF_LEAK"; then
+  fail "bundle secret leak proof"
+fi
+redacted_toml="$(tar -xOzf "$WORKDIR/bundle2.tar.gz" frpc.redacted.toml 2>/dev/null || true)"
+printf '%s' "$redacted_toml" | grep -F 'frp_ad_proof = "[redacted]"' >/dev/null \
+  || fail "proof redaction marker"
+pass "LINUX_SUPPORT_BUNDLE_PROOF_REDACTED"
 
 # grammar help
 run_ctl help >"$WORKDIR/help.out" 2>&1

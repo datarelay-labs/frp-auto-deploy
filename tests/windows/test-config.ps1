@@ -19,6 +19,18 @@ try {
     Assert-FrpTrue ($text -match 'remotePort = 60001') 'remote'
     Assert-FrpEqual 'tok\"oops' (Escape-FrpTomlString 'tok"oops') 'escape quote'
 
+    $id = New-FrpEcdsaIdentity
+    Save-FrpIdentityKey -PrivatePem $id.PrivatePem | Out-Null
+    Save-FrpIdentityPublic -PublicPem $id.PublicPem | Out-Null
+    $mid = Get-FrpOrCreateClientId
+    $services2 = @(
+        [pscustomobject]@{ id = 'rdp'; name = 'RDP'; preset = 'rdp'; local_ip = '127.0.0.1'; local_port = 3389; remote_port = 60002; enabled = $true }
+    )
+    $toml2 = New-FrpClientToml -ServerAddr '203.0.113.10' -ServerPort 7000 -Token 'tok-proof' `
+        -HostId 'host1' -Services $services2 -Transport 'tcp' -MachineId $mid
+    Test-FrpClientTomlDataPlaneMetadata -TomlPath $toml2 -MachineId $mid -Services $services2 | Out-Null
+    Write-FrpTestPass 'WINDOWS_PROOF_METADATA_VALIDATION'
+
     Write-FrpTestPass 'test-config'
 } finally {
     Remove-FrpWindowsTestRoot

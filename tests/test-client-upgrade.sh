@@ -207,8 +207,12 @@ files = [
 for rel in files:
     p = root / rel
     got = hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else ''
+    if rel == 'etc/frp/frpc.toml':
+        # Data-plane proof refresh may rewrite TOML while preserving ports.
+        continue
     if got != before[rel]:
         raise SystemExit(f'changed {rel}')
+toml = (root / 'etc/frp/frpc.toml').read_text(encoding='utf-8') if (root / 'etc/frp/frpc.toml').is_file() else ''
 state = json.loads((root / 'etc/frp/client-state.json').read_text())
 for sid, rec in before['services'].items():
     item = (state.get('services') or {}).get(sid)
@@ -219,6 +223,8 @@ for sid, rec in before['services'].items():
         raise SystemExit(f'enabled changed {sid}')
     if item.get('remote_port') != rec['remote_port']:
         raise SystemExit(f'port changed {sid}')
+    if enabled and f'remotePort = {rec["remote_port"]}' not in toml:
+        raise SystemExit(f'toml lost remotePort for {sid}')
 PY
 }
 

@@ -27,7 +27,7 @@ except ImportError:
 SENSITIVE_KEY_RE = re.compile(
     r'^(token|secret|password|passwd|private_key|private-key|authorization|'
     r'enrollment_code|enrollment-code|bootstrap_ticket|bootstrap-ticket|'
-    r'mgmt_mac_key|auth_token|server_token|install_key|hmac_secret)$',
+    r'mgmt_mac_key|auth_token|server_token|install_key|hmac_secret|frp_ad_proof)$',
     re.IGNORECASE,
 )
 CONNECT_TIMEOUT = 2.0
@@ -500,9 +500,10 @@ def collect_support_bundle(out_path):
         bundle_dir = tmpdir / 'bundle'
         bundle_dir.mkdir()
 
-        def write_text(name, content):
+        def write_text(name, content, *, already_redacted=False):
             path = bundle_dir / name
-            path.write_text(redact_text(content), encoding='utf-8')
+            text = content if already_redacted else redact_text(content)
+            path.write_text(text, encoding='utf-8')
             os.chmod(path, 0o600)
 
         version = _path('/etc/frp-auto-deploy/version')
@@ -533,6 +534,7 @@ def collect_support_bundle(out_path):
             write_text(
                 'server-config.redacted.json',
                 json.dumps(redact_json_obj(json.loads(cfg_path.read_text(encoding='utf-8'))), indent=2) + '\n',
+                already_redacted=True,
             )
 
         if frp_fleet:
@@ -540,6 +542,7 @@ def collect_support_bundle(out_path):
             write_text(
                 'registry-summary.redacted.json',
                 json.dumps(registry_summary_redacted(state), indent=2, sort_keys=True) + '\n',
+                already_redacted=True,
             )
 
         for unit, fname in (
