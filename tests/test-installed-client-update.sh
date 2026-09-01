@@ -301,9 +301,12 @@ text = p.read_text().replace("RELEASE_CHANNEL=dev", "RELEASE_CHANNEL=stable")
 text = text.replace("SOURCE_REF=main", "SOURCE_REF=v%s" % ver)
 p.write_text(text)
 PY
-unset FRP_CLIENT_UPDATE_URL FRP_CLIENT_UPDATE_METADATA_URL
+unset FRP_CLIENT_UPDATE_URL FRP_CLIENT_UPDATE_METADATA_URL \
+  FRP_RELEASE_CHANNEL FRP_EXPECTED_RELEASE_CHANNEL FRP_EXPECTED_SOURCE_REF \
+  FRP_BUNDLE_FILE FRP_BUNDLE_SHA256 FRP_VERIFIED_CLIENT_UPDATE_SHA256 || true
 # Load a fresh installed process so defaults are derived from persisted stable state.
 stable_urls="$(
+  FRP_CLIENT_TEST_ROOT="$CLIENT" \
   FRP_CLIENT_LIB="$CLIENT/usr/local/lib/frp-auto-deploy/frp-client-common.sh" \
     bash -c '. "$FRP_CLIENT_LIB"; printf "%s\n%s\n" "$FRP_CLIENT_UPDATE_URL" "$FRP_CLIENT_UPDATE_METADATA_URL"'
 )"

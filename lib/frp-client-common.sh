@@ -4148,7 +4148,7 @@ frp_client_apply_upgrade() {
   local previous target staged backup ident_before ident_after
   local installed_bundle target_bundle update_needed=1
   local state_before toml_before access_before key_before pub_before mac_before
-  local frp_before frp_after toml_refresh=0
+  local frp_before frp_after toml_refresh=0 proof_rc=0 meta_rc=0
 
   if [[ -z "$source" || ! -d "$source" ]]; then
     echo "ERROR: update source directory is required" >&2
@@ -4334,8 +4334,9 @@ frp_client_apply_upgrade() {
   # in-flight upgrade function / ERR trap.
   _live_common="$(frp_client_path /usr/local/lib/frp-auto-deploy/frp-client-common.sh)"
 
-  local proof_rc=0
   if [[ "$ident_before" == enrolled ]]; then
+    # set -E ERR still runs under set +e; return 10 means "proof already valid".
+    trap - ERR
     set +e
     if [[ -f "$_live_common" ]]; then
       (
@@ -4349,17 +4350,6 @@ frp_client_apply_upgrade() {
       frp_client_refresh_data_plane_proof_if_needed
       proof_rc=$?
     fi
-    set -e
-    if [[ "$proof_rc" -eq 0 ]]; then
-      toml_refresh=1
-    elif [[ "$proof_rc" -eq 10 ]]; then
-      toml_refresh=0
-    else
-      echo "ERROR: data-plane proof refresh failed; restoring previous management files." >&2
-      frp_client_upgrade_rollback "$backup" HEALTH_CHECK_FAILED || return 2
-      return 1
-    fi
-    set +e
     if [[ -f "$_live_common" ]]; then
       (
         FRP_CLIENT_COMMON_LOADED=
@@ -4373,6 +4363,16 @@ frp_client_apply_upgrade() {
       meta_rc=$?
     fi
     set -e
+    trap '_frp_client_upgrade_err; rm -rf "'"$staged"'"; return 1' ERR
+    if [[ "$proof_rc" -eq 0 ]]; then
+      toml_refresh=1
+    elif [[ "$proof_rc" -eq 10 ]]; then
+      toml_refresh=0
+    else
+      echo "ERROR: data-plane proof refresh failed; restoring previous management files." >&2
+      frp_client_upgrade_rollback "$backup" HEALTH_CHECK_FAILED || return 2
+      return 1
+    fi
     if [[ "$meta_rc" -ne 0 ]]; then
       echo "ERROR: data-plane metadata validation failed; restoring previous management files." >&2
       frp_client_upgrade_rollback "$backup" HEALTH_CHECK_FAILED || return 2

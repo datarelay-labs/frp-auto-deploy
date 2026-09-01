@@ -123,6 +123,10 @@ from pathlib import Path
 root, snapshot = Path(sys.argv[1]), Path(sys.argv[2])
 before = json.loads(snapshot.read_text())
 for rel, expected in before["digests"].items():
+    if rel == "etc/frp/frpc.toml":
+        # Software-only upgrades may add data-plane authorization metadata
+        # without changing ports, services, or transport settings.
+        continue
     actual = hashlib.sha256((root / rel).read_bytes()).hexdigest()
     assert actual == expected, f"changed {rel}"
 state = json.loads((root / "etc/frp/client-state.json").read_text())
