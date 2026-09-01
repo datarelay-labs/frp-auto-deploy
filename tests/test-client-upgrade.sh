@@ -507,6 +507,7 @@ export FRP_CLIENT_TEST_ROOT="$INT"
 . "$ROOT/lib/frp-client-common.sh"
 BACKUP="$(frp_client_upgrade_backup_tools "$SNAP_SRC_A")" || fail "snapshot A backup"
 [[ -f "$BACKUP/metadata.json" ]] || fail "snapshot metadata missing"
+[[ -f "$BACKUP/recovery/frp_project_files.py" ]] || fail "snapshot missing pinned recovery parser"
 python3 - "$BACKUP/metadata.json" <<'PY' || fail "SNAPSHOT_MANIFEST_SELF_CONTAINED"
 import json, sys
 from pathlib import Path

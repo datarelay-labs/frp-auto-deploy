@@ -3608,11 +3608,17 @@ frp_client_project_files_py() {
 
 # Parser used for interrupted recovery / rollback. Must NOT depend on the
 # update candidate source tree — Snapshot A semantics stay owned by trusted
-# installed or snapshot-bundled parser code.
+# snapshot-pinned, installed, or (legacy) snapshot-bundled parser code.
 frp_client_recovery_project_files_py() {
   local backup="${1:-}"
   local snap_py live
   if [[ -n "$backup" ]]; then
+    snap_py="${backup}/recovery/frp_project_files.py"
+    if [[ -f "$snap_py" && ! -L "$snap_py" ]]; then
+      printf '%s' "$snap_py"
+      return 0
+    fi
+    # Legacy snapshots may only have the parser among restored project files.
     snap_py="${backup}/files/usr/local/lib/frp-auto-deploy/frp_project_files.py"
     if [[ -f "$snap_py" && ! -L "$snap_py" ]]; then
       printf '%s' "$snap_py"
@@ -3624,8 +3630,26 @@ frp_client_recovery_project_files_py() {
     printf '%s' "$live"
     return 0
   fi
-  # Fail closed: never fall back to the caller's source tree (may be a candidate).
+  # Fail closed: never fall back to the update candidate source tree.
   echo "ERROR: trusted frp_project_files.py missing for recovery (snapshot/live only)" >&2
+  return 1
+}
+
+frp_client_trusted_recovery_parser_py() {
+  # Parser to pin into a new snapshot. Prefer the live install; otherwise the
+  # already-loaded lib next to this script. Never the update --source tree.
+  local live here
+  live="$(frp_client_path /usr/local/lib/frp-auto-deploy/frp_project_files.py)"
+  if [[ -f "$live" && ! -L "$live" ]]; then
+    printf '%s' "$live"
+    return 0
+  fi
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  if [[ -f "${here}/frp_project_files.py" && ! -L "${here}/frp_project_files.py" ]]; then
+    printf '%s' "${here}/frp_project_files.py"
+    return 0
+  fi
+  echo "ERROR: no trusted frp_project_files.py available to pin into update snapshot" >&2
   return 1
 }
 
@@ -3821,6 +3845,13 @@ for extra_id, (extra_dest, default_mode) in pf.CLIENT_UPGRADE_EXTRA_ALLOWED.item
 
 pf.write_client_upgrade_snapshot_metadata(dest, files, extras)
 PY
+  # Pin a trusted recovery parser into the snapshot so restore works even when
+  # the live tree never had frp_project_files.py (legacy clients) and must not
+  # consult the candidate --source tree.
+  local recover_py
+  recover_py="$(frp_client_trusted_recovery_parser_py)" || return 1
+  mkdir -p "${dest}/recovery"
+  install -m 0644 "$recover_py" "${dest}/recovery/frp_project_files.py" || return 1
   # prune old snapshots
   python3 - "$(frp_client_upgrade_backup_root)" "$FRP_CLIENT_UPGRADE_BACKUP_KEEP" <<'PY'
 import shutil, sys
