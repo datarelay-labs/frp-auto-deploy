@@ -499,6 +499,52 @@ def test_localhost_san_invariant():
     pass_('PKI_LOCALHOST_SAN')
 
 
+def test_key_cert_pairs():
+    with tempfile.TemporaryDirectory() as tmp:
+        pki_dir = Path(tmp) / 'pki'
+        frp_pki.ensure_pki(str(pki_dir), '127.0.0.1')
+        paths = frp_pki.pki_paths(pki_dir)
+        frp_pki.validate_pki_key_cert_pairs(paths)
+        frp_pki.validate_key_cert_pair(paths['ca_key'], paths['ca_crt'], label='CA')
+        frp_pki.validate_key_cert_pair(paths['server_key'], paths['server_crt'], label='server')
+        pass_('PKI_CA_KEY_CERT_PAIR')
+        pass_('PKI_SERVER_KEY_CERT_PAIR')
+
+        other = Path(tmp) / 'other'
+        other.mkdir()
+        frp_pki.ensure_pki(str(other), '127.0.0.1')
+        # Cross CA key with original CA cert.
+        try:
+            frp_pki.validate_key_cert_pair(other / 'ca.key', paths['ca_crt'], label='CA')
+            fail('crossed CA key/cert should fail')
+        except frp_pki.PkiError as exc:
+            if 'does not match' not in str(exc):
+                fail('crossed CA pair error', exc)
+        # Cross server key with original server cert.
+        try:
+            frp_pki.validate_key_cert_pair(other / 'server.key', paths['server_crt'], label='server')
+            fail('crossed server key/cert should fail')
+        except frp_pki.PkiError as exc:
+            if 'does not match' not in str(exc):
+                fail('crossed server pair error', exc)
+        # ensure_pki must fail closed without regenerating CA.
+        ca_before = paths['ca_crt'].read_bytes()
+        key_before = paths['ca_key'].read_bytes()
+        # Swap in foreign CA key while keeping local CA cert.
+        paths['ca_key'].write_bytes((other / 'ca.key').read_bytes())
+        try:
+            frp_pki.ensure_pki(str(pki_dir), '127.0.0.1')
+            fail('ensure_pki should refuse crossed CA pair')
+        except frp_pki.PkiError as exc:
+            if 'refusing to replace the CA' not in str(exc) and 'corrupted' not in str(exc):
+                fail('ensure_pki crossed-pair message', exc)
+        if paths['ca_crt'].read_bytes() != ca_before:
+            fail('ensure_pki regenerated CA cert after pair failure')
+        # Restore matching key for cleanliness of later tests in this function.
+        paths['ca_key'].write_bytes(key_before)
+        pass_('valid pair PASS; crossed cert/key FAIL')
+
+
 def main():
     test_https_healthz()
     test_plain_http_rejected()
@@ -508,6 +554,7 @@ def main():
     test_refuse_plain_start()
     test_ca_preserved_on_reissue()
     test_partial_pki_fails()
+    test_key_cert_pairs()
     test_fingerprint_is_sha256_of_openssl_der()
     test_garbage_pem_rejected()
     test_atomic_install_requires_x509_and_fingerprint()

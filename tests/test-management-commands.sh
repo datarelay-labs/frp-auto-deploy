@@ -266,7 +266,7 @@ state['clients']['aabbccdd']={
 state['clients']['legacy00aa']={
   'hostname':'legacy-ssh',
   'services':{
-    'ssh':{'name':'SSH','protocol':'tcp','local_ip':'127.0.0.1','local_port':22,'remote_port':6010,'preset':'ssh','enabled':True},
+    'ssh':{'id':'ssh','name':'SSH','protocol':'tcp','local_ip':'127.0.0.1','local_port':22,'remote_port':6010,'preset':'ssh','ssh_user':'legacyuser','enabled':True},
   },
 }
 # drop empty eeff0011 so status counts stay simple
@@ -275,9 +275,9 @@ p.write_text(json.dumps(state, indent=2, sort_keys=True)+'\n')
 PY
 
 python3 "$ROOT/tools/frp-clients" >"$WORKDIR/legacy-clients.out"
-grep -q 'legacy / unspecified' "$WORKDIR/legacy-clients.out" || fail "legacy SSH user display"
+grep -q 'legacyuser' "$WORKDIR/legacy-clients.out" || fail "legacy SSH user display"
 python3 "$ROOT/tools/frp-client-info" legacy-ssh services >"$WORKDIR/legacy-info.out"
-grep -q 'legacy / unspecified' "$WORKDIR/legacy-info.out" || fail "legacy SSH info display"
+grep -q 'legacyuser' "$WORKDIR/legacy-info.out" || fail "legacy SSH info display"
 python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY' || fail "list mutated legacy record"
 import json,sys
 from pathlib import Path
@@ -286,7 +286,7 @@ assert 'legacy00aa' in state['clients']
 assert 'aabbccdd' in state['clients']
 assert state['clients']['aabbccdd']['services']['ssh']['remote_port']==6002
 assert state['clients']['legacy00aa']['services']['ssh']['remote_port']==6010
-assert 'ssh_user' not in state['clients']['legacy00aa']['services']['ssh']
+assert state['clients']['legacy00aa']['services']['ssh']['ssh_user']=='legacyuser'
 PY
 cp "$TREE/var/lib/frp-auto-deploy/registry.json" "$WORKDIR/legacy.before"
 printf 'nope\n' | python3 "$ROOT/tools/frp-release-client" legacy00aa \
@@ -321,7 +321,7 @@ state=json.loads(p.read_text())
 state['clients']['legacy00aa']={
   'hostname':'legacy-ssh',
   'services':{
-    'ssh':{'name':'SSH','protocol':'tcp','local_ip':'127.0.0.1','local_port':22,'remote_port':6010,'preset':'ssh','enabled':True},
+    'ssh':{'id':'ssh','name':'SSH','protocol':'tcp','local_ip':'127.0.0.1','local_port':22,'remote_port':6010,'preset':'ssh','ssh_user':'legacyuser','enabled':True},
   },
 }
 p.write_text(json.dumps(state, indent=2, sort_keys=True)+'\n')

@@ -2,18 +2,28 @@
 <#
 .SYNOPSIS
   frp-client lifecycle tool for Windows (start/stop/status/info/update/uninstall/doctor/autostart).
+
+.NOTES
+  Update is split to match Linux product semantics:
+    update | update frp       — upstream frpc.exe only
+    update project | project-update — PowerShell modules/tools (verified SHA256)
 #>
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
     [ValidateSet('start', 'stop', 'status', 'info', 'update', 'uninstall', 'doctor', 'autostart',
-        'pause', 'resume', 'restart', 'test', 'logs', 'support-bundle', 'help')]
+        'pause', 'resume', 'restart', 'test', 'logs', 'support-bundle', 'help', 'project-update')]
     [string]$Command = 'help',
+
+    [Parameter(Position = 1)]
+    [string]$SubCommand,
 
     [switch]$Check,
     [switch]$Force,
     [string]$DownloadUrl,
-    [string]$ExpectedSha256
+    [string]$ExpectedSha256,
+    [string]$SourceDir,
+    [string]$MetadataUrl
 )
 
 $ErrorActionPreference = 'Stop'
@@ -58,7 +68,11 @@ frp-client (Windows)
   stop        Stop project-managed frpc
   status      Running / enrolled summary
   info        Connection details (RDP/SSH/HTTP)
-  update      Update frpc.exe (preserve identity/ports); --check for dry run
+  update | update frp
+              Update upstream frpc.exe only (preserve identity/ports); -Check for dry run
+  update project | project-update
+              Update PowerShell modules/tools from verified immutable source (SHA256);
+              preserve identity/ports/pause/config; transactional rollback; candidate exact SHA
   pause       Pause remote FRP access (identity/ports preserved)
   resume      Resume remote FRP access
   restart     Restart frpc without re-enroll
@@ -139,82 +153,352 @@ function Show-FrpClientInfo {
 }
 
 function Invoke-FrpClientUpdate {
+    <#
+    .SYNOPSIS
+      Update upstream frpc.exe only (not project PowerShell modules).
+    #>
     param([switch]$CheckOnly)
     $url = $DownloadUrl
     if (-not $url) { $url = Get-FrpWindowsAmd64Url }
     $sha = $ExpectedSha256
     if (-not $sha) { $sha = Get-FrpWindowsAmd64Sha256 }
     if ($CheckOnly) {
+        Write-Host 'Update target: FRP binary (frpc.exe)'
         Write-Host ("Would download: {0}" -f $url)
         Write-Host ("Expected SHA256: {0}" -f $sha)
         Write-Host 'Identity, ports, and frpc.toml token would be preserved.'
+        Write-Host 'For PowerShell modules/tools use: frp-client update project'
         return 0
     }
-    Initialize-FrpDirectories
-    $backupRoot = Join-Path (Get-FrpBackupDir) ("update-" + (Get-Date -Format 'yyyyMMddHHmmss'))
-    New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
-    $snapshotMap = [ordered]@{
-        'frpc.exe'          = (Get-FrpFrpcPath)
-        'frpc.toml'         = (Get-FrpTomlPath)
-        'client-state.json' = (Get-FrpStatePath)
-        'version'           = (Get-FrpVersionPath)
-    }
-    foreach ($name in @($snapshotMap.Keys)) {
-        $src = $snapshotMap[$name]
-        if (Test-Path -LiteralPath $src) {
-            Copy-Item -LiteralPath $src -Destination (Join-Path $backupRoot $name) -Force
-        }
-    }
-    $wasRunning = $false
     try {
-        $st = Get-FrpClientStatus
-        if ($st.Running) {
-            $wasRunning = $true
-            Stop-FrpClient | Out-Null
-        }
-        Install-FrpWindowsBinary -DownloadUrl $url -ExpectedSha256 $sha | Out-Null
-        if ($env:FRP_WINDOWS_FAIL_AFTER_BINARY_REPLACE -eq '1') {
-            throw 'ERROR: simulated failure after binary replace (FRP_WINDOWS_FAIL_AFTER_BINARY_REPLACE=1)'
-        }
-        # Preserve identity/ports: do not rewrite state or toml here.
-        if ($env:FRP_WINDOWS_FAIL_AFTER_METADATA_WRITE -eq '1') {
-            throw 'ERROR: simulated failure after metadata write (FRP_WINDOWS_FAIL_AFTER_METADATA_WRITE=1)'
-        }
-        if ($wasRunning -and -not (Test-FrpRemoteAccessPaused)) {
-            if ($env:FRP_WINDOWS_FAIL_BEFORE_RESTART -eq '1') {
-                throw 'ERROR: simulated failure before restart (FRP_WINDOWS_FAIL_BEFORE_RESTART=1)'
+        return Invoke-FrpWithMutationLock -Script {
+            Initialize-FrpDirectories
+            $snapshotMap = [ordered]@{
+                'frpc.exe'          = (Get-FrpFrpcPath)
+                'frpc.toml'         = (Get-FrpTomlPath)
+                'client-state.json' = (Get-FrpStatePath)
+                'version'           = (Get-FrpVersionPath)
             }
-            Start-FrpClient | Out-Null
-        }
-        Write-Host 'Update complete (identity and port reservations preserved).'
-        return 0
-    } catch {
-        Write-Host ("ERROR: update failed: {0}" -f $_.Exception.Message)
-        Write-Host 'Attempting full rollback from backup...'
-        $rollbackOk = $true
-        try {
-            foreach ($name in @('frpc.exe', 'frpc.toml', 'client-state.json', 'version')) {
-                $bak = Join-Path $backupRoot $name
-                if (-not (Test-Path -LiteralPath $bak)) { continue }
-                $dest = $snapshotMap[$name]
-                $destDir = Split-Path -Parent $dest
-                if (-not (Test-Path -LiteralPath $destDir)) {
-                    New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+            # Create dir → restrict ACL → only then copy secrets. ACL failure aborts before copy.
+            $backupRoot = New-FrpUpdateBackupSnapshot -SnapshotMap $snapshotMap
+            $wasRunning = $false
+            try {
+                $st = Get-FrpClientStatus
+                if ($st.Running) {
+                    $wasRunning = $true
+                    Stop-FrpClient | Out-Null
                 }
-                Copy-Item -LiteralPath $bak -Destination $dest -Force
+                Install-FrpWindowsBinary -DownloadUrl $url -ExpectedSha256 $sha | Out-Null
+                if ($env:FRP_WINDOWS_FAIL_AFTER_BINARY_REPLACE -eq '1') {
+                    throw 'ERROR: simulated failure after binary replace (FRP_WINDOWS_FAIL_AFTER_BINARY_REPLACE=1)'
+                }
+                # Preserve identity/ports: do not rewrite state or toml here.
+                if ($env:FRP_WINDOWS_FAIL_AFTER_METADATA_WRITE -eq '1') {
+                    throw 'ERROR: simulated failure after metadata write (FRP_WINDOWS_FAIL_AFTER_METADATA_WRITE=1)'
+                }
+                if ($wasRunning -and -not (Test-FrpRemoteAccessPaused)) {
+                    if ($env:FRP_WINDOWS_FAIL_BEFORE_RESTART -eq '1') {
+                        throw 'ERROR: simulated failure before restart (FRP_WINDOWS_FAIL_BEFORE_RESTART=1)'
+                    }
+                    Start-FrpClient | Out-Null
+                }
+                Write-Host 'FRP update complete (identity and port reservations preserved).'
+                return 0
+            } catch {
+                Write-Host ("ERROR: FRP update failed: {0}" -f $_.Exception.Message)
+                Write-Host 'Attempting full rollback from backup...'
+                $rollbackOk = $true
+                try {
+                    foreach ($name in @('frpc.exe', 'frpc.toml', 'client-state.json', 'version')) {
+                        $bak = Join-Path $backupRoot $name
+                        if (-not (Test-Path -LiteralPath $bak)) { continue }
+                        $dest = $snapshotMap[$name]
+                        $destDir = Split-Path -Parent $dest
+                        if (-not (Test-Path -LiteralPath $destDir)) {
+                            New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+                        }
+                        Copy-Item -LiteralPath $bak -Destination $dest -Force
+                    }
+                    if ($wasRunning -and -not (Test-FrpRemoteAccessPaused)) {
+                        Start-FrpClient | Out-Null
+                    }
+                    Write-Host 'Rollback restored snapshotted files and prior run state.'
+                } catch {
+                    $rollbackOk = $false
+                    Write-Host ("ERROR: rollback failed: {0}" -f $_.Exception.Message)
+                    Write-Host 'RECOVERY_REQUIRED=YES'
+                }
+                if (-not $rollbackOk) {
+                    Write-Host 'RECOVERY_REQUIRED=YES'
+                }
+                return 1
             }
-            if ($wasRunning -and -not (Test-FrpRemoteAccessPaused)) {
-                Start-FrpClient | Out-Null
+        }
+    } catch {
+        Write-Host $_.Exception.Message
+        return 1
+    }
+}
+
+function Invoke-FrpClientProjectUpdate {
+    <#
+    .SYNOPSIS
+      Update PowerShell modules/tools from a verified immutable source.
+      Preserves identity, ports, pause marker, frpc.toml, and frpc.exe.
+    #>
+    param(
+        [switch]$CheckOnly,
+        [string]$SourceWindowsRoot,
+        [string]$ArtifactUrl,
+        [string]$SumsUrl,
+        [string]$ExpectedBundleSha256
+    )
+    try {
+        $identity = Resolve-FrpWindowsProjectUpdateIdentity
+    } catch {
+        Write-Host $_.Exception.Message
+        return 1
+    }
+    $channel = [string]$identity.Channel
+    $sourceRef = [string]$identity.SourceRef
+
+    $srcRoot = $SourceWindowsRoot
+    if (-not $srcRoot -and $env:FRP_WINDOWS_PROJECT_SOURCE) {
+        $srcRoot = $env:FRP_WINDOWS_PROJECT_SOURCE.Trim()
+    }
+    $url = $ArtifactUrl
+    if (-not $url) { $url = $DownloadUrl }
+    if (-not $url -and $env:FRP_WINDOWS_PROJECT_UPDATE_URL) {
+        $url = $env:FRP_WINDOWS_PROJECT_UPDATE_URL.Trim()
+    }
+    $metaUrl = $SumsUrl
+    if (-not $metaUrl) { $metaUrl = $MetadataUrl }
+    if (-not $metaUrl -and $env:FRP_WINDOWS_PROJECT_METADATA_URL) {
+        $metaUrl = $env:FRP_WINDOWS_PROJECT_METADATA_URL.Trim()
+    }
+    $expected = $ExpectedBundleSha256
+    if (-not $expected) { $expected = $ExpectedSha256 }
+    if (-not $expected -and $env:FRP_BUNDLE_SHA256) {
+        $expected = $env:FRP_BUNDLE_SHA256.Trim().ToLowerInvariant()
+    }
+
+    if ($CheckOnly) {
+        Write-Host 'Update target: project (PowerShell modules/tools)'
+        Write-Host ("Release channel: {0}" -f $channel)
+        Write-Host ("Source ref: {0}" -f $sourceRef)
+        if ($srcRoot) {
+            Write-Host ("Would install from local source: {0}" -f $srcRoot)
+        } else {
+            if (-not $url) { $url = Get-FrpDefaultWindowsClientInstallerUrl }
+            if (-not $metaUrl) { $metaUrl = Get-FrpDefaultReleaseSha256SumsUrl }
+            Write-Host ("Would download: {0}" -f $url)
+            Write-Host ("Integrity metadata: {0}" -f $metaUrl)
+        }
+        if ($expected) { Write-Host ("Expected BUNDLE_SHA256: {0}" -f $expected) }
+        Write-Host 'Identity, ports, pause state, frpc.toml, and frpc.exe would be preserved.'
+        return 0
+    }
+
+    try {
+        return Invoke-FrpWithMutationLock -Script {
+            Initialize-FrpDirectories
+
+            $tmpDir = $null
+            $bundlePath = $null
+            $verifiedSha = $expected
+            $installFrom = $srcRoot
+
+            try {
+                if (-not $installFrom) {
+                    if (-not $url) { $url = Get-FrpDefaultWindowsClientInstallerUrl }
+                    if (-not $metaUrl) { $metaUrl = Get-FrpDefaultReleaseSha256SumsUrl }
+                    if ($url -notmatch '^https://' -or $metaUrl -notmatch '^https://') {
+                        throw 'ERROR: project update URLs must be https://'
+                    }
+                    if (-not (Test-FrpUrlHasSourceRef -Url $url -Ref $sourceRef) -or
+                        -not (Test-FrpUrlHasSourceRef -Url $metaUrl -Ref $sourceRef)) {
+                        throw ("ERROR: project update artifact and metadata URLs must use source ref {0}" -f $sourceRef)
+                    }
+                    $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ('frp-win-proj-' + [guid]::NewGuid().ToString('N'))
+                    New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+                    $sumsPath = Join-Path $tmpDir 'SHA256SUMS'
+                    $bundlePath = Join-Path $tmpDir 'bootstrap-client.ps1'
+                    Write-Host 'Downloading Windows project update artifact...'
+                    if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+                        $p1 = Start-Process -FilePath 'curl.exe' -ArgumentList @(
+                            '--fail', '--silent', '--show-error', '--location', '--proto', '=https',
+                            '-o', $sumsPath, $metaUrl
+                        ) -Wait -PassThru -NoNewWindow
+                        if ($p1.ExitCode -ne 0) { throw 'ERROR: failed to download project update integrity metadata' }
+                        $p2 = Start-Process -FilePath 'curl.exe' -ArgumentList @(
+                            '--fail', '--silent', '--show-error', '--location', '--proto', '=https',
+                            '-o', $bundlePath, $url
+                        ) -Wait -PassThru -NoNewWindow
+                        if ($p2.ExitCode -ne 0) { throw 'ERROR: failed to download the project update bundle' }
+                    } else {
+                        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+                        $wc = New-Object System.Net.WebClient
+                        try {
+                            $wc.DownloadFile($metaUrl, $sumsPath)
+                            $wc.DownloadFile($url, $bundlePath)
+                        } finally { $wc.Dispose() }
+                    }
+                    $fromSums = Get-FrpSha256SumsEntry -SumsPath $sumsPath -ArtifactName 'dist/bootstrap-client.ps1'
+                    if ($verifiedSha -and ($verifiedSha.ToLowerInvariant() -ne $fromSums)) {
+                        throw 'ERROR: FRP_BUNDLE_SHA256 does not match SHA256SUMS entry for dist/bootstrap-client.ps1'
+                    }
+                    $verifiedSha = $fromSums
+                    $actual = Get-FrpSha256HexOfFile -Path $bundlePath
+                    if ($actual -ne $verifiedSha) {
+                        throw 'ERROR: downloaded project update failed SHA256 verification'
+                    }
+                    $env:FRP_BUNDLE_SHA256 = $verifiedSha
+                    if ($env:FRP_WINDOWS_PROJECT_SOURCE -and (Test-Path -LiteralPath $env:FRP_WINDOWS_PROJECT_SOURCE)) {
+                        $installFrom = $env:FRP_WINDOWS_PROJECT_SOURCE.Trim()
+                    } else {
+                        throw 'ERROR: verified project bootstrap artifact, but no windows/ source tree was provided; set -SourceDir or FRP_WINDOWS_PROJECT_SOURCE to the extracted windows package root'
+                    }
+                } else {
+                    if (-not (Test-Path -LiteralPath $installFrom)) {
+                        throw ("ERROR: project source directory missing: {0}" -f $installFrom)
+                    }
+                    if (-not $verifiedSha) {
+                        # Local/fixture path: hash a marker file if provided, else hash SourceDir stamp file.
+                        if ($env:FRP_BUNDLE_FILE -and (Test-Path -LiteralPath $env:FRP_BUNDLE_FILE)) {
+                            $verifiedSha = Get-FrpSha256HexOfFile -Path $env:FRP_BUNDLE_FILE
+                        } elseif ($expected) {
+                            $verifiedSha = $expected.ToLowerInvariant()
+                        }
+                    }
+                }
+
+                $snapshotMap = [ordered]@{}
+                foreach ($rel in (Get-FrpWindowsProjectManagedRelativePaths)) {
+                    $dest = Join-Path (Get-FrpWindowsRoot) ($rel -replace '/', [IO.Path]::DirectorySeparatorChar)
+                    $snapName = ($rel -replace '/', '__')
+                    $snapshotMap[$snapName] = $dest
+                }
+                $snapshotMap['version'] = (Get-FrpVersionPath)
+                $snapshotMap['frpc.toml'] = (Get-FrpTomlPath)
+                $snapshotMap['client-state.json'] = (Get-FrpStatePath)
+                $pausePath = Get-FrpPauseMarkerPath
+                if (Test-Path -LiteralPath $pausePath) {
+                    $snapshotMap['remote-access-paused.json'] = $pausePath
+                }
+
+                $backupRoot = New-FrpUpdateBackupSnapshot -SnapshotMap $snapshotMap
+                $wasRunning = $false
+                $wasPaused = Test-FrpRemoteAccessPaused
+                try {
+                    $st = Get-FrpClientStatus
+                    if ($st.Running) {
+                        $wasRunning = $true
+                        Stop-FrpClient | Out-Null
+                    }
+
+                    # Capture protected identity fingerprints before mutation.
+                    $stateBefore = $null
+                    if (Test-Path -LiteralPath (Get-FrpStatePath)) {
+                        $stateBefore = (Get-Content -LiteralPath (Get-FrpStatePath) -Raw)
+                    }
+                    $tomlBefore = $null
+                    if (Test-Path -LiteralPath (Get-FrpTomlPath)) {
+                        $tomlBefore = (Get-Content -LiteralPath (Get-FrpTomlPath) -Raw)
+                    }
+
+                    Install-FrpWindowsProjectTree -SourceWindowsRoot $installFrom | Out-Null
+                    if ($env:FRP_WINDOWS_FAIL_AFTER_PROJECT_REPLACE -eq '1') {
+                        throw 'ERROR: simulated failure after project replace (FRP_WINDOWS_FAIL_AFTER_PROJECT_REPLACE=1)'
+                    }
+
+                    $tomlRefresh = $false
+                    if (Update-FrpClientDataPlaneMetadataIfNeeded) {
+                        $tomlRefresh = $true
+                        Write-Host 'Refreshed frpc.toml with data-plane authorization metadata.'
+                    }
+
+                    $prevChannel = $env:FRP_RELEASE_CHANNEL
+                    $prevRef = $env:FRP_SOURCE_REF
+                    $prevBundle = $env:FRP_BUNDLE_SHA256
+                    try {
+                        $env:FRP_RELEASE_CHANNEL = $channel
+                        if ($channel -eq 'candidate') {
+                            $env:FRP_SOURCE_REF = $sourceRef
+                        } elseif ($channel -eq 'dev') {
+                            Remove-Item Env:FRP_SOURCE_REF -ErrorAction SilentlyContinue
+                        }
+                        if ($verifiedSha) {
+                            $env:FRP_BUNDLE_SHA256 = $verifiedSha
+                        }
+                        Write-FrpVersionFile -BundleSha256 $verifiedSha | Out-Null
+                    } finally {
+                        if ($null -ne $prevChannel) { $env:FRP_RELEASE_CHANNEL = $prevChannel }
+                        else { Remove-Item Env:FRP_RELEASE_CHANNEL -ErrorAction SilentlyContinue }
+                        if ($null -ne $prevRef) { $env:FRP_SOURCE_REF = $prevRef }
+                        else { Remove-Item Env:FRP_SOURCE_REF -ErrorAction SilentlyContinue }
+                        if ($null -ne $prevBundle) { $env:FRP_BUNDLE_SHA256 = $prevBundle }
+                        else { Remove-Item Env:FRP_BUNDLE_SHA256 -ErrorAction SilentlyContinue }
+                    }
+
+                    # Identity/ports/config must remain byte-stable.
+                    if ($null -ne $stateBefore) {
+                        $stateAfter = Get-Content -LiteralPath (Get-FrpStatePath) -Raw
+                        if ($stateAfter -ne $stateBefore) {
+                            throw 'ERROR: protected client state changed during project update'
+                        }
+                    }
+                    if ($null -ne $tomlBefore -and -not $tomlRefresh) {
+                        $tomlAfter = Get-Content -LiteralPath (Get-FrpTomlPath) -Raw
+                        if ($tomlAfter -ne $tomlBefore) {
+                            throw 'ERROR: protected frpc.toml changed during project update'
+                        }
+                    }
+                    if ($wasPaused -and -not (Test-FrpRemoteAccessPaused)) {
+                        throw 'ERROR: pause state was cleared during project update'
+                    }
+
+                    if ($wasRunning -and -not (Test-FrpRemoteAccessPaused)) {
+                        Start-FrpClient | Out-Null
+                    }
+                    Write-Host 'Project update complete (identity, ports, and pause state preserved).'
+                    return 0
+                } catch {
+                    Write-Host ("ERROR: project update failed: {0}" -f $_.Exception.Message)
+                    Write-Host 'Attempting full rollback from backup...'
+                    $rollbackOk = $true
+                    try {
+                        foreach ($name in @($snapshotMap.Keys)) {
+                            $bak = Join-Path $backupRoot $name
+                            if (-not (Test-Path -LiteralPath $bak)) { continue }
+                            $dest = $snapshotMap[$name]
+                            $destDir = Split-Path -Parent $dest
+                            if (-not (Test-Path -LiteralPath $destDir)) {
+                                New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+                            }
+                            Copy-Item -LiteralPath $bak -Destination $dest -Force
+                        }
+                        if ($wasRunning -and -not (Test-FrpRemoteAccessPaused)) {
+                            Start-FrpClient | Out-Null
+                        }
+                        Write-Host 'Rollback restored snapshotted project files and prior run state.'
+                    } catch {
+                        $rollbackOk = $false
+                        Write-Host ("ERROR: rollback failed: {0}" -f $_.Exception.Message)
+                        Write-Host 'RECOVERY_REQUIRED=YES'
+                    }
+                    if (-not $rollbackOk) {
+                        Write-Host 'RECOVERY_REQUIRED=YES'
+                    }
+                    return 1
+                }
+            } finally {
+                if ($tmpDir -and (Test-Path -LiteralPath $tmpDir)) {
+                    Remove-Item -LiteralPath $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+                }
             }
-            Write-Host 'Rollback restored snapshotted files and prior run state.'
-        } catch {
-            $rollbackOk = $false
-            Write-Host ("ERROR: rollback failed: {0}" -f $_.Exception.Message)
-            Write-Host 'RECOVERY_REQUIRED=YES'
         }
-        if (-not $rollbackOk) {
-            Write-Host 'RECOVERY_REQUIRED=YES'
-        }
+    } catch {
+        Write-Host $_.Exception.Message
         return 1
     }
 }
@@ -224,6 +508,10 @@ function Invoke-FrpClientDoctor {
     $issues = 0
     Write-Host 'frp-client doctor (basic)'
     Write-Host ("Root: {0}" -f (Get-FrpWindowsRoot))
+    if (Test-FrpWindowsPlaintextIdentityOnly) {
+        Write-Host 'Identity: FAIL plaintext-only (DPAPI required on Windows)'
+        $issues++
+    }
     if (Test-FrpIsEnrolled) {
         Write-Host 'Enrolled: yes'
     } else {
@@ -237,6 +525,13 @@ function Invoke-FrpClientDoctor {
             Write-Host ("MISS {0}" -f $p)
             $issues++
         }
+    }
+    $keyPath = Get-FrpIdentityKeyPath
+    if (Test-Path -LiteralPath $keyPath) {
+        Write-Host ("OK  {0}" -f $keyPath)
+    } else {
+        Write-Host ("MISS {0}" -f $keyPath)
+        $issues++
     }
     if (Test-Path -LiteralPath (Get-FrpFrpcPath)) {
         Write-Host ("OK  {0}" -f (Get-FrpFrpcPath))
@@ -282,7 +577,23 @@ switch ($Command) {
         exit 0
     }
     'info' { exit (Show-FrpClientInfo) }
-    'update' { exit (Invoke-FrpClientUpdate -CheckOnly:$Check) }
+    'update' {
+        $sub = ''
+        if ($SubCommand) { $sub = $SubCommand.Trim().ToLowerInvariant() }
+        if ($sub -eq 'project') {
+            exit (Invoke-FrpClientProjectUpdate -CheckOnly:$Check -SourceWindowsRoot $SourceDir `
+                    -ArtifactUrl $DownloadUrl -SumsUrl $MetadataUrl -ExpectedBundleSha256 $ExpectedSha256)
+        }
+        if (-not $sub -or $sub -eq 'frp') {
+            exit (Invoke-FrpClientUpdate -CheckOnly:$Check)
+        }
+        Write-Host ("ERROR: unknown update target '{0}' (use 'frp' or 'project')" -f $SubCommand)
+        exit 1
+    }
+    'project-update' {
+        exit (Invoke-FrpClientProjectUpdate -CheckOnly:$Check -SourceWindowsRoot $SourceDir `
+                -ArtifactUrl $DownloadUrl -SumsUrl $MetadataUrl -ExpectedBundleSha256 $ExpectedSha256)
+    }
     'pause' { exit (Invoke-FrpPauseRemoteAccess) }
     'resume' { exit (Invoke-FrpResumeRemoteAccess) }
     'restart' { exit (Invoke-FrpRestartConnection) }

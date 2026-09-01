@@ -301,14 +301,19 @@ def main():
             fail('nonce write-fail status', result)
         if env.registry.read_bytes() != before:
             fail('nonce write-fail mutated registry')
+        # Fail-closed: nonce was consumed before registry save; same nonce must
+        # not succeed. Client retries with a new nonce.
         code, result = env.allocator.enroll('', str(ts), '', edit_body, headers=headers)
+        if code != 403 or 'replay' not in str(result.get('error', '')).lower():
+            fail('same nonce after failed save should replay-reject', result)
+        (code, result), _, _ = env.enroll_signed(edit_body)
         if code != 200:
-            fail('same nonce after failed save', result)
+            fail('new nonce after failed save', result)
         if env.load_client()['services']['ssh']['local_port'] != 2222:
             fail('retry after write-fail did not apply')
         if env.load_client()['services']['ssh']['remote_port'] != ssh_port:
             fail('retry after write-fail reallocated ssh')
-        pass_('failed mutation does not burn nonce')
+        pass_('failed mutation burns nonce; new nonce retries')
 
         env.allocator.load_registry()
         state = json.loads(env.registry.read_text())

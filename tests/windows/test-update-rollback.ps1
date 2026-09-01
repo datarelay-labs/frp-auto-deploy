@@ -25,9 +25,23 @@ try {
 
     $clientPath = Join-Path $script:RepoRoot 'windows/tools/FrpClient.ps1'
     $clientText = Get-Content -LiteralPath $clientPath -Raw
-    $m = [regex]::Match($clientText, '(?ms)^function Invoke-FrpClientUpdate \{.*?\n\}')
-    Assert-FrpTrue $m.Success 'found Invoke-FrpClientUpdate'
-    Invoke-Expression $m.Value
+    # Extract Invoke-FrpClientUpdate with balanced-brace scan (nested try/catch/lock).
+    $start = $clientText.IndexOf('function Invoke-FrpClientUpdate')
+    Assert-FrpTrue ($start -ge 0) 'found Invoke-FrpClientUpdate'
+    $brace = 0
+    $started = $false
+    $end = -1
+    for ($i = $start; $i -lt $clientText.Length; $i++) {
+        $ch = $clientText[$i]
+        if ($ch -eq '{') { $brace++; $started = $true }
+        elseif ($ch -eq '}') {
+            $brace--
+            if ($started -and $brace -eq 0) { $end = $i; break }
+        }
+    }
+    Assert-FrpTrue ($end -gt $start) 'balanced function body'
+    $fnText = $clientText.Substring($start, $end - $start + 1)
+    Invoke-Expression $fnText
 
     function Install-FrpWindowsBinary {
         param($DownloadUrl, $ExpectedSha256)

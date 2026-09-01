@@ -61,6 +61,34 @@ frp_u_rm_file() {
   rm -f "$path"
 }
 
+_frp_u_project_files_py() {
+  local here candidate
+  if [[ -n "${FRP_PROJECT_FILES_PY:-}" && -f "${FRP_PROJECT_FILES_PY}" ]]; then
+    printf '%s' "$FRP_PROJECT_FILES_PY"
+    return 0
+  fi
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  for candidate in \
+    "${here}/lib/frp_project_files.py" \
+    "$(frp_u_path /usr/local/lib/frp-auto-deploy/frp_project_files.py)" \
+    /usr/local/lib/frp-auto-deploy/frp_project_files.py; do
+    if [[ -f "$candidate" ]]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  # uninstall-client.sh is often installed under the libdir itself.
+  if [[ -f "${here}/frp_project_files.py" ]]; then
+    printf '%s' "${here}/frp_project_files.py"
+    return 0
+  fi
+  return 1
+}
+
+frp_u_server_present() {
+  [[ -f "$(frp_u_path /etc/frp-auto-deploy/config.json)" ]]
+}
+
 SKIP_SYSTEMD=0
 if [[ -n "${FRP_UNINSTALL_TEST_ROOT:-}" || -n "${FRP_CLIENT_TEST_ROOT:-}" || "${FRP_UNINSTALL_HOOK_SKIP_SYSTEMD:-}" == "1" ]]; then
   SKIP_SYSTEMD=1
@@ -112,22 +140,63 @@ if [[ "$SKIP_SYSTEMD" != "1" ]]; then
   frp_u_kill_project_frpc
 fi
 
-frp_u_rm_file "$(frp_u_path /etc/systemd/system/frpc.service)"
-frp_u_rm_file "$(frp_u_path /usr/local/bin/frpc)"
-frp_u_rm_file "$(frp_u_path /usr/local/bin/frp-client)"
-frp_u_rm_file "$(frp_u_path /usr/local/bin/frpctl)"
-frp_u_rm_file "$(frp_u_path /usr/local/bin/frpcli)"
+PROJECT_FILES_PY=""
+CLIENT_MANIFEST_OK=0
+if PROJECT_FILES_PY="$(_frp_u_project_files_py)"; then
+  CLIENT_MANIFEST_OK=1
+fi
+
+KEEP_SHARED=0
+if frp_u_server_present; then
+  KEEP_SHARED=1
+fi
+
+declare -A FRP_U_KEEP_LIBS=()
+if [[ "$KEEP_SHARED" == "1" && "$CLIENT_MANIFEST_OK" == "1" ]]; then
+  while IFS= read -r base; do
+    [[ -n "$base" ]] || continue
+    FRP_U_KEEP_LIBS["$base"]=1
+  done < <(python3 "$PROJECT_FILES_PY" dual-role-shared-libs)
+fi
+
+if [[ "$CLIENT_MANIFEST_OK" == "1" ]]; then
+  while IFS= read -r rel; do
+    [[ -n "$rel" ]] || continue
+    case "$rel" in
+      usr/local/lib/frp-auto-deploy/*)
+        base="${rel##*/}"
+        if [[ "$KEEP_SHARED" == "1" && -n "${FRP_U_KEEP_LIBS[$base]:-}" ]]; then
+          continue
+        fi
+        ;;
+    esac
+    frp_u_rm_file "$(frp_u_path "/${rel}")"
+  done < <(python3 "$PROJECT_FILES_PY" client-uninstall-rels)
+  # Runtime binary (manifest binary class; not in managed uninstall-rels).
+  frp_u_rm_file "$(frp_u_path /usr/local/bin/frpc)"
+else
+  # Fallback when the helper is already gone (idempotent re-run).
+  frp_u_rm_file "$(frp_u_path /etc/systemd/system/frpc.service)"
+  frp_u_rm_file "$(frp_u_path /usr/local/bin/frpc)"
+  frp_u_rm_file "$(frp_u_path /usr/local/bin/frp-client)"
+  frp_u_rm_file "$(frp_u_path /usr/local/bin/frpctl)"
+  frp_u_rm_file "$(frp_u_path /usr/local/bin/frpcli)"
+  libdir="$(frp_u_path /usr/local/lib/frp-auto-deploy)"
+  if [[ -d "$libdir" && ! -L "$libdir" ]]; then
+    for f in frp-client-common.sh frp-client-lifecycle.sh frp_client_lifecycle.py \
+      uninstall-client.sh frp_clock_sync.py frp-doctor-common.sh frp_doctor.py \
+      frp_ctl_grammar.py frp_ctl_repl.py; do
+      frp_u_rm_file "${libdir}/${f}"
+    done
+    if [[ "$KEEP_SHARED" != "1" ]]; then
+      frp_u_rm_file "${libdir}/frp_mgmt_auth.py"
+      frp_u_rm_file "${libdir}/frp-common.sh"
+    fi
+  fi
+fi
 
 libdir="$(frp_u_path /usr/local/lib/frp-auto-deploy)"
 if [[ -d "$libdir" && ! -L "$libdir" ]]; then
-  frp_u_rm_file "${libdir}/frp-client-common.sh"
-  frp_u_rm_file "${libdir}/frp-client-lifecycle.sh"
-  frp_u_rm_file "${libdir}/frp_client_lifecycle.py"
-  frp_u_rm_file "${libdir}/uninstall-client.sh"
-  if [[ ! -f "$(frp_u_path /etc/frp-auto-deploy/config.json)" ]]; then
-    frp_u_rm_file "${libdir}/frp_mgmt_auth.py"
-    frp_u_rm_file "${libdir}/frp-common.sh"
-  fi
   rmdir "$libdir" 2>/dev/null || true
 elif [[ -L "$libdir" ]]; then
   echo "ERROR: refusing to delete symlink library directory" >&2
@@ -160,7 +229,46 @@ if [[ -d "$etc_frp" ]]; then
 fi
 
 frp_u_rm_file "$(frp_u_path /etc/frp-auto-deploy/allocator-ca.crt)"
-frp_u_rm_file "$(frp_u_path /var/lib/frp-auto-deploy/update-pending.json)"
+# Dual-role: only delete client-owned update-pending markers. Preserve
+# server/restore/unknown/corrupt markers so a later server recovery is not lost.
+pending_marker="$(frp_u_path /var/lib/frp-auto-deploy/update-pending.json)"
+if [[ -e "$pending_marker" || -L "$pending_marker" ]]; then
+  if python3 - "$pending_marker" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+CLIENT_OWNED = {"client-update"}
+try:
+    raw = path.read_text(encoding="utf-8")
+    data = json.loads(raw)
+except Exception:
+    print(
+        "WARNING: preserving update-pending.json (unreadable or corrupt); "
+        "not removing during client uninstall.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+if not isinstance(data, dict):
+    print(
+        "WARNING: preserving update-pending.json (unexpected shape); "
+        "not removing during client uninstall.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+operation = str(data.get("operation") or "").strip()
+if operation in CLIENT_OWNED:
+    raise SystemExit(0)
+print(
+    "WARNING: preserving update-pending.json (operation=%s); "
+    "not a client-owned marker." % (operation or "unknown"),
+    file=sys.stderr,
+)
+raise SystemExit(2)
+PY
+  then
+    frp_u_rm_file "$pending_marker"
+  fi
+fi
 frp_u_rm_file "$(frp_u_path /var/lib/frp-auto-deploy/client-draft.json)"
 frp_u_safe_rm_rf "$(frp_u_path /var/lib/frp-auto-deploy/client-upgrades)"
 

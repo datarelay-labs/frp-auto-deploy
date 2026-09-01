@@ -51,15 +51,35 @@ Path(sys.argv[1]).write_text(json.dumps({
   "reserved": [6000, 6001],
   "clients": {
     "a": {"hostname": "a", "services": {
-      "ssh": {"remote_port": 6002, "enabled": True},
-      "https": {"remote_port": 6003, "enabled": True},
+      "ssh": {
+        "id": "ssh", "preset": "ssh", "protocol": "tcp",
+        "local_ip": "127.0.0.1", "local_port": 22, "remote_port": 6002,
+        "enabled": True, "ssh_user": "aella",
+      },
+      "https": {
+        "id": "https", "preset": "https", "protocol": "tcp",
+        "local_ip": "127.0.0.1", "local_port": 443, "remote_port": 6003,
+        "enabled": True,
+      },
     }},
     "b": {"hostname": "b", "services": {
-      "ssh": {"remote_port": 6004, "enabled": True},
+      "ssh": {
+        "id": "ssh", "preset": "ssh", "protocol": "tcp",
+        "local_ip": "127.0.0.1", "local_port": 22, "remote_port": 6004,
+        "enabled": True, "ssh_user": "aella",
+      },
     }},
     "c": {"hostname": "c", "services": {
-      "ssh": {"remote_port": 6005, "enabled": True},
-      "https": {"remote_port": 6006, "enabled": True},
+      "ssh": {
+        "id": "ssh", "preset": "ssh", "protocol": "tcp",
+        "local_ip": "127.0.0.1", "local_port": 22, "remote_port": 6005,
+        "enabled": True, "ssh_user": "aella",
+      },
+      "https": {
+        "id": "https", "preset": "https", "protocol": "tcp",
+        "local_ip": "127.0.0.1", "local_port": 443, "remote_port": 6006,
+        "enabled": True,
+      },
     }},
   },
 })+"\n")

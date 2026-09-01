@@ -92,11 +92,14 @@ EOF
       "tags": {"env": "prod"},
       "services": {
         "ssh": {
+          "id": "ssh",
+          "preset": "ssh",
           "remote_port": 6000,
           "enabled": true,
           "protocol": "tcp",
           "local_ip": "127.0.0.1",
-          "local_port": 22
+          "local_port": 22,
+          "ssh_user": "ubuntu"
         }
       }
     },
@@ -107,11 +110,14 @@ EOF
       "last_mgmt_seen_at": "2020-01-01T00:00:00Z",
       "services": {
         "ssh": {
+          "id": "ssh",
+          "preset": "ssh",
           "remote_port": 6001,
           "enabled": true,
           "protocol": "tcp",
           "local_ip": "127.0.0.1",
-          "local_port": 22
+          "local_port": 22,
+          "ssh_user": "ubuntu"
         }
       }
     }

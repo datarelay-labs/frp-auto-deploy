@@ -9,14 +9,18 @@ import time
 ENROLL_CHALLENGE_TTL = 120
 CHALLENGE_ID_HEX_LEN = 16
 CHALLENGE_NONCE_HEX_LEN = 64
+# Soft bound against unbounded in-memory growth under abuse. Expired entries
+# are pruned first; issuing still fails closed when the live set is full.
+MAX_ACTIVE_CHALLENGES = 4096
 
 
 class EnrollChallengeStore:
     """Short-lived, single-use enrollment challenges keyed by challenge_id."""
 
-    def __init__(self):
+    def __init__(self, max_active=MAX_ACTIVE_CHALLENGES):
         self._lock = threading.Lock()
         self._challenges = {}
+        self._max_active = int(max_active)
 
     def _expire_locked(self, now):
         expired = [
@@ -33,6 +37,8 @@ class EnrollChallengeStore:
             raise ValueError('invalid enrollment id')
         with self._lock:
             self._expire_locked(now)
+            if len(self._challenges) >= self._max_active:
+                raise ValueError('enrollment challenge store is full')
             challenge_id = secrets.token_hex(8)
             nonce = secrets.token_hex(32)
             self._challenges[challenge_id] = {

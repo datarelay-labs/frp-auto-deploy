@@ -27,10 +27,21 @@ auth.token = `"$token`"
 
     $tempRoot = [System.IO.Path]::GetTempPath()
     if ([string]::IsNullOrWhiteSpace($tempRoot)) { $tempRoot = '/tmp' }
+    # GUID-based exclusive names: frp-support-bundle-<32hex>.zip
     $zips = Get-ChildItem -LiteralPath $tempRoot -Filter 'frp-support-bundle-*.zip' |
         Sort-Object LastWriteTime -Descending
     Assert-FrpTrue ($zips.Count -gt 0) 'zip created'
     $zip = $zips[0].FullName
+    Assert-FrpTrue ($zip -match 'frp-support-bundle-[0-9a-fA-F]{32}\.zip$') 'zip uses exclusive GUID name'
+
+    # Collision must not delete preexisting unknown archives.
+    $collide = Join-Path $tempRoot ('frp-support-bundle-' + [guid]::NewGuid().ToString('N') + '.zip')
+    Set-Content -LiteralPath $collide -Value 'preexisting-marker'
+    # New-FrpExclusiveTempPath skips existing paths; creating another bundle must leave marker intact.
+    $rc2 = Invoke-FrpSupportBundle -Anonymize
+    Assert-FrpTrue ($rc2 -eq 0) 'second support-bundle exit 0'
+    Assert-FrpEqual 'preexisting-marker' ((Get-Content -LiteralPath $collide -Raw).Trim()) 'preexisting archive not deleted'
+    Remove-Item -LiteralPath $collide -Force -ErrorAction SilentlyContinue
 
     $extract = Join-Path $tempRoot ("frp-bundle-scan-" + [guid]::NewGuid().ToString('n'))
     New-Item -ItemType Directory -Path $extract | Out-Null
@@ -48,7 +59,10 @@ auth.token = `"$token`"
     Assert-FrpTrue ($blob -notmatch 'FRP_TOKEN_TEST_') 'FRP_TOKEN_TEST fixture not in zip'
 
     Remove-Item -LiteralPath $extract -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
+    # Clean GUID zips created by this test (best-effort).
+    Get-ChildItem -LiteralPath $tempRoot -Filter 'frp-support-bundle-*.zip' -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -gt (Get-Date).AddMinutes(-10) } |
+        Remove-Item -Force -ErrorAction SilentlyContinue
 
     Write-FrpTestPass 'test-support-bundle'
 } finally {

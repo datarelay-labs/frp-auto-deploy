@@ -119,6 +119,7 @@ Path(sys.argv[1]).write_text(json.dumps({
           "local_port": 22,
           "remote_port": 6004,
           "preset": "ssh",
+          "ssh_user": "aella",
           "enabled": True,
         },
       },
@@ -135,6 +136,7 @@ Path(sys.argv[1]).write_text(json.dumps({
           "local_port": 22,
           "remote_port": 6005,
           "preset": "ssh",
+          "ssh_user": "aella",
           "enabled": True,
         },
       },
@@ -151,6 +153,7 @@ Path(sys.argv[1]).write_text(json.dumps({
           "local_port": 22,
           "remote_port": 6006,
           "preset": "ssh",
+          "ssh_user": "aella",
           "enabled": True,
         },
         "https": {

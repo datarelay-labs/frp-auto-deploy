@@ -53,6 +53,14 @@ def require_v2(state):
             )
 
 
+def require_valid_registry(state, cfg=None):
+    require_v2(state)
+    try:
+        CREG.validate_registry_or_raise(state, cfg)
+    except ValueError as exc:
+        raise SystemExit('ERROR: %s' % exc)
+
+
 if len(sys.argv) not in (2, 3):
     print(f'Usage: {sys.argv[0]} <client-id|label|hostname> [overview|services|tags|groups]', file=sys.stderr)
     sys.exit(2)
@@ -70,7 +78,7 @@ reg = Path(cfg['registry_file'])
 if ROOT and not str(reg).startswith(ROOT):
     reg = Path(ROOT + str(reg))
 state = json.loads(reg.read_text())
-require_v2(state)
+require_valid_registry(state, cfg)
 
 mid, client = CREG.resolve_client_or_exit(state, q)
 all_mids = list((state.get('clients') or {}))

@@ -327,6 +327,35 @@ def _clear_txn(root: Path) -> None:
         marker.unlink()
 
 
+def verify_allocator_https_health(public_host, listen_port, ca_path, timeout=5):
+    """Verified HTTPS /healthz via loopback connect + SNI against public_host.
+
+    Connects to 127.0.0.1:listen_port while verifying the certificate as
+    public_host using the restored CA. Never uses insecure TLS or plain HTTP.
+    """
+    doctor = _load_module("frp_doctor", "frp_doctor.py")
+    if doctor is None:
+        raise RestoreError("frp_doctor is unavailable for HTTPS health probe")
+    host = str(public_host or "").strip()
+    if not host:
+        raise RestoreError("public_host is required for allocator HTTPS health probe")
+    try:
+        result = doctor.https_loopback_get(
+            host, int(listen_port), "/healthz", ca_path, timeout=timeout
+        )
+    except Exception as exc:
+        raise RestoreError("allocator /healthz failed after restore") from exc
+    if not isinstance(result, dict) or not result.get("ok"):
+        detail = ""
+        if isinstance(result, dict):
+            detail = str(result.get("detail") or result.get("error_class") or "")
+        raise RestoreError(
+            "allocator /healthz failed after restore"
+            + (f": {detail}" if detail else "")
+        )
+    return result
+
+
 def verify_restored_control_state(root: Path, in_rollback: bool = False) -> None:
     if os.environ.get("FRP_RESTORE_HOOK_HEALTH_FAIL") == "1" and not in_rollback:
         raise RestoreError("simulated post-restore health failure")
@@ -355,47 +384,45 @@ def verify_restored_control_state(root: Path, in_rollback: bool = False) -> None
         raise RestoreError("restored FRP token is missing")
     if not ca_path.is_file():
         raise RestoreError("restored CA certificate is missing")
-    if os.environ.get("FRP_SKIP_SYSTEMD") or os.environ.get("FRP_DEPLOY_TEST_ROOT"):
+    skip_runtime = bool(
+        os.environ.get("FRP_SKIP_SYSTEMD") or os.environ.get("FRP_DEPLOY_TEST_ROOT")
+    )
+    force_health = os.environ.get("FRP_RESTORE_FORCE_HEALTH_PROBE") == "1"
+    if skip_runtime and not force_health:
         return
-    units = ["frps.service", "frp-port-allocator.service"]
     frontend = (root / "etc/frp-auto-deploy/frontend.conf").is_file()
-    if frontend:
-        units.append("frp-frontend.service")
-    for unit in units:
-        active = subprocess.run(
-            ["systemctl", "is-active", unit],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if (active.stdout or "").strip() != "active":
-            raise RestoreError(f"{unit} is not active after restore")
-    listen = None
-    for line in text.splitlines():
-        if line.strip().startswith("bindPort"):
-            _, _, raw = line.partition("=")
-            listen = raw.strip().strip('"')
-            break
-    if listen:
-        probe = subprocess.run(
-            ["ss", "-lnt"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if probe.returncode == 0 and listen not in (probe.stdout or ""):
-            raise RestoreError("frps control port is not listening after restore")
+    if not skip_runtime:
+        units = ["frps.service", "frp-port-allocator.service"]
+        if frontend:
+            units.append("frp-frontend.service")
+        for unit in units:
+            active = subprocess.run(
+                ["systemctl", "is-active", unit],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if (active.stdout or "").strip() != "active":
+                raise RestoreError(f"{unit} is not active after restore")
+        listen = None
+        for line in text.splitlines():
+            if line.strip().startswith("bindPort"):
+                _, _, raw = line.partition("=")
+                listen = raw.strip().strip('"')
+                break
+        if listen:
+            probe = subprocess.run(
+                ["ss", "-lnt"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if probe.returncode == 0 and listen not in (probe.stdout or ""):
+                raise RestoreError("frps control port is not listening after restore")
     listen_port = int(config.get("allocator_listen_port") or config.get("listen_port") or 6099)
-    try:
-        import urllib.request
-
-        urllib.request.urlopen(
-            f"http://127.0.0.1:{listen_port}/healthz",
-            timeout=5,
-        ).read()
-    except Exception as exc:
-        raise RestoreError("allocator /healthz failed after restore") from exc
-    if frontend:
+    public_host = str(config.get("public_host") or "").strip()
+    verify_allocator_https_health(public_host, listen_port, ca_path)
+    if frontend and not skip_runtime:
         host = str(config.get("public_host") or "")
         port = int(config.get("frp_control_public_port") or 443)
         if host:
@@ -501,6 +528,14 @@ def _semantic_prevalidate_candidate(extracted: Path) -> None:
     except ValueError as exc:
         raise RestoreError(f"backup deployment mode/transport is invalid: {exc}") from exc
 
+    scfg = _load_module("frp_server_config", "frp_server_config.py")
+    if scfg is None:
+        raise RestoreError("frp_server_config.py is unavailable for restore validation")
+    try:
+        scfg.validate_server_config(config)
+    except ValueError as exc:
+        raise RestoreError(f"backup server configuration is unsafe: {exc}") from exc
+
     creg = _load_module("frp_client_registry", "frp_client_registry.py")
     if creg is None:
         raise RestoreError("frp_client_registry.py is unavailable for restore validation")
@@ -526,6 +561,18 @@ def _semantic_prevalidate_candidate(extracted: Path) -> None:
         path = payload / rel
         if not path.is_file() or path.stat().st_size == 0:
             raise RestoreError(f"backup PKI file is missing or empty: {rel}")
+
+    pki = _load_module("frp_pki", "frp_pki.py")
+    if pki is None:
+        raise RestoreError("frp_pki.py is unavailable for restore validation")
+    pki_dir = payload / "etc/frp-auto-deploy/pki"
+    try:
+        paths = pki.pki_paths(pki_dir)
+        pki.validate_existing_materials(paths)
+    except Exception as exc:
+        # PkiError and anything unexpected: fail closed before live mutation.
+        raise RestoreError(f"backup PKI key/certificate pair validation failed: {exc}") from exc
+
     if mode == "single443":
         frontend_conf = payload / "etc/frp-auto-deploy/frontend.conf"
         if not frontend_conf.is_file():

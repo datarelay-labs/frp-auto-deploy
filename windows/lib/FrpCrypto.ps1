@@ -692,6 +692,25 @@ function Protect-FrpSignMessage {
     return [FrpCryptoNative]::SignMessageDerBase64($PrivatePem, [System.Text.Encoding]::UTF8.GetBytes($Message))
 }
 
+function Get-FrpDataPlaneProofObject {
+    param([Parameter(Mandatory = $true)][string]$MachineId)
+    return [ordered]@{
+        alg       = 'ecdsa-p256-sha256'
+        client_id = [string]$MachineId
+        purpose   = 'frp-data-plane'
+        schema    = 1
+    }
+}
+
+function Protect-FrpDataPlaneProof {
+    param(
+        [Parameter(Mandatory = $true)][string]$MachineId,
+        [Parameter(Mandatory = $true)][string]$PrivatePem
+    )
+    $msg = Get-FrpCanonicalJson -Object (Get-FrpDataPlaneProofObject -MachineId $MachineId)
+    return (Protect-FrpSignMessage -PrivatePem $PrivatePem -Message $msg)
+}
+
 function Test-FrpSignature {
     param([Parameter(Mandatory = $true)][string]$PublicPem, [Parameter(Mandatory = $true)][string]$Message, [Parameter(Mandatory = $true)][string]$SignatureBase64)
     Initialize-FrpCryptoTypes

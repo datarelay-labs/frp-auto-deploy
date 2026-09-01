@@ -336,6 +336,107 @@ def verify_cert_signed_by_ca(ca_crt, server_crt):
         raise PkiError('server certificate is not signed by the local CA') from exc
 
 
+def _rsa_modulus(path, kind):
+    """Return uppercase hex RSA modulus. kind is 'x509' (cert) or 'rsa' (key)."""
+    openssl = openssl_bin()
+    proc = _run([openssl, kind, '-in', str(path), '-noout', '-modulus'])
+    line = (proc.stdout or '').strip()
+    if '=' not in line:
+        raise PkiError('unable to read RSA modulus from %s' % path)
+    return line.split('=', 1)[1].strip().upper()
+
+
+def _pubkey_pem_from_cert(cert_path):
+    openssl = openssl_bin()
+    proc = _run([openssl, 'x509', '-in', str(cert_path), '-pubkey', '-noout'])
+    text = (proc.stdout or '').strip()
+    if 'BEGIN PUBLIC KEY' not in text:
+        raise PkiError('unable to extract public key from certificate %s' % cert_path)
+    return text + '\n'
+
+
+def _pubkey_pem_from_private(key_path):
+    """Derive SubjectPublicKeyInfo PEM. Prefer rsa -pubout (OpenSSL 1.0.2)."""
+    openssl = openssl_bin()
+    last_err = None
+    for args in (
+        [openssl, 'rsa', '-in', str(key_path), '-pubout'],
+        [openssl, 'pkey', '-in', str(key_path), '-pubout'],
+    ):
+        try:
+            proc = _run(args)
+            text = (proc.stdout or '').strip()
+            if 'BEGIN PUBLIC KEY' in text:
+                return text + '\n'
+        except PkiError as exc:
+            last_err = exc
+    raise PkiError(
+        'unable to derive public key from private key %s' % key_path
+    ) from last_err
+
+
+def _pubkey_pem_der_hash(pubkey_pem):
+    """SHA-256 of SPKI DER. Uses rsa -pubin first, then pkey -pubin."""
+    openssl = openssl_bin()
+    fd, tmp = tempfile.mkstemp(prefix='frp-pubkey.', suffix='.pem')
+    try:
+        with os.fdopen(fd, 'w') as handle:
+            handle.write(pubkey_pem if pubkey_pem.endswith('\n') else pubkey_pem + '\n')
+        last_err = None
+        for args in (
+            [openssl, 'rsa', '-pubin', '-in', tmp, '-outform', 'DER'],
+            [openssl, 'pkey', '-pubin', '-in', tmp, '-outform', 'DER'],
+        ):
+            try:
+                proc = _run_bin(args)
+                if proc.stdout:
+                    return hashlib.sha256(proc.stdout).hexdigest()
+            except PkiError as exc:
+                last_err = exc
+        raise PkiError('unable to normalize public key DER') from last_err
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def validate_key_cert_pair(key_path, cert_path, label='certificate'):
+    """Fail closed when a private key does not match its certificate.
+
+    OpenSSL 1.0.2 compatible: RSA modulus comparison first, then SPKI DER hash
+    via x509 -pubkey / rsa -pubout (pkey -pubout only as fallback).
+    """
+    key_path = Path(key_path)
+    cert_path = Path(cert_path)
+    cert_mod = None
+    key_mod = None
+    try:
+        cert_mod = _rsa_modulus(cert_path, 'x509')
+        key_mod = _rsa_modulus(key_path, 'rsa')
+    except PkiError:
+        cert_mod = None
+        key_mod = None
+    if cert_mod is not None and key_mod is not None:
+        if cert_mod != key_mod:
+            raise PkiError(
+                '%s private key does not match its certificate' % label
+            )
+        return
+    cert_pub = _pubkey_pem_from_cert(cert_path)
+    key_pub = _pubkey_pem_from_private(key_path)
+    if _pubkey_pem_der_hash(cert_pub) != _pubkey_pem_der_hash(key_pub):
+        raise PkiError(
+            '%s private key does not match its certificate' % label
+        )
+
+
+def validate_pki_key_cert_pairs(paths):
+    """Validate ca.key↔ca.crt and server.key↔server.crt. Never regenerates."""
+    validate_key_cert_pair(paths['ca_key'], paths['ca_crt'], label='CA')
+    validate_key_cert_pair(paths['server_key'], paths['server_crt'], label='server')
+
+
 def _genrsa(path):
     openssl = openssl_bin()
     _run([openssl, 'genrsa', '-out', str(path), str(RSA_BITS)])
@@ -398,6 +499,7 @@ def validate_existing_materials(paths):
         _run([openssl, 'rsa', '-in', str(paths['ca_key']), '-check', '-noout'])
         _run([openssl, 'x509', '-in', str(paths['server_crt']), '-noout'])
         _run([openssl, 'rsa', '-in', str(paths['server_key']), '-check', '-noout'])
+        validate_pki_key_cert_pairs(paths)
     except PkiError as exc:
         raise PkiError(
             'allocator PKI is incomplete or corrupted; refusing to replace the CA. '

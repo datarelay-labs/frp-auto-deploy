@@ -85,6 +85,30 @@ frp_u_rm_file() {
   rm -f "$path"
 }
 
+_frp_u_project_files_py() {
+  local here candidate
+  if [[ -n "${FRP_PROJECT_FILES_PY:-}" && -f "${FRP_PROJECT_FILES_PY}" ]]; then
+    printf '%s' "$FRP_PROJECT_FILES_PY"
+    return 0
+  fi
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  for candidate in \
+    "${here}/lib/frp_project_files.py" \
+    "$(frp_u_path /usr/local/lib/frp-auto-deploy/frp_project_files.py)" \
+    /usr/local/lib/frp-auto-deploy/frp_project_files.py; do
+    if [[ -f "$candidate" ]]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+frp_u_client_present() {
+  [[ -f "$(frp_u_path /etc/frp/client-state.json)" ]] || \
+    [[ -x "$(frp_u_path /usr/local/bin/frp-client)" ]]
+}
+
 SKIP_SYSTEMD=0
 if [[ -n "${FRP_UNINSTALL_TEST_ROOT:-}" || "${FRP_UNINSTALL_HOOK_SKIP_SYSTEMD:-}" == "1" ]]; then
   SKIP_SYSTEMD=1
@@ -99,33 +123,48 @@ fi
 # the distro unit, leave nginx.service disabled. Do not restore unknown
 # external nginx configuration.
 
-frp_u_rm_file "$(frp_u_path /etc/systemd/system/frps.service)"
-frp_u_rm_file "$(frp_u_path /etc/systemd/system/frp-port-allocator.service)"
-frp_u_rm_file "$(frp_u_path /etc/systemd/system/frp-frontend.service)"
-frp_u_rm_file "$(frp_u_path /etc/frp-auto-deploy/frontend.conf)"
+PROJECT_FILES_PY=""
+if ! PROJECT_FILES_PY="$(_frp_u_project_files_py)"; then
+  echo "ERROR: frp_project_files.py is unavailable; cannot derive uninstall file list" >&2
+  echo "FAILURE_CLASS=UNINSTALL_MANIFEST_MISSING" >&2
+  exit 1
+fi
+
+KEEP_SHARED=0
+if frp_u_client_present; then
+  KEEP_SHARED=1
+fi
+
+declare -A FRP_U_KEEP_LIBS=()
+if [[ "$KEEP_SHARED" == "1" ]]; then
+  while IFS= read -r base; do
+    [[ -n "$base" ]] || continue
+    FRP_U_KEEP_LIBS["$base"]=1
+  done < <(python3 "$PROJECT_FILES_PY" dual-role-shared-libs)
+  # Client-only shared helper historically preserved with dual-role installs.
+  FRP_U_KEEP_LIBS["frp-client-common.sh"]=1
+fi
+
+while IFS= read -r rel; do
+  [[ -n "$rel" ]] || continue
+  case "$rel" in
+    usr/local/lib/frp-auto-deploy/*)
+      base="${rel##*/}"
+      if [[ "$KEEP_SHARED" == "1" && -n "${FRP_U_KEEP_LIBS[$base]:-}" ]]; then
+        continue
+      fi
+      ;;
+  esac
+  frp_u_rm_file "$(frp_u_path "/${rel}")"
+done < <(python3 "$PROJECT_FILES_PY" uninstall-rels)
+
+# Runtime binary (not in managed project/optional/unit set).
 frp_u_rm_file "$(frp_u_path /usr/local/bin/frps)"
 # Keep any distro-installed nginx package; only the project frontend unit
-# and project-owned frontend.conf are removed.
-for tool in frp-create-client frp-enrollments frp-enrollment-revoke frp-enroll-bulk \
-  frp-clients frp-client-info frp-client-set frp-release-client \
-  frp-release-service frp-revoke-client frp-set-client-installer-url \
-  frp-server-status frp-update frp-upstream frp-project-update frp-backup frp-restore; do
-  frp_u_rm_file "$(frp_u_path /usr/local/sbin/${tool})"
-done
-# Dual-role: keep /usr/local/bin/frpctl (client). Remove server sbin copy.
-frp_u_rm_file "$(frp_u_path /usr/local/sbin/frpctl)"
+# is removed via the manifest. Generated frontend.conf is preserved unless --purge.
 
 libdir="$(frp_u_path /usr/local/lib/frp-auto-deploy)"
 if [[ -d "$libdir" && ! -L "$libdir" ]]; then
-  frp_u_rm_file "${libdir}/frp-port-allocator.py"
-  frp_u_rm_file "${libdir}/frp_pki.py"
-  frp_u_rm_file "${libdir}/frp_frontend.py"
-  frp_u_rm_file "${libdir}/frp_client_registry.py"
-  if [[ ! -f "$(frp_u_path /etc/frp/client-state.json)" && ! -x "$(frp_u_path /usr/local/bin/frp-client)" ]]; then
-    frp_u_rm_file "${libdir}/frp-common.sh"
-    frp_u_rm_file "${libdir}/frp_mgmt_auth.py"
-    frp_u_rm_file "${libdir}/frp-client-common.sh"
-  fi
   rmdir "$libdir" 2>/dev/null || true
 elif [[ -L "$libdir" ]]; then
   echo "ERROR: refusing to delete symlink library directory" >&2
@@ -192,6 +231,8 @@ ${p}"
   try_rm_rf "$(frp_u_path /var/lib/frp-auto-deploy/backups)"
   try_rm_file "$(frp_u_path /var/lib/frp-auto-deploy/registry.json)"
   try_rm_file "$(frp_u_path /var/lib/frp-auto-deploy/mgmt-nonces.json)"
+  try_rm_file "$(frp_u_path /etc/frp-auto-deploy/frontend.conf)"
+  try_rm_file "$(frp_u_path /var/lib/frp-auto-deploy/nginx-ownership)"
   if [[ -f "$(frp_u_path /etc/frp/client-state.json)" ]]; then
     try_rm_file "$(frp_u_path /etc/frp/server_token)"
     try_rm_file "$(frp_u_path /etc/frp/frps.toml)"

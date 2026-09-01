@@ -73,7 +73,16 @@ reg.write_text(json.dumps({
             "label": "oci-e2e-renamed",
             "mgmt_status": "enrolled",
             "services": {
-                "ssh": {"id": "ssh", "remote_port": 6000, "enabled": True},
+                "ssh": {
+                    "id": "ssh",
+                    "preset": "ssh",
+                    "protocol": "tcp",
+                    "remote_port": 6000,
+                    "enabled": True,
+                    "local_ip": "127.0.0.1",
+                    "local_port": 22,
+                    "ssh_user": "aella",
+                },
             },
         },
     },
@@ -623,7 +632,8 @@ data["clients"]["0303cedf99999999aabbccdd00112233"] = {
     "services": {
         "ssh": {
             "id": "ssh", "remote_port": 6005, "enabled": True,
-            "preset": "ssh", "ssh_user": "aella",
+            "preset": "ssh", "ssh_user": "aella", "protocol": "tcp",
+            "local_ip": "127.0.0.1", "local_port": 22,
         }
     },
 }

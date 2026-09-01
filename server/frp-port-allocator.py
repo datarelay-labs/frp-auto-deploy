@@ -99,6 +99,7 @@ def _load_lib_module(name, filename):
 
 CREG = _load_client_registry()
 FRONTEND = _load_lib_module('frp_frontend', 'frp_frontend.py')
+SCFG = _load_lib_module('frp_server_config', 'frp_server_config.py')
 
 
 def _load_enrollment_lifecycle():
@@ -763,6 +764,8 @@ class Allocator:
         return validate_registry_invariants(state, self.cfg)
 
     def save_registry(self, state):
+        if os.environ.get('FRP_ALLOCATOR_HOOK_REGISTRY_PERSIST_FAIL') == '1':
+            raise OSError('simulated registry persist failure')
         state = dict(state)
         state['schema_version'] = REGISTRY_SCHEMA_VERSION
         require_registry_v2(state)
@@ -1055,8 +1058,11 @@ class Allocator:
     def check_nonce(self, machine_id, nonce, now):
         """Return an error string if the nonce is unusable. Do not persist yet.
 
-        Persistence happens in commit_nonce() after a successful registry save
-        so a failed mutation does not burn a valid signed request.
+        Management enroll consumes the nonce via commit_nonce() immediately
+        after signature verification and *before* registry mutation (fail
+        closed). check_nonce() is for read-only validation; callers that
+        mutate must durably commit_nonce() first and must not revert it if
+        a later registry write fails — the client retries with a new nonce.
         """
         if not NONCE_RE.fullmatch(nonce or ''):
             return 'invalid nonce'
@@ -1068,7 +1074,11 @@ class Allocator:
         return None
 
     def commit_nonce(self, machine_id, nonce, now):
-        """Persist a nonce after the matching mutation has been committed."""
+        """Durably consume a nonce before the matching registry mutation.
+
+        Fail-closed ordering: once this returns success the nonce stays
+        consumed even if a later save_registry() fails. Do not revert.
+        """
         if not NONCE_RE.fullmatch(nonce or ''):
             return 'invalid nonce'
         data = self.expire_nonces(now)
@@ -1084,6 +1094,8 @@ class Allocator:
         while len(owned) >= MAX_NONCES_PER_CLIENT:
             old_key, _exp = owned.pop(0)
             nonces.pop(old_key, None)
+        if os.environ.get('FRP_ALLOCATOR_HOOK_NONCE_PERSIST_FAIL') == '1':
+            raise OSError('simulated nonce persist failure')
         nonces[key] = now + MGMT_NONCE_TTL
         self.save_nonces(data)
         return None
@@ -1096,8 +1108,9 @@ class Allocator:
         request stays non-replayable for its entire accepted timestamp window.
         Per-client count is capped; oldest entries are dropped first.
 
-        Callers that need check-then-commit around a registry mutation should
-        use check_nonce() + commit_nonce() instead.
+        Prefer commit_nonce() alone when the caller already validated the
+        nonce shape/window, or check_nonce() + commit_nonce() for an explicit
+        two-step. Management enroll commits before registry mutation.
         """
         error = self.check_nonce(machine_id, nonce, now)
         if error:
@@ -1179,7 +1192,9 @@ class Allocator:
             return str(exc), None, None
         if not ok:
             return 'invalid signature', None, None
-        nonce_error = self.check_nonce(machine_id, nonce, now)
+        # Consume nonce immediately after signature verify (before registry
+        # mutation). If a later persist fails, the nonce stays burned.
+        nonce_error = self.commit_nonce(machine_id, nonce, now)
         if nonce_error:
             return nonce_error, None, None
         return None, now, nonce
@@ -1268,13 +1283,13 @@ class Allocator:
             return 400, api_error(str(exc), cls)
 
         issued_mac = None
-        pending_nonce = None
         allocated = []
         response_mac_key = None
 
         try:
             with LOCK:
                 with self.registry_lock():
+                    now_iso = utc_now_iso()
                     if not identity_auth:
                         record, enroll_path = self.load_enrollment(enrollment_id)
                         if not record:
@@ -1285,14 +1300,23 @@ class Allocator:
                                 'enrollment code is already bound to another machine',
                                 'AUTH_FAILED',
                             )
+                        # Bind Enrollment Code to this machine before any registry
+                        # mutation. If registry persist fails later, Machine A may
+                        # retry; Machine B remains rejected. Do not unbind.
+                        # Bootstrap ticket completion stays AFTER successful
+                        # registry save so a failed mutation does not burn the
+                        # zero-touch ticket while enrollment remains bound.
+                        record['bound_machine_id'] = machine_id
+                        record['used_at'] = record.get('used_at') or now_iso
+                        record['last_used_at'] = now_iso
+                        self.save_enrollment(enroll_path, record)
 
                     state = self.load_registry()
                     clients = state.setdefault('clients', {})
                     client = clients.get(machine_id)
-                    now_iso = utc_now_iso()
 
                     if identity_auth:
-                        error, _now, pending_nonce = self.verify_mgmt_against_client(
+                        error, _now, _nonce = self.verify_mgmt_against_client(
                             client, machine_id, headers, body
                         )
                         if error:
@@ -1410,6 +1434,7 @@ class Allocator:
                             remote_port = self.allocate_port(used)
                             used.add(remote_port)
                         stored = {
+                            'id': sid,
                             'name': spec['name'],
                             'protocol': 'tcp',
                             'local_ip': spec['local_ip'],
@@ -1428,21 +1453,7 @@ class Allocator:
 
                     client['services'] = updated
                     self.save_registry(state)
-
-                    if pending_nonce:
-                        nonce_error = self.commit_nonce(
-                            machine_id, pending_nonce, int(time.time())
-                        )
-                        if nonce_error:
-                            return 403, api_error(
-                                nonce_error, classify_auth_error(nonce_error)
-                            )
-
-                    if record is not None and enroll_path is not None:
-                        record['bound_machine_id'] = machine_id
-                        record['used_at'] = record.get('used_at') or now_iso
-                        record['last_used_at'] = now_iso
-                        self.save_enrollment(enroll_path, record)
+                    if record is not None and not identity_auth:
                         self.complete_bootstrap_for_enrollment(
                             record.get('id') or enrollment_id, machine_id
                         )
@@ -1689,15 +1700,45 @@ def main():
     args = parser.parse_args()
 
     allocator = Allocator(args.config)
+    if SCFG is None:
+        raise SystemExit('ERROR: frp_server_config.py is unavailable; refusing to start with unvalidated config')
+    try:
+        SCFG.validate_server_config(allocator.cfg)
+    except ValueError as exc:
+        raise SystemExit('ERROR: server configuration is unsafe: %s' % exc) from exc
     try:
         allocator.load_registry()
     except RegistrySchemaError as exc:
         raise SystemExit(f'ERROR: {exc}') from exc
     allocator.cleanup_expired_enrollments()
+    plugin_srv = None
+    if allocator.cfg.get('data_plane_auth_strict', True) is not False:
+        plugin_mod = _load_lib_module('frp_plugin_server', 'frp_plugin_server.py')
+        if plugin_mod is None:
+            raise SystemExit('ERROR: frp_plugin_server.py is unavailable; refusing strict data-plane auth')
+        try:
+            phost, pport = plugin_mod.plugin_listen_from_cfg(allocator.cfg)
+            plugin_srv, _plugin_thread = plugin_mod.start_plugin_server(
+                allocator.load_registry,
+                allocator.cfg,
+                host=phost,
+                port=pport,
+            )
+            print(
+                'FRP data-plane authorizer listening on http://%s:%s/handler'
+                % (phost, pport),
+                flush=True,
+            )
+        except Exception as exc:
+            raise SystemExit('ERROR: failed to start data-plane authorizer: %s' % exc) from exc
     host = allocator.cfg.get('listen_host', '0.0.0.0')
     port = cfg_allocator_listen_port(allocator.cfg)
     if port is None:
         raise SystemExit('ERROR: allocator_listen_port is not configured')
+    # P3-AA: ThreadingHTTPServer still spawns a thread per accepted connection
+    # before _REQUEST_SLOTS. Application concurrency, body size, and socket
+    # timeouts remain bounded; a fully admission-controlled server is deferred
+    # hardening (compatibility risk) rather than a P1 blocker.
     context = allocator_ssl_context(allocator.cfg)
     server = ThreadingHTTPServer((host, port), make_handler(allocator))
     server.socket = context.wrap_socket(server.socket, server_side=True)

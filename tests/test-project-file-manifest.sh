@@ -38,6 +38,7 @@ if "server-project-files.manifest" not in (root / "scripts" / "build-bundles.py"
 
 required = {
     "usr/local/lib/frp-auto-deploy/frp_audit.py",
+    "usr/local/lib/frp-auto-deploy/frp_url.py",
     "usr/local/sbin/frp-enrollments",
     "usr/local/sbin/frp-enrollment-revoke",
     "usr/local/sbin/frp-enroll-bulk",

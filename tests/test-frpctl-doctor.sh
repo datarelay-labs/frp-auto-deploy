@@ -194,21 +194,47 @@ import json, sys
 from pathlib import Path
 Path(sys.argv[1]).write_text(json.dumps({
     "schema_version": 2,
-    "reserved": [6002, 6003],
+    "reserved": [],
     "clients": {
         "aabbccdd0011": {
             "hostname": "dp-fixture",
             "mgmt_status": "enrolled",
             "services": {
-                "ssh": {"id": "ssh", "remote_port": 6002, "enabled": True, "local_ip": "127.0.0.1", "local_port": 22},
-                "web": {"id": "web", "remote_port": 6003, "enabled": False, "local_ip": "127.0.0.1", "local_port": 80},
+                "ssh": {
+                    "id": "ssh",
+                    "preset": "ssh",
+                    "protocol": "tcp",
+                    "remote_port": 6002,
+                    "enabled": True,
+                    "local_ip": "127.0.0.1",
+                    "local_port": 22,
+                    "ssh_user": "aella",
+                },
+                "web": {
+                    "id": "web",
+                    "preset": "http",
+                    "protocol": "tcp",
+                    "remote_port": 6003,
+                    "enabled": False,
+                    "local_ip": "127.0.0.1",
+                    "local_port": 80,
+                },
             },
         },
         "revoked001122": {
             "hostname": "old-client",
             "mgmt_status": "revoked",
             "services": {
-                "ssh": {"id": "ssh", "remote_port": 6004, "enabled": True, "local_ip": "127.0.0.1", "local_port": 22},
+                "ssh": {
+                    "id": "ssh",
+                    "preset": "ssh",
+                    "protocol": "tcp",
+                    "remote_port": 6004,
+                    "enabled": True,
+                    "local_ip": "127.0.0.1",
+                    "local_port": 22,
+                    "ssh_user": "aella",
+                },
             },
         },
     },
@@ -480,7 +506,18 @@ data = json.loads(p.read_text())
 data['clients']['other'] = {
     'hostname': 'other',
     'mgmt_status': 'enrolled',
-    'services': {'ssh': {'id': 'ssh', 'remote_port': 6002, 'enabled': True, 'local_ip': '127.0.0.1', 'local_port': 22}},
+    'services': {
+        'ssh': {
+            'id': 'ssh',
+            'preset': 'ssh',
+            'protocol': 'tcp',
+            'remote_port': 6002,
+            'enabled': True,
+            'local_ip': '127.0.0.1',
+            'local_port': 22,
+            'ssh_user': 'aella',
+        },
+    },
 }
 p.write_text(json.dumps(data) + '\n')
 PY

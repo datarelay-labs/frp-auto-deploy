@@ -137,13 +137,21 @@ def server_health_summary(cfg, state):
     out = {}
     try:
         from frp_doctor import PASS, WARN, FAIL, validate_registry
-        status, _msg, _issues = validate_registry(state, cfg)
+        status, msg, issues = validate_registry(state, cfg)
         if status == PASS:
             out['registry'] = 'PASS'
         elif status == WARN:
             out['registry'] = 'WARN'
         else:
-            out['registry'] = 'FAIL'
+            detail = msg or ''
+            if issues:
+                detail = '%s: %s' % (detail, issues[0]) if detail else str(issues[0])
+            if 'corrupt' in detail.lower() or 'canonical' in detail.lower() or 'invalid' in detail.lower():
+                out['registry'] = 'CORRUPT'
+            else:
+                out['registry'] = 'FAIL'
+            if detail:
+                out['registry_detail'] = detail[:200]
     except Exception:
         out['registry'] = 'FAIL'
 

@@ -29,14 +29,32 @@ reg_path.write_text(json.dumps({
             'mgmt_status': 'enrolled',
             'mgmt_pubkey': 'KEEP',
             'services': {
-                'ssh': {'remote_port': 6001, 'preset': 'ssh', 'enabled': True},
+                'ssh': {
+                    'id': 'ssh',
+                    'protocol': 'tcp',
+                    'preset': 'ssh',
+                    'enabled': True,
+                    'local_ip': '127.0.0.1',
+                    'local_port': 22,
+                    'remote_port': 6001,
+                    'ssh_user': 'ubuntu',
+                },
             },
         },
         'bbbbbbbb22222222': {
             'hostname': 'busan-dp',
             'tags': {'customer': 'lotte', 'site': 'busan'},
             'services': {
-                'ssh': {'remote_port': 6002, 'preset': 'ssh', 'enabled': True},
+                'ssh': {
+                    'id': 'ssh',
+                    'protocol': 'tcp',
+                    'preset': 'ssh',
+                    'enabled': True,
+                    'local_ip': '127.0.0.1',
+                    'local_port': 22,
+                    'remote_port': 6002,
+                    'ssh_user': 'ubuntu',
+                },
             },
         },
         'cccccccc33333333': {

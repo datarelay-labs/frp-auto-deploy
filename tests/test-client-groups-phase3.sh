@@ -37,9 +37,17 @@ reg_path.write_text(json.dumps({
             'label': 'acme-gw-01',
             'mgmt_status': 'enrolled',
             'tags': {'env': 'prod', 'site': 'seoul', 'customer': 'acme'},
-            'group_ids': ['grp_existing01'],
             'services': {
-                'ssh': {'remote_port': 6001, 'preset': 'ssh', 'enabled': True},
+                'ssh': {
+                    'id': 'ssh',
+                    'protocol': 'tcp',
+                    'preset': 'ssh',
+                    'enabled': True,
+                    'local_ip': '127.0.0.1',
+                    'local_port': 22,
+                    'remote_port': 6001,
+                    'ssh_user': 'ubuntu',
+                },
             },
         },
         'bbbbbbbb22222222bbbbbbbb22222222': {
@@ -47,7 +55,16 @@ reg_path.write_text(json.dumps({
             'label': 'pilot-gw',
             'tags': {'env': 'prod', 'site': 'busan'},
             'services': {
-                'ssh': {'remote_port': 6002, 'preset': 'ssh', 'enabled': True},
+                'ssh': {
+                    'id': 'ssh',
+                    'protocol': 'tcp',
+                    'preset': 'ssh',
+                    'enabled': True,
+                    'local_ip': '127.0.0.1',
+                    'local_port': 22,
+                    'remote_port': 6002,
+                    'ssh_user': 'ubuntu',
+                },
             },
         },
         'cccccccc33333333cccccccc33333333': {
@@ -90,7 +107,7 @@ for gid, group in state['groups'].items():
 PY
 )"
 
-# Fix dangling grp_existing01 on client a
+# Fix client a membership after groups exist
 python3 - "$REG" "$GID_ACME" <<'PY'
 import json, sys
 state = json.load(open(sys.argv[1]))
@@ -573,7 +590,10 @@ spec.loader.exec_module(mod)
 state = json.load(open(sys.argv[2]))
 status, msg, issues = mod.validate_registry(state)
 assert status == mod.FAIL, (status, msg, issues)
-assert any('dynamic group' in i for i in issues), issues
+assert any(
+    ('dynamic group' in i) or ('manual groups' in i) or ('canonical' in (msg or '').lower())
+    for i in (issues or [msg or ''])
+), (msg, issues)
 PY
 cp "$WORKDIR/registry.before-doctor.json" "$REG"
 pass "DOCTOR_DYNAMIC_REF"

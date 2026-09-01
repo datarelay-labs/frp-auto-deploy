@@ -12,20 +12,7 @@ _FRP_INSTALL_CLIENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${_FRP_INSTALL_CLIENT_DIR}/lib/frp-client-common.sh"
 
 frp_valid_allocator_url() {
-  local url="${1:-}"
-  case "$url" in
-    http://?*)
-      return 1
-      ;;
-    https://?*) ;;
-    *) return 1 ;;
-  esac
-  if [[ "$url" == *$'\n'* || "$url" == *$'\r'* || "$url" == *$'\t'* || "$url" == *' '* ]]; then
-    return 1
-  fi
-  local rest="${url#*://}"
-  local hostport="${rest%%/*}"
-  [[ -n "$hostport" ]]
+  frp_validate_https_url "${1:-}"
 }
 
 frp_require_allocator_url() {
@@ -270,9 +257,22 @@ frp_client_existing_install_message() {
   echo >&2
   echo "Upgrade in place with:" >&2
   echo "  sudo frpctl update" >&2
-  echo >&2
-  echo "or, from the bootstrap bundle:" >&2
-  echo "  curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.1/dist/bootstrap-client.sh | sudo bash -s -- --upgrade" >&2
+  # Optional bootstrap URL: only when release identity resolves to a real ref.
+  # candidate → exact 40-char SHA; dev → main; stable → vX.Y.Z.
+  # Never hardcode a nonexistent stable tag for pre-release / candidate installs.
+  local bootstrap_ref=""
+  if bootstrap_ref="$(frp_release_git_ref 2>/dev/null)" && [[ -n "$bootstrap_ref" ]]; then
+    local channel
+    channel="$(frp_release_channel 2>/dev/null || true)"
+    if [[ "$channel" == "candidate" ]] && ! frp_is_exact_commit_sha "$bootstrap_ref"; then
+      bootstrap_ref=""
+    fi
+  fi
+  if [[ -n "$bootstrap_ref" ]]; then
+    echo >&2
+    echo "or, from the bootstrap bundle:" >&2
+    echo "  curl -fsSL https://raw.githubusercontent.com/${FRP_GITHUB_OWNER}/${FRP_GITHUB_REPO}/${bootstrap_ref}/dist/bootstrap-client.sh | sudo bash -s -- --upgrade" >&2
+  fi
   echo >&2
   echo "Use sudo frp-client to change published services." >&2
   echo "An Enrollment Code is only for first install or trust recovery." >&2
@@ -297,11 +297,21 @@ frp_client_main() {
     exit 1
   fi
 
-  if frp_client_has_existing_install; then
+  local recovering=0
+  # Allow zero-touch resume when only a recovery journal (and maybe identity) exists.
+  # Full installs (client-state.json) still refuse re-enrollment.
+  if [[ -f "$(frp_client_state_path)" ]]; then
     frp_client_existing_install_message
     return 1
   fi
-  if frp_client_has_partial_install; then
+  if frp_zero_touch_active && frp_recovery_journal_present; then
+    recovering=1
+  fi
+  if [[ "$recovering" -eq 0 ]] && frp_client_has_existing_install; then
+    frp_client_existing_install_message
+    return 1
+  fi
+  if [[ "$recovering" -eq 0 ]] && frp_client_has_partial_install; then
     echo "ERROR: a partial FRP client installation was found." >&2
     echo "Repair it with: sudo frpctl update" >&2
     echo "or uninstall locally and enroll again." >&2
@@ -312,7 +322,12 @@ frp_client_main() {
 
   frp_require_allocator_url
   if frp_zero_touch_active; then
-    frp_zero_touch_require_inputs || return 1
+    if [[ "$recovering" -eq 1 ]]; then
+      # Resume path: ticket already consumed; do not require a second bootstrap ticket.
+      :
+    else
+      frp_zero_touch_require_inputs || return 1
+    fi
   fi
   frp_bootstrap_allocator_ca "$ALLOCATOR_URL" || return 1
   frp_detect_architecture || exit 1
@@ -390,17 +405,46 @@ frp_client_main() {
     exit 1
   fi
 
+  local resume_rc=1
   if frp_zero_touch_active; then
     echo "Completing one-time setup ..."
-    if ! frp_redeem_bootstrap_ticket "$ALLOCATOR_URL" "$MACHINE_ID" "$HOSTNAME_VALUE" \
-      "$SERVICES_FILE" ENROLL_ID ENROLL_SECRET; then
+    set +e
+    frp_recovery_journal_try_resume "$SERVICES_FILE" "$MACHINE_ID"
+    resume_rc=$?
+    set -e
+    if [[ "$resume_rc" -eq 2 ]]; then
       return 1
     fi
-    FRP_ZERO_TOUCH_COMPLETE=1
-    FRP_SERVICES_JSON="$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1],encoding="utf-8"))))' "$SERVICES_FILE")"
-    export FRP_SERVICES_JSON
-    services_load_from_env
-    unset FRP_SERVICES_JSON
+    if [[ "$resume_rc" -eq 0 ]]; then
+      echo "Resuming incomplete zero-touch enrollment (same identity and ports; ticket not re-redeemed) ..."
+      FRP_ZERO_TOUCH_COMPLETE=1
+      FRP_SERVICES_JSON="$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1],encoding="utf-8"))))' "$SERVICES_FILE")"
+      export FRP_SERVICES_JSON
+      services_load_from_env
+      unset FRP_SERVICES_JSON
+      # Ticket was already consumed; drop it so it cannot be redeemed again by accident.
+      unset FRP_BOOTSTRAP_TICKET
+    else
+      if ! frp_zero_touch_require_inputs; then
+        return 1
+      fi
+      if ! frp_redeem_bootstrap_ticket "$ALLOCATOR_URL" "$MACHINE_ID" "$HOSTNAME_VALUE" \
+        "$SERVICES_FILE" ENROLL_ID ENROLL_SECRET; then
+        return 1
+      fi
+      FRP_ZERO_TOUCH_COMPLETE=1
+      FRP_SERVICES_JSON="$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1],encoding="utf-8"))))' "$SERVICES_FILE")"
+      export FRP_SERVICES_JSON
+      services_load_from_env
+      unset FRP_SERVICES_JSON
+      # Persist recovery journal before /enroll so a post-enroll crash can resume
+      # without a second bootstrap ticket. Never stores the raw bootstrap ticket.
+      if ! frp_recovery_journal_write "$ALLOCATOR_URL" "$MACHINE_ID" "$HOSTNAME_VALUE" \
+        "$ENROLL_ID" "$ENROLL_SECRET" "$SERVICES_FILE" "${FRP_ALLOCATOR_CA_SHA256:-}"; then
+        echo "ERROR: failed to write enroll recovery journal" >&2
+        return 1
+      fi
+    fi
   fi
 
   echo "Validating enrollment and requesting persistent public ports ..."
@@ -413,6 +457,12 @@ frp_client_main() {
   TOKEN_CIPHERTEXT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["token_ciphertext"])' "$ENROLL_META_FILE")"
   merge_allocated_services
   FRP_TOKEN="$(frp_decrypt_token "$TOKEN_CIPHERTEXT" "$ENROLL_SECRET")" || exit 1
+
+  # Crash-window simulation: after successful enroll, before durable client-state commit.
+  if ! frp_client_test_hook FAIL_AFTER_ENROLL; then
+    frp_emit_failure_class ENROLL_RECOVERY_PENDING
+    return 1
+  fi
 
   if [[ -z "${FRP_ARCH:-}" ]]; then
     frp_detect_architecture || exit 1
@@ -457,7 +507,7 @@ frp_client_main() {
   ACCESS_INFO="$(frp_client_path /etc/frp/access-info.txt)"
   mkdir -p "$(dirname "$FRPC_TOML")"
   echo "Validating configuration ..."
-  render_frpc_toml "$FRPC_TOML" "$FRP_SERVER" "$FRP_SERVER_PORT" "$FRP_TOKEN" "$HOST_ID" "$SERVICES_FILE" "${FRP_TRANSPORT:-tcp}"
+  render_frpc_toml "$FRPC_TOML" "$FRP_SERVER" "$FRP_SERVER_PORT" "$FRP_TOKEN" "$HOST_ID" "$SERVICES_FILE" "${FRP_TRANSPORT:-tcp}" "$MACHINE_ID" "$(frp_client_identity_key_path)"
   frp_client_verify_config "$FRPC_TOML" || exit 1
 
   if [[ "$(services_count)" != "0" && "${FRP_SKIP_SYSTEMD:-}" != "1" && -z "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
@@ -467,9 +517,10 @@ frp_client_main() {
       UNIT_SRC="${_FRP_INSTALL_CLIENT_DIR}/client/frpc.service"
     fi
     if [[ -n "$UNIT_SRC" ]]; then
-      install -m 0644 "$UNIT_SRC" /etc/systemd/system/frpc.service
+      frp_write_compatible_systemd_unit "$UNIT_SRC" /etc/systemd/system/frpc.service
     else
-      cat >/etc/systemd/system/frpc.service <<'EOF2'
+      _frpc_unit_tmp="$(mktemp)"
+      cat >"$_frpc_unit_tmp" <<'EOF2'
 [Unit]
 Description=FRP Client
 After=network-online.target
@@ -480,10 +531,14 @@ Type=simple
 ExecStart=/usr/local/bin/frpc -c /etc/frp/frpc.toml
 Restart=always
 RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
 EOF2
+      frp_write_compatible_systemd_unit "$_frpc_unit_tmp" /etc/systemd/system/frpc.service
+      rm -f "$_frpc_unit_tmp"
     fi
     echo "Starting FRP client ..."
     systemctl daemon-reload || {
@@ -514,9 +569,12 @@ EOF2
     if [[ "${FRP_SKIP_SYSTEMD:-}" != "1" && -z "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
       echo "Installing inactive systemd service for future services ..."
       if [[ -f "${_FRP_INSTALL_CLIENT_DIR}/client/frpc.service" ]]; then
-        install -m 0644 "${_FRP_INSTALL_CLIENT_DIR}/client/frpc.service" /etc/systemd/system/frpc.service
+        frp_write_compatible_systemd_unit \
+          "${_FRP_INSTALL_CLIENT_DIR}/client/frpc.service" \
+          /etc/systemd/system/frpc.service
       else
-        cat >/etc/systemd/system/frpc.service <<'EOF2'
+        _frpc_unit_tmp="$(mktemp)"
+        cat >"$_frpc_unit_tmp" <<'EOF2'
 [Unit]
 Description=FRP Client
 After=network-online.target
@@ -527,10 +585,14 @@ Type=simple
 ExecStart=/usr/local/bin/frpc -c /etc/frp/frpc.toml
 Restart=always
 RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
 EOF2
+        frp_write_compatible_systemd_unit "$_frpc_unit_tmp" /etc/systemd/system/frpc.service
+        rm -f "$_frpc_unit_tmp"
       fi
       systemctl daemon-reload || {
         frp_emit_failure_class SYSTEMD_RELOAD_FAILED
@@ -548,6 +610,8 @@ EOF2
     echo "ERROR: client-state.json must not contain secrets" >&2
     exit 1
   }
+  # Durable normal state committed; recovery journal is no longer needed.
+  frp_recovery_journal_delete || true
 
   frp_client_install_management_files "${_FRP_INSTALL_CLIENT_DIR}"
 

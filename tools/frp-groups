@@ -59,6 +59,14 @@ def require_v2(state):
         raise SystemExit('ERROR: registry groups must be an object')
 
 
+def require_valid_registry(state, cfg=None):
+    require_v2(state)
+    try:
+        CREG.validate_registry_or_raise(state, cfg)
+    except ValueError as exc:
+        raise SystemExit('ERROR: %s' % exc)
+
+
 def load_state():
     cfg = json.loads(Path(ROOT + '/etc/frp-auto-deploy/config.json').read_text())
     reg = Path(cfg['registry_file'])
@@ -69,7 +77,7 @@ def load_state():
         'clients': {},
         'groups': {},
     }
-    require_v2(state)
+    require_valid_registry(state, cfg)
     return cfg, state
 
 

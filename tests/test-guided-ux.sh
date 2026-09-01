@@ -184,11 +184,11 @@ cur = {
   "schema_version": 1,
   "frp_server": "203.0.113.10",
   "services": {
-    "ssh": {"id":"ssh","local_ip":"127.0.0.1","local_port":22,"remote_port":6002,"enabled":True,"preset":"ssh"}
+    "ssh": {"id":"ssh","local_ip":"127.0.0.1","local_port":22,"remote_port":6002,"enabled":True,"preset":"ssh","protocol":"tcp","ssh_user":"aella"}
   }
 }
 cand = json.loads(json.dumps(cur))
-cand["services"]["grafana"] = {"id":"grafana","local_ip":"127.0.0.1","local_port":3000,"enabled":True,"preset":"custom"}
+cand["services"]["grafana"] = {"id":"grafana","local_ip":"127.0.0.1","local_port":3000,"enabled":True,"preset":"custom","protocol":"tcp"}
 (wd/"cur.json").write_text(json.dumps(cur)+"\n")
 (wd/"cand.json").write_text(json.dumps(cand)+"\n")
 PY

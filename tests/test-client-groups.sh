@@ -38,7 +38,16 @@ reg_path.write_text(json.dumps({
             'mgmt_fingerprint': 'FP',
             'tags': {'env': 'prod'},
             'services': {
-                'ssh': {'remote_port': 6001, 'preset': 'ssh', 'enabled': True, 'ssh_user': 'ubuntu'},
+                'ssh': {
+                    'id': 'ssh',
+                    'protocol': 'tcp',
+                    'preset': 'ssh',
+                    'enabled': True,
+                    'local_ip': '127.0.0.1',
+                    'local_port': 22,
+                    'remote_port': 6001,
+                    'ssh_user': 'ubuntu',
+                },
             },
         },
         'bbbbbbbb22222222bbbbbbbb22222222': {
@@ -46,7 +55,16 @@ reg_path.write_text(json.dumps({
             'label': 'pilot-gw',
             'mgmt_status': 'enrolled',
             'services': {
-                'ssh': {'remote_port': 6002, 'preset': 'ssh', 'enabled': True},
+                'ssh': {
+                    'id': 'ssh',
+                    'protocol': 'tcp',
+                    'preset': 'ssh',
+                    'enabled': True,
+                    'local_ip': '127.0.0.1',
+                    'local_port': 22,
+                    'remote_port': 6002,
+                    'ssh_user': 'ubuntu',
+                },
             },
         },
         'cccccccc33333333cccccccc33333333': {

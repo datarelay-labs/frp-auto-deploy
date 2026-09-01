@@ -92,11 +92,14 @@ cat >"$SERVER/var/lib/frp-auto-deploy/registry.json" <<'EOF'
       "tags": {"env": "prod"},
       "services": {
         "ssh": {
+          "id": "ssh",
+          "preset": "ssh",
           "remote_port": 6000,
           "enabled": true,
           "protocol": "tcp",
           "local_ip": "127.0.0.1",
-          "local_port": 22
+          "local_port": 22,
+          "ssh_user": "ubuntu"
         }
       }
     },
@@ -107,11 +110,14 @@ cat >"$SERVER/var/lib/frp-auto-deploy/registry.json" <<'EOF'
       "last_mgmt_seen_at": "2020-01-01T00:00:00Z",
       "services": {
         "ssh": {
+          "id": "ssh",
+          "preset": "ssh",
           "remote_port": 6001,
           "enabled": true,
           "protocol": "tcp",
           "local_ip": "127.0.0.1",
-          "local_port": 22
+          "local_port": 22,
+          "ssh_user": "ubuntu"
         }
       }
     },
@@ -121,6 +127,8 @@ cat >"$SERVER/var/lib/frp-auto-deploy/registry.json" <<'EOF'
       "mgmt_status": "enrolled",
       "services": {
         "web": {
+          "id": "web",
+          "preset": "http",
           "remote_port": 6002,
           "enabled": false,
           "protocol": "tcp",
@@ -138,11 +146,14 @@ cat >"$SERVER/var/lib/frp-auto-deploy/registry.json" <<'EOF'
       "build_reported_at": "2099-01-01T00:00:00Z",
       "services": {
         "ssh": {
+          "id": "ssh",
+          "preset": "ssh",
           "remote_port": 6003,
           "enabled": true,
           "protocol": "tcp",
           "local_ip": "127.0.0.1",
-          "local_port": 22
+          "local_port": 22,
+          "ssh_user": "ubuntu"
         }
       }
     },
@@ -153,16 +164,19 @@ cat >"$SERVER/var/lib/frp-auto-deploy/registry.json" <<'EOF'
       "last_mgmt_seen_at": "2020-01-01T00:00:00Z",
       "services": {
         "ssh": {
+          "id": "ssh",
+          "preset": "ssh",
           "remote_port": 6004,
           "enabled": true,
           "protocol": "tcp",
           "local_ip": "127.0.0.1",
-          "local_port": 22
+          "local_port": 22,
+          "ssh_user": "ubuntu"
         }
       }
     }
   },
-  "reserved": [6004]
+  "reserved": []
 }
 EOF
 chmod 600 "$SERVER/var/lib/frp-auto-deploy/registry.json"

@@ -127,6 +127,40 @@ if grep -q '^ProtectSystem=' "$WORKDIR/frontend-219.service"; then
 fi
 grep -q '^RuntimeDirectory=frp-auto-deploy' "$WORKDIR/frontend-219.service" \
   || fail "frontend unit lost RuntimeDirectory on old systemd"
+export FRP_TEST_SYSTEMD_VERSION=219
+frp_write_compatible_systemd_unit \
+  "$ROOT/server/frps.service" \
+  "$WORKDIR/frps-219.service"
+if grep -q '^NoNewPrivileges=' "$WORKDIR/frps-219.service"; then
+  fail "old systemd frps unit still has NoNewPrivileges"
+fi
+grep -q '^PrivateTmp=' "$WORKDIR/frps-219.service" || fail "frps PrivateTmp should remain"
+frp_write_compatible_systemd_unit \
+  "$ROOT/client/frpc.service" \
+  "$WORKDIR/frpc-219.service"
+if grep -q '^NoNewPrivileges=' "$WORKDIR/frpc-219.service"; then
+  fail "old systemd frpc unit still has NoNewPrivileges"
+fi
+grep -q '^PrivateTmp=' "$WORKDIR/frpc-219.service" || fail "frpc PrivateTmp should remain"
+unset FRP_TEST_SYSTEMD_VERSION
+export FRP_TEST_SYSTEMD_VERSION=252
+frp_write_compatible_systemd_unit \
+  "$ROOT/server/frps.service" \
+  "$WORKDIR/frps-252.service"
+grep -q '^NoNewPrivileges=true' "$WORKDIR/frps-252.service" || fail "modern frps lost NoNewPrivileges"
+grep -q '^PrivateTmp=true' "$WORKDIR/frps-252.service" || fail "modern frps lost PrivateTmp"
+# ProtectSystem=strict is intentionally not set on frps/frpc (write-path risk).
+if grep -q '^ProtectSystem=' "$WORKDIR/frps-252.service"; then
+  fail "frps unexpectedly gained ProtectSystem"
+fi
+frp_write_compatible_systemd_unit \
+  "$ROOT/client/frpc.service" \
+  "$WORKDIR/frpc-252.service"
+grep -q '^NoNewPrivileges=true' "$WORKDIR/frpc-252.service" || fail "modern frpc lost NoNewPrivileges"
+unset FRP_TEST_SYSTEMD_VERSION
+pass "SYSTEMD_FRPS_FRPC_HARDENING_COMPAT"
+echo "P3_AB_STATUS=HARDENING_PARITY_IMPROVED"
+
 unset FRP_TEST_SYSTEMD_VERSION
 pass "SYSTEMD_OLD_UNIT_COMPAT"
 

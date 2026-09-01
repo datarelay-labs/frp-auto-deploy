@@ -96,10 +96,19 @@ frpctl (Windows)
   support-bundle [--anonymize]
   uninstall [--yes]
   status
+  update | update frp | update project | project-update
 
 frpcli is an alias for frpctl.
 '@ | Write-Host
         exit 0
+    }
+    'update' {
+        & (Join-Path $PSScriptRoot 'FrpClient.ps1') @Args
+        exit $LASTEXITCODE
+    }
+    'project-update' {
+        & (Join-Path $PSScriptRoot 'FrpClient.ps1') @Args
+        exit $LASTEXITCODE
     }
     default {
         & (Join-Path $PSScriptRoot 'FrpClient.ps1') @Args

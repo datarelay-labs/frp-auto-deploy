@@ -24,10 +24,12 @@ printf '%s\n' "${PY_INVENTORY[@]}" | grep -qx 'lib/frp_fleet.py' \
   || { echo "FAIL missing lib/frp_fleet.py in compile inventory" >&2; exit 1; }
 printf '%s\n' "${PY_INVENTORY[@]}" | grep -qx 'lib/frp_server_lifecycle.py' \
   || { echo "FAIL missing lib/frp_server_lifecycle.py in compile inventory" >&2; exit 1; }
+printf '%s\n' "${PY_INVENTORY[@]}" | grep -qx 'lib/frp_server_config.py' \
+  || { echo "FAIL missing lib/frp_server_config.py in compile inventory" >&2; exit 1; }
 printf '%s\n' "${PY_INVENTORY[@]}" | grep -qx 'tools/frp-enrollment-purge' \
   || { echo "FAIL missing tools/frp-enrollment-purge in compile inventory" >&2; exit 1; }
 python3 -m py_compile "${PY_INVENTORY[@]}"
-python3 -m py_compile tests/test-allocator.py tests/test-enrollment-security.py tests/test-mgmt-identity.py tests/test-pki-https.py tests/test-bootstrap-ticket.py tests/test-frontend-proxy.py tests/test-client-registry.py tests/test-clock-skew-auth.py tests/test-deployment-mode-fail-closed.py tests/test-audit-log.py tests/test-audit-query.py
+python3 -m py_compile tests/test-allocator.py tests/test-enrollment-security.py tests/test-mgmt-identity.py tests/test-pki-https.py tests/test-bootstrap-ticket.py tests/test-frontend-proxy.py tests/test-client-registry.py tests/test-clock-skew-auth.py tests/test-deployment-mode-fail-closed.py tests/test-audit-log.py tests/test-audit-query.py tests/test-server-config-validation.py tests/test-canonical-registry-validation.py tests/test-pki-key-cert-pairs.py tests/test-config-setter-control-lock.py tests/test-restore-https-health.py tests/test-mgmt-nonce-ordering.py tests/test-enroll-bind-ordering.py
 
 echo "=== tests ==="
 ./tests/test-server-migration.sh
@@ -52,6 +54,7 @@ python3 tests/test-mgmt-identity.py
 ./tests/test-show-enrollments.sh
 ./tests/test-enrollment-retention.sh
 ./tests/test-zero-touch-retention-propagation.sh
+./tests/test-bulk-retention-propagation.sh
 ./tests/test-purging-tombstone-reaper.sh
 ./tests/test-cli-hardening.sh
 ./tests/test-enroll-bulk.sh
@@ -62,7 +65,10 @@ python3 tests/test-mgmt-identity.py
 ./tests/test-client-groups.sh
 ./tests/test-client-groups-phase3.sh
 python3 tests/test-client-registry.py
+python3 tests/test-canonical-registry-validation.py
 python3 tests/test-deployment-mode-fail-closed.py
+python3 tests/test-mgmt-nonce-ordering.py
+python3 tests/test-enroll-bind-ordering.py
 ./tests/test-frp-client.sh
 ./tests/test-lifecycle.sh
 ./tests/test-guided-ux.sh
@@ -73,6 +79,7 @@ bash ./tests/test-installed-server-artifact.sh
 bash ./tests/test-bundle-source-leakage.sh
 ./tests/test-legacy-client-secure-bridge.sh
 ./tests/test-install-lifecycle.sh
+./tests/test-client-uninstall-pending-marker.sh
 ./tests/test-frpctl.sh
 ./tests/test-client-lifecycle-diagnostics.sh
 ./tests/test-client-lifecycle-production-paths.sh
@@ -86,15 +93,23 @@ bash ./tests/test-bundle-source-leakage.sh
 ./tests/test-ca-bootstrap.sh
 ./tests/test-pki-https.py
 python3 tests/test-frontend-proxy.py
+python3 tests/test-server-config-validation.py
+python3 tests/test-pki-key-cert-pairs.py
+python3 tests/test-config-setter-control-lock.py
 ./tests/test-distro-matrix.sh
 ./tests/test-frp-update.sh
 ./tests/test-server-project-update.sh
 ./tests/test-project-file-manifest.sh
+./tests/test-server-uninstall-manifest-parity.sh
+./tests/test-client-uninstall-manifest-parity.sh
+python3 tests/test-allocator-url-validation.py
 ./tests/test-real-bundle-project-update.sh
 ./tests/test-frp-server-status.sh
 ./tests/test-release-docs.sh
+./tests/test-release-service-audit.sh
 ./tests/test-probe-tcp-injection.sh
 ./tests/test-candidate-release-channel.sh
+./tests/test-candidate-operator-guidance.sh
 ./tests/test-immutable-release-channel.sh
 ./tests/test-client-installer-url-migration.sh
 ./tests/test-install-txn-rollback.sh
@@ -102,6 +117,7 @@ python3 tests/test-audit-log.py
 python3 tests/test-audit-query.py
 ./tests/test-frp-compatibility.sh
 ./tests/test-backup-restore.sh
+python3 tests/test-restore-https-health.py
 
 echo "=== secret scan ==="
 ./scripts/secret-scan.sh

@@ -34,7 +34,9 @@ files=[
  'lib/frp_fleet.py',
  'lib/frp_server_lifecycle.py',
  'lib/frp_project_files.py',
+ 'lib/frp_url.py',
  'lib/frp_control_locks.py',
+ 'lib/frp_server_config.py',
  'lib/frp_enrollment_lifecycle.py',
  'lib/frp_enroll_challenge.py',
  'lib/frp_clock_sync.py',
@@ -94,11 +96,14 @@ client_files=[
  'lib/frp-common.sh',
  'lib/frp-client-common.sh',
  'lib/frp_mgmt_auth.py',
+ 'lib/frp_data_plane_auth.py',
  'lib/frp_clock_sync.py',
  'lib/frp-doctor-common.sh',
  'lib/frp_doctor.py',
  'lib/frp_ctl_grammar.py',
  'lib/frp_ctl_repl.py',
+ 'lib/frp_project_files.py',
+ 'lib/client-project-files.manifest',
  'lib/frp-client-lifecycle.sh',
  'lib/frp_client_lifecycle.py',
  'uninstall-client.sh',
@@ -163,7 +168,7 @@ ps_lines.extend([
 ])
 (dist / 'bootstrap-client.ps1').write_text('\n'.join(ps_lines) + '\n', encoding='utf-8')
 
-for src,dst in [('uninstall-client.sh','uninstall-client.sh'),('uninstall-server.sh','uninstall-server.sh')]:
-    (dist/dst).write_bytes((root/src).read_bytes())
-    (dist/dst).chmod(0o755)
+for src, dst in [('uninstall-client.sh', 'uninstall-client.sh'), ('uninstall-server.sh', 'uninstall-server.sh')]:
+    (dist / dst).write_bytes((root / src).read_bytes())
+    (dist / dst).chmod(0o755)
 print('Built dist/bootstrap-server.sh, bootstrap-client.sh, and bootstrap-client.ps1')

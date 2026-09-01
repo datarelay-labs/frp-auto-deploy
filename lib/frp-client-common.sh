@@ -84,18 +84,214 @@ frp_allocator_ca_path() {
   frp_client_path /etc/frp-auto-deploy/allocator-ca.crt
 }
 
-frp_valid_https_allocator_url() {
-  local url="${1:-}"
-  case "$url" in
-    https://?*) ;;
-    *) return 1 ;;
-  esac
-  if [[ "$url" == *$'\n'* || "$url" == *$'\r'* || "$url" == *$'\t'* || "$url" == *' '* ]]; then
+# Prefer var/lib so /etc/frp stays for runtime config/state; test roots via frp_client_path.
+frp_client_recovery_journal_path() {
+  frp_client_path /var/lib/frp-auto-deploy/client-enroll-recovery.json
+}
+
+FRP_RECOVERY_JOURNAL_SCHEMA=1
+
+frp_recovery_journal_write() {
+  local allocator_url="$1" machine_id="$2" hostname_value="$3"
+  local enroll_id="$4" enroll_secret="$5" services_file="$6"
+  local ca_fp="${7:-${FRP_ALLOCATOR_CA_SHA256:-}}"
+  local dest dir
+  dest="$(frp_client_recovery_journal_path)"
+  frp_require_safe_write_path "$dest" || return 1
+  dir="$(dirname "$dest")"
+  mkdir -p "$dir"
+  chmod 700 "$dir" 2>/dev/null || true
+  if [[ ${EUID} -eq 0 ]]; then
+    chown root:root "$dir" 2>/dev/null || true
+  fi
+  ALLOCATOR_URL="$allocator_url" MACHINE_ID="$machine_id" HOSTNAME_VALUE="$hostname_value" \
+    ENROLL_ID="$enroll_id" ENROLL_SECRET="$enroll_secret" CA_FP="$ca_fp" \
+    SCHEMA="$FRP_RECOVERY_JOURNAL_SCHEMA" \
+    IDENTITY_KEY="$(frp_client_identity_key_path)" \
+    python3 - "$dest" "$services_file" <<'PY'
+import json, os, sys, tempfile
+from pathlib import Path
+dest = Path(sys.argv[1])
+services = json.loads(Path(sys.argv[2]).read_text(encoding='utf-8'))
+if not isinstance(services, (list, dict)):
+    raise SystemExit('ERROR: recovery journal services must be a list or map')
+payload = {
+    'schema_version': int(os.environ['SCHEMA']),
+    'allocator_url': os.environ.get('ALLOCATOR_URL', ''),
+    'machine_id': os.environ.get('MACHINE_ID', ''),
+    'hostname': os.environ.get('HOSTNAME_VALUE', ''),
+    'enrollment_id': os.environ.get('ENROLL_ID', ''),
+    'enrollment_secret': os.environ.get('ENROLL_SECRET', ''),
+    'services': services,
+    'ca_sha256': (os.environ.get('CA_FP') or '').strip().lower(),
+    'identity_key_ref': os.environ.get('IDENTITY_KEY', ''),
+}
+for key in ('allocator_url', 'machine_id', 'enrollment_id', 'enrollment_secret'):
+    if not str(payload.get(key) or '').strip():
+        raise SystemExit('ERROR: recovery journal missing required field: %s' % key)
+# Never persist bootstrap tickets.
+for bad in ('bootstrap_ticket', 'ticket', 'FRP_BOOTSTRAP_TICKET'):
+    payload.pop(bad, None)
+dest.parent.mkdir(parents=True, exist_ok=True)
+if dest.is_symlink() or (dest.exists() and dest.is_symlink()):
+    raise SystemExit('ERROR: refusing to write recovery journal through a symlink')
+fd, tmp = tempfile.mkstemp(prefix=dest.name + '.', suffix='.tmp', dir=str(dest.parent))
+try:
+    with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+        json.dump(payload, fh, indent=2, sort_keys=True)
+        fh.write('\n')
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.chmod(tmp, 0o600)
+    if os.geteuid() == 0:
+        try:
+            os.chown(tmp, 0, 0)
+        except OSError:
+            pass
+    os.replace(tmp, dest)
+    if os.geteuid() == 0:
+        try:
+            os.chown(dest, 0, 0)
+        except OSError:
+            pass
+    os.chmod(dest, 0o600)
+except Exception:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise
+PY
+}
+
+frp_recovery_journal_load() {
+  # Prints: OK\tallocator_url\tmachine_id\thostname\tenroll_id\tenroll_secret\tca_sha256
+  # Writes services JSON to $1 (path). Fail-closed on corrupt/malformed/symlink.
+  local services_out="$1"
+  local dest
+  dest="$(frp_client_recovery_journal_path)"
+  python3 - "$dest" "$services_out" "$FRP_RECOVERY_JOURNAL_SCHEMA" <<'PY'
+import json, os, sys
+from pathlib import Path
+dest = Path(sys.argv[1])
+services_out = Path(sys.argv[2])
+want_schema = int(sys.argv[3])
+if dest.is_symlink():
+    print('ERR\tRECOVERY_JOURNAL_INVALID\trecovery journal must not be a symlink')
+    raise SystemExit(1)
+if not dest.is_file():
+    print('ERR\tRECOVERY_JOURNAL_MISSING\trecovery journal is missing')
+    raise SystemExit(1)
+try:
+    mode = dest.stat().st_mode & 0o777
+except OSError:
+    print('ERR\tRECOVERY_JOURNAL_INVALID\tcannot stat recovery journal')
+    raise SystemExit(1)
+# Fail closed on group/other-readable journals (except under test roots where umask may vary).
+test_root = os.environ.get('FRP_CLIENT_TEST_ROOT') or ''
+if not test_root and (mode & 0o077):
+    print('ERR\tRECOVERY_JOURNAL_INVALID\trecovery journal permissions are too open')
+    raise SystemExit(1)
+try:
+    data = json.loads(dest.read_text(encoding='utf-8'))
+except Exception:
+    print('ERR\tRECOVERY_JOURNAL_INVALID\trecovery journal is not valid JSON')
+    raise SystemExit(1)
+if not isinstance(data, dict):
+    print('ERR\tRECOVERY_JOURNAL_INVALID\trecovery journal is malformed')
+    raise SystemExit(1)
+if data.get('schema_version') != want_schema:
+    print('ERR\tRECOVERY_JOURNAL_INVALID\tunsupported recovery journal schema')
+    raise SystemExit(1)
+# Refuse journals that smuggle a bootstrap ticket.
+for bad in ('bootstrap_ticket', 'ticket', 'FRP_BOOTSTRAP_TICKET'):
+    if data.get(bad):
+        print('ERR\tRECOVERY_JOURNAL_INVALID\trecovery journal must not contain a bootstrap ticket')
+        raise SystemExit(1)
+required = ('allocator_url', 'machine_id', 'enrollment_id', 'enrollment_secret', 'services')
+for key in required:
+    if key not in data or data.get(key) in (None, ''):
+        print('ERR\tRECOVERY_JOURNAL_INVALID\trecovery journal missing %s' % key)
+        raise SystemExit(1)
+services = data['services']
+if not isinstance(services, (list, dict)):
+    print('ERR\tRECOVERY_JOURNAL_INVALID\trecovery journal services are invalid')
+    raise SystemExit(1)
+services_out.write_text(json.dumps(services, indent=2) + '\n', encoding='utf-8')
+os.chmod(services_out, 0o600)
+def esc(v):
+    return str(v or '').replace('\t', ' ').replace('\n', ' ')
+print('OK\t%s\t%s\t%s\t%s\t%s\t%s' % (
+    esc(data.get('allocator_url')),
+    esc(data.get('machine_id')),
+    esc(data.get('hostname')),
+    esc(data.get('enrollment_id')),
+    esc(data.get('enrollment_secret')),
+    esc(data.get('ca_sha256')),
+))
+PY
+}
+
+frp_recovery_journal_delete() {
+  local dest
+  dest="$(frp_client_recovery_journal_path)"
+  if [[ -L "$dest" ]]; then
+    echo "ERROR: refusing to delete recovery journal symlink" >&2
     return 1
   fi
-  local rest="${url#https://}"
-  local hostport="${rest%%/*}"
-  [[ -n "$hostport" ]]
+  rm -f "$dest"
+}
+
+frp_recovery_journal_present() {
+  local dest
+  dest="$(frp_client_recovery_journal_path)"
+  [[ -e "$dest" || -L "$dest" ]]
+}
+
+frp_recovery_journal_try_resume() {
+  # On success sets ENROLL_ID, ENROLL_SECRET, optionally CA; writes services to $1.
+  # Returns 0 = resume, 1 = no journal, 2 = corrupt (fail closed).
+  local services_file="$1" expect_machine_id="$2"
+  local dest parsed error_class error_msg loaded_machine
+  dest="$(frp_client_recovery_journal_path)"
+  if [[ ! -e "$dest" && ! -L "$dest" ]]; then
+    return 1
+  fi
+  if ! parsed="$(frp_recovery_journal_load "$services_file")"; then
+    echo "ERROR: enroll recovery journal is unusable; refuse to continue." >&2
+    frp_emit_failure_class RECOVERY_JOURNAL_INVALID
+    return 2
+  fi
+  if [[ "$parsed" != OK$'\t'* ]]; then
+    error_class="$(printf '%s' "$parsed" | awk -F'\t' 'NR==1{print $2}')"
+    error_msg="$(printf '%s' "$parsed" | awk -F'\t' 'NR==1{print $3}')"
+    echo "ERROR: ${error_msg:-enroll recovery journal is invalid}" >&2
+    frp_emit_failure_class "${error_class:-RECOVERY_JOURNAL_INVALID}"
+    return 2
+  fi
+  loaded_machine="$(printf '%s' "$parsed" | awk -F'\t' 'NR==1{print $3}')"
+  if [[ -n "$expect_machine_id" && "$loaded_machine" != "$expect_machine_id" ]]; then
+    echo "ERROR: enroll recovery journal is for a different machine; refuse to continue." >&2
+    frp_emit_failure_class RECOVERY_JOURNAL_INVALID
+    return 2
+  fi
+  ENROLL_ID="$(printf '%s' "$parsed" | awk -F'\t' 'NR==1{print $5}')"
+  ENROLL_SECRET="$(printf '%s' "$parsed" | awk -F'\t' 'NR==1{print $6}')"
+  local journal_ca
+  journal_ca="$(printf '%s' "$parsed" | awk -F'\t' 'NR==1{print $7}')"
+  if [[ -n "$journal_ca" && -z "${FRP_ALLOCATOR_CA_SHA256:-}" ]]; then
+    FRP_ALLOCATOR_CA_SHA256="$journal_ca"
+  fi
+  if [[ -z "$ENROLL_ID" || -z "$ENROLL_SECRET" ]]; then
+    echo "ERROR: enroll recovery journal is missing enrollment credentials." >&2
+    frp_emit_failure_class RECOVERY_JOURNAL_INVALID
+    return 2
+  fi
+  return 0
+}
+
+frp_valid_https_allocator_url() {
+  frp_validate_https_url "${1:-}"
 }
 
 frp_allocator_origin_url() {
@@ -1871,6 +2067,8 @@ PY
 render_frpc_toml() {
   local dest="$1" server="$2" server_port="$3" token="$4" host_id="$5" services_json_file="$6"
   local transport="${7:-}"
+  local machine_id="${8:-}"
+  local identity_key="${9:-}"
   local ca_file=""
   if [[ -z "$transport" ]]; then
     transport=tcp
@@ -1890,10 +2088,10 @@ render_frpc_toml() {
       return 1
     fi
   fi
-  python3 - "$dest" "$server" "$server_port" "$token" "$host_id" "$services_json_file" "$transport" "$ca_file" <<'PY'
-import json, sys
+  python3 - "$dest" "$server" "$server_port" "$token" "$host_id" "$services_json_file" "$transport" "$ca_file" "$machine_id" "$identity_key" "${_FRP_CLIENT_COMMON_DIR}/.." <<'PY'
+import importlib.util, json, os, sys
 from pathlib import Path
-dest, server, server_port, token, host_id, svc_path, transport, ca_file = sys.argv[1:9]
+dest, server, server_port, token, host_id, svc_path, transport, ca_file, machine_id, identity_key, root_dir = sys.argv[1:12]
 raw = json.loads(Path(svc_path).read_text(encoding='utf-8'))
 if isinstance(raw, dict) and 'services' in raw:
     services = []
@@ -1917,6 +2115,20 @@ if transport == 'wss':
         'transport.protocol = "wss"',
         f'transport.tls.trustedCaFile = "{ca_file}"',
     ])
+proof_lines = []
+if machine_id and identity_key and Path(identity_key).is_file():
+    lib = Path(root_dir) / 'lib' / 'frp_data_plane_auth.py'
+    if not lib.is_file():
+        lib = Path('/usr/local/lib/frp-auto-deploy/frp_data_plane_auth.py')
+    if lib.is_file():
+        spec = importlib.util.spec_from_file_location('frp_data_plane_auth', str(lib))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        proof = mod.sign_proof(identity_key, machine_id)
+        proof_lines = mod.frpc_global_metadata_lines(machine_id, proof)
+if proof_lines:
+    lines.append('')
+    lines.extend(proof_lines)
 for item in services:
     if item.get('enabled', True) is False:
         continue
@@ -1929,6 +2141,13 @@ for item in services:
         f'localPort = {int(item["local_port"])}',
         f'remotePort = {int(item["remote_port"])}',
     ])
+    if proof_lines:
+        sid = str(item.get('id') or '').strip().lower()
+        if sid:
+            try:
+                lines.extend(mod.frpc_proxy_metadata_lines(sid))
+            except Exception:
+                lines.append(f'metadatas.frp_ad_service_id = "{sid}"')
 text = '\n'.join(lines) + '\n'
 path = Path(dest)
 path.parent.mkdir(parents=True, exist_ok=True)
@@ -3087,7 +3306,7 @@ frp_regenerate_access_from_state() {
 }
 
 frp_regenerate_toml_from_state() {
-  local state token server port host_id enabled_list
+  local state token server port host_id enabled_list machine_id
   state="$(frp_client_state_path)"
   [[ -f "$state" ]] || return 1
   frp_load_client_state "$state" || return 1
@@ -3096,10 +3315,11 @@ frp_regenerate_toml_from_state() {
   server="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["frp_server"])' "$state")"
   port="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["frp_server_port"])' "$state")"
   host_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["host_id"])' "$state")"
+  machine_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8")).get("machine_id",""))' "$state")"
   transport="$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1],encoding="utf-8")).get("frp_transport") or "tcp"))' "$state")"
   enabled_list="$(mktemp)"
   frp_enabled_services_list "$state" >"$enabled_list"
-  if ! render_frpc_toml "$(frp_client_toml_path)" "$server" "$port" "$token" "$host_id" "$enabled_list" "$transport"; then
+  if ! render_frpc_toml "$(frp_client_toml_path)" "$server" "$port" "$token" "$host_id" "$enabled_list" "$transport" "$machine_id" "$(frp_client_identity_key_path)"; then
     rm -f "$enabled_list"
     return 1
   fi
@@ -3412,6 +3632,16 @@ frp_client_install_management_files() {
   install -m 0644 "${source}/lib/frp_doctor.py" "${libdir}/frp_doctor.py"
   install -m 0644 "${source}/lib/frp_ctl_grammar.py" "${libdir}/frp_ctl_grammar.py"
   install -m 0644 "${source}/lib/frp_ctl_repl.py" "${libdir}/frp_ctl_repl.py"
+  [[ -f "${source}/lib/frp_project_files.py" ]] || {
+    echo "ERROR: missing ${source}/lib/frp_project_files.py" >&2
+    return 1
+  }
+  [[ -f "${source}/lib/client-project-files.manifest" ]] || {
+    echo "ERROR: missing ${source}/lib/client-project-files.manifest" >&2
+    return 1
+  }
+  install -m 0644 "${source}/lib/frp_project_files.py" "${libdir}/frp_project_files.py"
+  install -m 0644 "${source}/lib/client-project-files.manifest" "${libdir}/client-project-files.manifest"
   [[ -f "${source}/lib/frp_client_lifecycle.py" ]] || {
     echo "ERROR: missing ${source}/lib/frp_client_lifecycle.py" >&2
     return 1
@@ -3447,6 +3677,8 @@ frp_client_upgrade_destinations() {
     "usr/local/lib/frp-auto-deploy/frp_doctor.py:0644:lib/frp_doctor.py" \
     "usr/local/lib/frp-auto-deploy/frp_ctl_grammar.py:0644:lib/frp_ctl_grammar.py" \
     "usr/local/lib/frp-auto-deploy/frp_ctl_repl.py:0644:lib/frp_ctl_repl.py" \
+    "usr/local/lib/frp-auto-deploy/frp_project_files.py:0644:lib/frp_project_files.py" \
+    "usr/local/lib/frp-auto-deploy/client-project-files.manifest:0644:lib/client-project-files.manifest" \
     "usr/local/lib/frp-auto-deploy/frp_client_lifecycle.py:0644:lib/frp_client_lifecycle.py" \
     "usr/local/lib/frp-auto-deploy/frp-client-lifecycle.sh:0644:lib/frp-client-lifecycle.sh" \
     "usr/local/lib/frp-auto-deploy/uninstall-client.sh:0755:uninstall-client.sh" \
@@ -3495,6 +3727,7 @@ frp_client_upgrade_validate_staged() {
   python3 -m py_compile "${staged}/usr/local/lib/frp-auto-deploy/frp_doctor.py" || return 1
   python3 -m py_compile "${staged}/usr/local/lib/frp-auto-deploy/frp_ctl_grammar.py" || return 1
   python3 -m py_compile "${staged}/usr/local/lib/frp-auto-deploy/frp_ctl_repl.py" || return 1
+  python3 -m py_compile "${staged}/usr/local/lib/frp-auto-deploy/frp_project_files.py" || return 1
   python3 -m py_compile "${staged}/usr/local/lib/frp-auto-deploy/frp_client_lifecycle.py" || return 1
   bash -n "${staged}/usr/local/lib/frp-auto-deploy/frp-client-lifecycle.sh" || return 1
   rm -rf "${staged}/usr/local/lib/frp-auto-deploy/__pycache__" \
@@ -3721,13 +3954,43 @@ frp_client_upgrade_verify() {
   return 0
 }
 
+frp_client_toml_needs_data_plane_refresh() {
+  local toml
+  toml="$(frp_client_toml_path)"
+  [[ -f "$toml" ]] || return 1
+  python3 - "$toml" <<'PY'
+import sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text(encoding='utf-8')
+if 'frp_ad_proof' not in text or 'frp_ad_service_id' not in text:
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+frp_client_refresh_data_plane_proof_if_needed() {
+  local token
+  frp_client_toml_needs_data_plane_refresh || return 1
+  token="$(frp_read_existing_token 2>/dev/null || true)"
+  if [[ -z "$token" ]]; then
+    echo "ERROR: cannot refresh data-plane metadata without FRP token" >&2
+    return 1
+  fi
+  if ! frp_regenerate_toml_from_state "$token"; then
+    echo "ERROR: failed to refresh frpc.toml data-plane metadata" >&2
+    return 1
+  fi
+  echo "Refreshed frpc.toml with data-plane authorization metadata."
+  return 0
+}
+
 frp_client_apply_upgrade() {
   local source="${1:-}"
   local check_only="${2:-0}"
   local previous target staged backup ident_before ident_after
   local installed_bundle target_bundle update_needed=1
   local state_before toml_before access_before key_before pub_before mac_before
-  local frp_before frp_after
+  local frp_before frp_after toml_refresh=0
 
   if [[ -z "$source" || ! -d "$source" ]]; then
     echo "ERROR: update source directory is required" >&2
@@ -3906,6 +4169,10 @@ frp_client_apply_upgrade() {
     return 1
   fi
 
+  if frp_client_refresh_data_plane_proof_if_needed; then
+    toml_refresh=1
+  fi
+
   echo "Verifying upgrade..."
   if ! frp_client_upgrade_verify "$ident_before"; then
     echo "ERROR: post-upgrade verification failed; restoring previous management files." >&2
@@ -3934,7 +4201,7 @@ frp_client_apply_upgrade() {
     frp_client_upgrade_rollback "$backup" STATE_PRESERVATION_FAILED || return 2
     return 1
   fi
-  if [[ -n "$toml_before" && "$(frp_client_digest "$(frp_client_toml_path)")" != "$toml_before" ]]; then
+  if [[ "$toml_refresh" != "1" && -n "$toml_before" && "$(frp_client_digest "$(frp_client_toml_path)")" != "$toml_before" ]]; then
     echo "ERROR: frpc.toml changed during software upgrade; restoring tools." >&2
     frp_client_upgrade_rollback "$backup" STATE_PRESERVATION_FAILED || return 2
     return 1

@@ -270,10 +270,12 @@ frp_validate_https_url() {
   local url="${1:-}"
   python3 - "$url" <<'PY'
 import sys
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 url = sys.argv[1]
 if not url or any(ord(ch) < 32 or ord(ch) == 127 for ch in url):
+    raise SystemExit(1)
+if any(ch.isspace() for ch in url):
     raise SystemExit(1)
 try:
     parsed = urlsplit(url)
@@ -287,6 +289,12 @@ if (
     or parsed.password is not None
     or port is not None and not (1 <= port <= 65535)
 ):
+    raise SystemExit(1)
+host = parsed.hostname
+decoded_host = unquote(host)
+if any(ord(ch) < 32 or ord(ch) == 127 for ch in decoded_host):
+    raise SystemExit(1)
+if any(ch.isspace() for ch in host) or any(ch.isspace() for ch in decoded_host):
     raise SystemExit(1)
 PY
 }

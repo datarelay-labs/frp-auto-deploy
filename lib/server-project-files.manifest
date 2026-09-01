@@ -35,7 +35,13 @@ project usr/local/lib/frp-auto-deploy/frp_audit.py 0644 lib/frp_audit.py python
 project usr/local/lib/frp-auto-deploy/frp_fleet.py 0644 lib/frp_fleet.py python
 project usr/local/lib/frp-auto-deploy/frp_server_lifecycle.py 0644 lib/frp_server_lifecycle.py python
 project usr/local/lib/frp-auto-deploy/frp_project_files.py 0644 lib/frp_project_files.py python
+project usr/local/lib/frp-auto-deploy/frp_url.py 0644 lib/frp_url.py python
 project usr/local/lib/frp-auto-deploy/frp_control_locks.py 0644 lib/frp_control_locks.py python
+project usr/local/lib/frp-auto-deploy/frp_server_config.py 0644 lib/frp_server_config.py python
+project usr/local/lib/frp-auto-deploy/frp_data_plane_auth.py 0644 lib/frp_data_plane_auth.py python
+project usr/local/lib/frp-auto-deploy/frp_proxy_leases.py 0644 lib/frp_proxy_leases.py python
+project usr/local/lib/frp-auto-deploy/frp_plugin_server.py 0644 lib/frp_plugin_server.py python
+project usr/local/lib/frp-auto-deploy/frp_release_guard.py 0644 lib/frp_release_guard.py python
 project usr/local/lib/frp-auto-deploy/server-project-files.manifest 0644 lib/server-project-files.manifest none
 project usr/local/lib/frp-auto-deploy/release-manifest.json 0644 release-manifest.json none
 optional usr/local/lib/frp-auto-deploy/SHA256SUMS 0644 SHA256SUMS none

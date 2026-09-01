@@ -30,30 +30,13 @@ def load_creg():
 
 CREG = load_creg()
 
+def require_valid_registry(state, cfg=None):
+    try:
+        return CREG.validate_registry_or_raise(state, cfg)
+    except ValueError as exc:
+        raise SystemExit('ERROR: %s' % exc)
 
-def require_v2(state):
-    if not isinstance(state, dict) or state.get('schema_version') != 2:
-        version = 1
-        if isinstance(state, dict) and 'schema_version' in state:
-            version = state.get('schema_version')
-        raise SystemExit(
-            f'ERROR: unsupported registry schema version {version}.\n\n'
-            'This release requires registry schema version 2.\n\n'
-            'Back up the existing registry and redeploy/reset it explicitly before continuing.'
-        )
-    for client in (state.get('clients') or {}).values():
-        if not isinstance(client, dict):
-            raise SystemExit(
-                'ERROR: unsupported registry schema version 2.\n\n'
-                'This release requires registry schema version 2.\n\n'
-                'Back up the existing registry and redeploy/reset it explicitly before continuing.'
-            )
-        if 'ssh_port' in client or 'https_port' in client:
-            raise SystemExit(
-                'ERROR: unsupported registry schema version 2.\n\n'
-                'Legacy SSH/HTTPS fields are present. This release requires the generic multi-service registry.\n\n'
-                'Back up the existing registry and redeploy/reset it explicitly before continuing.'
-            )
+
 
 
 def lock_registry(path):
@@ -156,7 +139,7 @@ if ROOT and not str(path).startswith(ROOT):
 lock_fd = lock_registry(path)
 try:
     state = json.loads(path.read_text())
-    require_v2(state)
+    require_valid_registry(state, cfg)
     mid, client = CREG.resolve_client_id_only_or_exit(state, args.query)
     hostname_before = client.get('hostname')
     old_label = str(client.get('label') or '').strip()
@@ -196,6 +179,7 @@ try:
     state['clients'][mid] = client
     if client.get('hostname') != hostname_before:
         fail('refusing to mutate hostname')
+    require_valid_registry(state, cfg)
     CREG.atomic_write_json(path, state)
     state_after = json.loads(path.read_text())
     after = state_after['clients'][mid]

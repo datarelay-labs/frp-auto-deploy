@@ -93,3 +93,24 @@ unset FRP_RELEASE_CHANNEL FRP_SOURCE_REF FRP_EXPECTED_SOURCE_REF || true
 [[ "$(frp_release_channel)" == "candidate" ]] || fail "persisted channel read"
 [[ "$(frp_release_git_ref)" == "$SHA" ]] || fail "persisted git ref"
 pass "CANDIDATE_PERSISTED_SOURCE_IDENTITY"
+
+# Candidate operator-facing upgrade guidance must use the exact SHA, never a
+# nonexistent stable tag such as v2.1.1 before that tag exists.
+export FRP_CLIENT_SOURCED=1
+# shellcheck source=install-client.sh
+. "$ROOT/install-client.sh"
+export FRP_RELEASE_CHANNEL=candidate
+export FRP_SOURCE_REF="$SHA"
+export FRP_DEPLOY_TEST_ROOT="$TREE"
+MSG_OUT="$TREE/cand-guidance.out"
+MSG_ERR="$TREE/cand-guidance.err"
+set +e
+frp_client_existing_install_message >"$MSG_OUT" 2>"$MSG_ERR"
+set -e
+grep -q 'sudo frpctl update' "$MSG_ERR" || fail "candidate guidance missing frpctl update"
+if grep -E '/v2\.1\.1/' "$MSG_ERR" "$MSG_OUT"; then
+  fail "candidate guidance referenced nonexistent v2.1.1"
+fi
+grep -q "/${SHA}/dist/bootstrap-client.sh" "$MSG_ERR" \
+  || fail "candidate guidance missing exact SHA bootstrap URL"
+pass "CANDIDATE_OPERATOR_GUIDANCE_EXACT_SHA"

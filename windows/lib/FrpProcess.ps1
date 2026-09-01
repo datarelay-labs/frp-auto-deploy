@@ -41,16 +41,21 @@ function Read-FrpPidFile {
 function Write-FrpPidFile {
     param(
         [Parameter(Mandatory = $true)][int]$ProcessId,
-        [string]$ExePath
+        [string]$ExePath,
+        [string]$StartedAt
     )
     Initialize-FrpDirectories
     $path = Get-FrpPidPath
     $tmp = "$path.tmp"
     if (-not $ExePath) { $ExePath = Get-FrpFrpcPath }
+    $started = $StartedAt
+    if (-not $started) {
+        $started = [DateTimeOffset]::UtcNow.ToString('o')
+    }
     $meta = [ordered]@{
         pid        = [int]$ProcessId
         exe        = [string]$ExePath
-        started_at = [DateTimeOffset]::UtcNow.ToString('o')
+        started_at = [string]$started
     }
     $json = ($meta | ConvertTo-Json -Compress)
     [System.IO.File]::WriteAllText($tmp, $json + "`n")
@@ -64,46 +69,120 @@ function Clear-FrpPidFile {
     }
 }
 
+function Get-FrpCanonicalPath {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+    try {
+        return [System.IO.Path]::GetFullPath($Path)
+    } catch {
+        return $null
+    }
+}
+
+function Get-FrpProcessExecutablePath {
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+    try {
+        $p = Get-Process -Id $ProcessId -ErrorAction Stop
+        try {
+            if ($p.Path) { return [string]$p.Path }
+        } catch { }
+    } catch {
+        return $null
+    }
+    # Prefer CIM, then WMI — never fall back to ProcessName alone.
+    if (Test-FrpIsWindowsHost) {
+        try {
+            $cim = Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId = {0}" -f $ProcessId) -ErrorAction Stop
+            if ($cim -and $cim.ExecutablePath) { return [string]$cim.ExecutablePath }
+        } catch { }
+        try {
+            $wmi = Get-WmiObject -Class Win32_Process -Filter ("ProcessId = {0}" -f $ProcessId) -ErrorAction Stop
+            if ($wmi -and $wmi.ExecutablePath) { return [string]$wmi.ExecutablePath }
+        } catch { }
+    }
+    return $null
+}
+
+function Test-FrpProcessStartTimeMatches {
+    param(
+        $Process,
+        [string]$StartedAt,
+        [int]$ToleranceSec = 5
+    )
+    if ([string]::IsNullOrWhiteSpace($StartedAt)) {
+        # Legacy metadata without started_at: skip time check (path still required).
+        return $true
+    }
+    if ($null -eq $Process) { return $false }
+    try {
+        $metaTime = [DateTimeOffset]::Parse(
+            $StartedAt,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::RoundtripKind)
+        $procStart = $Process.StartTime
+        if ($null -eq $procStart) { return $false }
+        $procUtc = [DateTimeOffset]::new($procStart.ToUniversalTime())
+        $delta = [Math]::Abs(($metaTime - $procUtc).TotalSeconds)
+        return ($delta -le [double]$ToleranceSec)
+    } catch {
+        return $false
+    }
+}
+
 function Test-FrpProcessOwned {
     param(
         [Parameter(Mandatory = $true)][int]$ProcessId,
-        [string]$ExpectedExe
+        [string]$ExpectedExe,
+        [string]$StartedAt
     )
     try {
         $p = Get-Process -Id $ProcessId -ErrorAction Stop
     } catch {
         return $false
     }
-    if (-not $ExpectedExe) { $ExpectedExe = Get-FrpFrpcPath }
-    $expectedLeaf = [System.IO.Path]::GetFileName($ExpectedExe)
-    $expectedBase = [System.IO.Path]::GetFileNameWithoutExtension($ExpectedExe)
-    $path = $null
-    try { $path = $p.Path } catch { $path = $null }
-    if ($path) {
-        $leaf = [System.IO.Path]::GetFileName($path)
-        if ($leaf -ieq $expectedLeaf) { return $true }
-        # Absolute path match
-        try {
-            if ([System.IO.Path]::GetFullPath($path) -ieq [System.IO.Path]::GetFullPath($ExpectedExe)) { return $true }
-        } catch { }
-        return $false
-    }
-    # Path unavailable (some hosts): fall back to process name
-    if ($p.ProcessName -ieq $expectedBase -or $p.ProcessName -ieq $expectedLeaf) { return $true }
-    # Fake-process tests: allow sleep when metadata exe was recorded as sleep
+
+    # Fake-process tests: allow sleep when metadata exe was recorded as sleep.
     if ($env:FRP_WINDOWS_ALLOW_FAKE_PROCESS -eq '1') {
+        $exp = if ($ExpectedExe) { $ExpectedExe } else { '' }
+        $expectedLeaf = [System.IO.Path]::GetFileName($exp)
+        $expectedBase = [System.IO.Path]::GetFileNameWithoutExtension($exp)
         if ($expectedBase -ieq 'sleep' -or $expectedLeaf -ieq 'sleep' -or $expectedLeaf -ieq 'sleep.exe') {
-            if ($p.ProcessName -ieq 'sleep') { return $true }
+            if ($p.ProcessName -ieq 'sleep') {
+                return (Test-FrpProcessStartTimeMatches -Process $p -StartedAt $StartedAt)
+            }
         }
     }
-    return $false
+
+    $managedCanon = Get-FrpCanonicalPath (Get-FrpFrpcPath)
+    if (-not $managedCanon) { return $false }
+
+    # Metadata exe (when present) must itself name the managed binary — reject spoofed paths.
+    if ($ExpectedExe) {
+        $expectedCanon = Get-FrpCanonicalPath $ExpectedExe
+        if (-not $expectedCanon -or ($expectedCanon -ine $managedCanon)) {
+            return $false
+        }
+    }
+
+    $actual = Get-FrpProcessExecutablePath -ProcessId $ProcessId
+    if (-not $actual) {
+        # Fail closed: do not own by ProcessName alone.
+        return $false
+    }
+    $actualCanon = Get-FrpCanonicalPath $actual
+    if (-not $actualCanon -or ($actualCanon -ine $managedCanon)) {
+        return $false
+    }
+
+    return (Test-FrpProcessStartTimeMatches -Process $p -StartedAt $StartedAt)
 }
 
 function Test-FrpProcessAlive {
     param(
         [Parameter(Mandatory = $true)][int]$ProcessId,
         [switch]$ValidateOwnership,
-        [string]$ExpectedExe
+        [string]$ExpectedExe,
+        [string]$StartedAt
     )
     try {
         $null = Get-Process -Id $ProcessId -ErrorAction Stop
@@ -111,13 +190,14 @@ function Test-FrpProcessAlive {
         return $false
     }
     if ($ValidateOwnership) {
-        if (-not $ExpectedExe) {
+        if (-not $ExpectedExe -or -not $StartedAt) {
             $meta = Read-FrpPidMetadata
-            if ($meta -and [int]$meta.pid -eq [int]$ProcessId -and $meta.exe) {
-                $ExpectedExe = [string]$meta.exe
+            if ($meta -and [int]$meta.pid -eq [int]$ProcessId) {
+                if (-not $ExpectedExe -and $meta.exe) { $ExpectedExe = [string]$meta.exe }
+                if (-not $StartedAt -and $meta.started_at) { $StartedAt = [string]$meta.started_at }
             }
         }
-        return (Test-FrpProcessOwned -ProcessId $ProcessId -ExpectedExe $ExpectedExe)
+        return (Test-FrpProcessOwned -ProcessId $ProcessId -ExpectedExe $ExpectedExe -StartedAt $StartedAt)
     }
     return $true
 }
@@ -127,11 +207,12 @@ function Clear-FrpStalePid {
     if ($null -eq $meta) { return }
     $pidVal = [int]$meta.pid
     $exe = $meta.exe
+    $startedAt = $meta.started_at
     if (-not (Test-FrpProcessAlive -ProcessId $pidVal)) {
         Clear-FrpPidFile
         return
     }
-    if (-not (Test-FrpProcessOwned -ProcessId $pidVal -ExpectedExe $exe)) {
+    if (-not (Test-FrpProcessOwned -ProcessId $pidVal -ExpectedExe $exe -StartedAt $startedAt)) {
         # Stale / mismatched ownership: clear metadata, do NOT kill
         Clear-FrpPidFile
     }
@@ -163,7 +244,7 @@ function Start-FrpClient {
     $existingMeta = Read-FrpPidMetadata
     if ($null -ne $existingMeta) {
         $existing = [int]$existingMeta.pid
-        if (Test-FrpProcessAlive -ProcessId $existing -ValidateOwnership -ExpectedExe $existingMeta.exe) {
+        if (Test-FrpProcessAlive -ProcessId $existing -ValidateOwnership -ExpectedExe $existingMeta.exe -StartedAt $existingMeta.started_at) {
             if (-not $Force) {
                 Write-Host ("frpc already running (pid {0})" -f $existing)
                 return $existing
@@ -221,17 +302,18 @@ function Stop-FrpClient {
     }
     $pidVal = [int]$meta.pid
     $exe = $meta.exe
+    $startedAt = $meta.started_at
     if (-not (Test-FrpProcessAlive -ProcessId $pidVal)) {
         Clear-FrpPidFile
         Write-Host 'frpc is not running (cleared stale pid)'
         return $false
     }
-    if (-not (Test-FrpProcessOwned -ProcessId $pidVal -ExpectedExe $exe)) {
+    if (-not (Test-FrpProcessOwned -ProcessId $pidVal -ExpectedExe $exe -StartedAt $startedAt)) {
         Clear-FrpPidFile
         Write-Host 'frpc pid metadata mismatched; cleared without killing unrelated process'
         return $false
     }
-    # Kill only the project-managed frpc matching recorded exe path/name.
+    # Kill only the project-managed frpc matching canonical managed path.
     try {
         Stop-Process -Id $pidVal -Force -ErrorAction Stop
     } catch {
@@ -247,7 +329,7 @@ function Get-FrpClientStatus {
     $meta = Read-FrpPidMetadata
     $pidVal = $(if ($meta) { [int]$meta.pid } else { $null })
     $running = $false
-    if ($null -ne $pidVal -and (Test-FrpProcessAlive -ProcessId $pidVal -ValidateOwnership -ExpectedExe $(if ($meta) { $meta.exe } else { $null }))) {
+    if ($null -ne $pidVal -and (Test-FrpProcessAlive -ProcessId $pidVal -ValidateOwnership -ExpectedExe $(if ($meta) { $meta.exe } else { $null }) -StartedAt $(if ($meta) { $meta.started_at } else { $null }))) {
         $running = $true
     }
     $enrolled = Test-FrpIsEnrolled

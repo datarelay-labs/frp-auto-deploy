@@ -37,6 +37,11 @@ GROUP_NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
 GROUP_ID_RE = re.compile(r'^grp_[0-9a-f]{8}$')
 # Linux /etc/machine-id (32 hex), Windows generated IDs, and bounded opaque IDs.
 MACHINE_ID_SAFE_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$')
+SERVICE_ID_RE = re.compile(r'^[a-z0-9][a-z0-9._-]{0,31}$')
+ALLOWED_SERVICE_PRESETS = frozenset({'ssh', 'http', 'https', 'rdp', 'custom'})
+ALLOWED_SERVICE_PROTOCOLS = frozenset({'tcp'})
+SSH_USER_RE = re.compile(r'^[A-Za-z0-9._@-]{1,32}$')
+LOCAL_TARGET_MAX_LEN = 253
 
 
 class ClientLookupError(Exception):
@@ -1119,6 +1124,253 @@ def _coerce_port_value(value):
     return None
 
 
+def require_tcp_port(value, field='port'):
+    """Require a real TCP port. Invalid/missing values are corruption, not absence."""
+    if value is None:
+        raise ValueError('%s is required' % field)
+    if isinstance(value, bool):
+        raise ValueError('%s must be an integer TCP port' % field)
+    if isinstance(value, int):
+        if 1 <= value <= 65535:
+            return value
+        raise ValueError('%s out of range: %s' % (field, value))
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or not re.fullmatch(r'[0-9]+', text):
+            raise ValueError('invalid %s' % field)
+        port = int(text)
+        if 1 <= port <= 65535:
+            return port
+        raise ValueError('%s out of range: %s' % (field, value))
+    raise ValueError('invalid %s' % field)
+
+
+def require_canonical_machine_id(value):
+    """Persisted machine/client ID must already be canonical (no trim/rewrite)."""
+    if not isinstance(value, str):
+        raise ValueError('machine_id key must be a string')
+    canonical = validate_machine_id(value)
+    if value != canonical:
+        raise ValueError('noncanonical machine_id key')
+    return canonical
+
+
+def require_canonical_group_id(value):
+    """Persisted group map keys must already be canonical."""
+    if not isinstance(value, str):
+        raise ValueError('group id key must be a string')
+    canonical = validate_group_id(value)
+    if value != canonical:
+        raise ValueError('noncanonical group id key')
+    return canonical
+
+
+def require_canonical_service_id(value, field='service id'):
+    """Persisted service IDs must already be lowercase canonical form."""
+    if not isinstance(value, str):
+        raise ValueError('%s must be a string' % field)
+    if value != value.strip() or value != value.lower():
+        raise ValueError('noncanonical %s' % field)
+    if not SERVICE_ID_RE.fullmatch(value):
+        raise ValueError(
+            'invalid %s; use [a-z0-9][a-z0-9._-]{0,31}' % field
+        )
+    return value
+
+
+def validate_local_target(value, field='local_ip'):
+    text = '' if value is None else str(value).strip()
+    if not text:
+        raise ValueError('%s is required' % field)
+    if value != text:
+        raise ValueError('noncanonical %s' % field)
+    if len(text) > LOCAL_TARGET_MAX_LEN:
+        raise ValueError('%s exceeds maximum length' % field)
+    if any(ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in text):
+        raise ValueError('%s must not contain control characters' % field)
+    if any(ch in text for ch in ' /\\;|&$`\'"<>'):
+        raise ValueError('invalid %s' % field)
+    try:
+        ipaddress.ip_address(text)
+        return text
+    except ValueError:
+        pass
+    if text.lower() == 'localhost':
+        return text
+    if re.fullmatch(r'[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?', text):
+        return text
+    raise ValueError('invalid %s' % field)
+
+
+def validate_service_record(map_key, service, *, machine_id=None):
+    """Validate one persisted service record. Never repairs.
+
+    Service identity is the map key. If a record embeds ``id``, it must equal
+    the map key in canonical form. Missing embedded id is allowed for records
+    that historically keyed identity only by the map entry.
+    """
+    sid_key = require_canonical_service_id(map_key, field='service map key')
+    if not isinstance(service, dict):
+        raise ValueError('service record is not an object')
+    if 'id' in service and service.get('id') is not None:
+        sid = require_canonical_service_id(service.get('id'), field='service record id')
+        if sid != sid_key:
+            raise ValueError('service map key does not match record id')
+    else:
+        sid = sid_key
+
+    protocol = service.get('protocol', 'tcp')
+    if protocol is None:
+        protocol = 'tcp'
+    if not isinstance(protocol, str):
+        raise ValueError('invalid service protocol')
+    protocol_text = protocol.strip().lower()
+    if protocol != protocol_text:
+        raise ValueError('noncanonical service protocol')
+    if protocol_text not in ALLOWED_SERVICE_PROTOCOLS:
+        raise ValueError('invalid service protocol')
+
+    preset = service.get('preset', 'custom')
+    if preset is None:
+        preset = 'custom'
+    if not isinstance(preset, str):
+        raise ValueError('invalid service preset')
+    preset_text = preset.strip().lower()
+    if preset != preset_text:
+        raise ValueError('noncanonical service preset')
+    if preset_text not in ALLOWED_SERVICE_PRESETS:
+        raise ValueError('invalid service preset')
+
+    if 'enabled' in service and service.get('enabled') is not None:
+        if not isinstance(service.get('enabled'), bool):
+            raise ValueError('service enabled must be a boolean')
+
+    validate_local_target(service.get('local_ip'))
+    require_tcp_port(service.get('local_port'), field='local_port')
+    remote_port = require_tcp_port(service.get('remote_port'), field='remote_port')
+
+    if preset_text == 'ssh':
+        ssh_user = service.get('ssh_user')
+        if ssh_user is None or (isinstance(ssh_user, str) and not ssh_user.strip()):
+            raise ValueError('ssh_user is required for ssh services')
+        if not isinstance(ssh_user, str) or ssh_user != ssh_user.strip():
+            raise ValueError('invalid ssh_user')
+        if not SSH_USER_RE.fullmatch(ssh_user):
+            raise ValueError('invalid ssh_user')
+
+    where = (' client %s' % machine_id) if machine_id else ''
+    return {
+        'id': sid,
+        'remote_port': remote_port,
+        'machine_id': machine_id,
+        'detail': 'service %s%s' % (sid, where),
+    }
+
+
+def validate_client_tags(tags):
+    if tags is None:
+        return {}
+    if not isinstance(tags, dict):
+        raise ValueError('client tags must be an object')
+    for key, value in tags.items():
+        if not isinstance(key, str):
+            raise ValueError('tag key must be a string')
+        canonical_key = validate_tag_key(key)
+        if key != canonical_key:
+            raise ValueError('noncanonical tag key')
+        if not isinstance(value, str):
+            raise ValueError('tag value must be a string')
+        canonical_value = validate_tag_value(value)
+        if value != canonical_value:
+            raise ValueError('noncanonical tag value')
+    return tags
+
+
+def validate_client_record(machine_id, client, *, groups=None):
+    """Validate one persisted client record. Never repairs."""
+    mid = require_canonical_machine_id(machine_id)
+    if not isinstance(client, dict):
+        raise ValueError('client record is not an object')
+    if 'ssh_port' in client or 'https_port' in client:
+        raise ValueError('legacy SSH/HTTPS fields are present')
+
+    if 'label' in client and client.get('label') is not None:
+        label = client.get('label')
+        if not isinstance(label, str):
+            raise ValueError('client label must be a string')
+        canonical = validate_label(label, required=False)
+        if label and label != canonical:
+            raise ValueError('noncanonical client label')
+    if 'hostname' in client and client.get('hostname') is not None:
+        hostname = client.get('hostname')
+        if not isinstance(hostname, str):
+            raise ValueError('client hostname must be a string')
+        canonical = validate_hostname(hostname, required=False)
+        if hostname and hostname != canonical:
+            raise ValueError('noncanonical client hostname')
+    if 'note' in client and client.get('note') is not None:
+        note = client.get('note')
+        if not isinstance(note, str):
+            raise ValueError('client note must be a string')
+        canonical = validate_note(note)
+        if note and note != canonical:
+            raise ValueError('noncanonical client note')
+
+    validate_client_tags(client.get('tags'))
+
+    status = client.get('mgmt_status')
+    if status is not None and status not in ('enrolled', 'legacy', 'revoked'):
+        raise ValueError('invalid management identity status')
+    for field in ('mgmt_pubkey', 'mgmt_mac_key', 'mgmt_fingerprint'):
+        if field in client and client.get(field) is not None:
+            if not isinstance(client.get(field), str):
+                raise ValueError('%s must be a string' % field)
+
+    groups = groups if groups is not None else {}
+    group_ids = client.get('group_ids')
+    if group_ids is not None:
+        if not isinstance(group_ids, list):
+            raise ValueError('client group_ids must be a list')
+        normalized = normalize_group_ids(group_ids)
+        # Persisted membership must already be canonical and de-duplicated.
+        if group_ids != normalized:
+            raise ValueError('noncanonical client group_ids')
+        for gid in normalized:
+            if gid not in groups:
+                raise ValueError('client references nonexistent group %s' % gid)
+            if group_record_type(groups[gid]) != 'manual':
+                raise ValueError(
+                    'client group_ids must only reference manual groups (%s)' % gid
+                )
+
+    services = client.get('services')
+    if services is None:
+        services = {}
+    if not isinstance(services, dict):
+        raise ValueError('client services must be a map')
+    # Management-only clients are represented by services = {}.
+    return mid, services
+
+
+def protected_ports_from_cfg(cfg):
+    """Control/allocator listen and public ports that must not be allocated."""
+    protected = set()
+    if not cfg:
+        return protected
+    for key in (
+        'allocator_listen_port',
+        'frp_control_listen_port',
+        'listen_port',
+        'allocator_public_port',
+        'frp_control_public_port',
+        'control_port',
+    ):
+        port = _coerce_port_value(cfg.get(key))
+        if port is not None:
+            protected.add(port)
+    return protected
+
+
 def validate_registry_state(state, cfg=None):
     """Canonical read-only registry validator. Never silently repairs.
 
@@ -1146,10 +1398,13 @@ def validate_registry_state(state, cfg=None):
         raise ValueError('registry groups must be an object')
 
     for gid, group in groups.items():
-        gid_text = validate_group_id(gid)
+        gid_text = require_canonical_group_id(gid)
         if not isinstance(group, dict):
             raise ValueError('group record %s is not an object' % gid_text)
-        validate_group_name(group.get('name'))
+        name = group.get('name')
+        canonical_name = validate_group_name(name)
+        if isinstance(name, str) and name != canonical_name:
+            raise ValueError('noncanonical group name on %s' % gid_text)
         gtype = group_record_type(group)
         if gtype == 'system':
             raise ValueError('system groups must not be persisted: %s' % gid_text)
@@ -1164,65 +1419,62 @@ def validate_registry_state(state, cfg=None):
             validate_group_description(description)
 
     port_start = port_end = None
-    protected = set()
+    protected = protected_ports_from_cfg(cfg)
     if cfg:
         port_start = _coerce_port_value(cfg.get('port_start'))
         port_end = _coerce_port_value(cfg.get('port_end'))
-        for key in ('allocator_listen_port', 'frp_control_listen_port', 'listen_port'):
-            port = _coerce_port_value(cfg.get(key))
-            if port is not None:
-                protected.add(port)
 
     seen_ports = {}
     for item in reserved:
-        port = _coerce_port_value(item)
-        if port is None:
-            raise ValueError('reserved port entry is invalid')
+        try:
+            port = require_tcp_port(item, field='reserved port')
+        except ValueError as exc:
+            raise ValueError('reserved port entry is invalid') from exc
         if port in seen_ports:
             raise ValueError('duplicate reserved port %s' % port)
         seen_ports[port] = ('reserved', None)
 
     for mid, client in clients.items():
-        validate_machine_id(mid)
-        if not isinstance(client, dict):
-            raise ValueError('client record is not an object')
-        if 'ssh_port' in client or 'https_port' in client:
-            raise ValueError('legacy SSH/HTTPS fields are present')
-        status = client.get('mgmt_status')
-        if status is not None and status not in ('enrolled', 'legacy', 'revoked'):
-            raise ValueError('invalid management identity status')
-        group_ids = client.get('group_ids')
-        if group_ids is not None:
-            normalized = normalize_group_ids(group_ids)
-            for gid in normalized:
-                if gid not in groups:
-                    raise ValueError('client references nonexistent group %s' % gid)
-                if group_record_type(groups[gid]) != 'manual':
-                    raise ValueError(
-                        'client group_ids must only reference manual groups (%s)' % gid
-                    )
-        services = client.get('services')
-        if services is None:
-            services = {}
-        if not isinstance(services, dict):
-            raise ValueError('client services must be a map')
+        _mid, services = validate_client_record(mid, client, groups=groups)
         seen_ids = set()
         for sid, svc in services.items():
-            key = str(sid).strip().lower()
+            info = validate_service_record(sid, svc, machine_id=mid)
+            key = info['id']
             if key in seen_ids:
                 raise ValueError('duplicate service id %s' % key)
             seen_ids.add(key)
-            if not isinstance(svc, dict):
-                raise ValueError('service record is not an object')
-            port = _coerce_port_value(svc.get('remote_port'))
-            if port is None:
-                continue
+            port = info['remote_port']
             if port in seen_ports:
                 raise ValueError('duplicate public port ownership: %s' % port)
             seen_ports[port] = (mid, key)
+            if port in protected:
+                raise ValueError('allocated port collides with a reserved control port: %s' % port)
             if port_start is not None and port_end is not None:
                 if port < port_start or port > port_end:
                     raise ValueError('allocated port outside configured range: %s' % port)
-            if port in protected:
-                raise ValueError('allocated port collides with a reserved control port: %s' % port)
     return state
+
+
+def assert_registry_state(state, cfg=None, *, context='registry'):
+    """Raise SystemExit-friendly ValueError with a clear operator prefix."""
+    try:
+        return validate_registry_state(state, cfg)
+    except ValueError as exc:
+        raise ValueError('%s is corrupt: %s' % (context, exc)) from exc
+
+
+def format_registry_corruption(exc):
+    return (
+        'registry is corrupt: %s\n\n'
+        'No changes were written. Restore from a known-good backup or repair the '
+        'registry explicitly. Automatic repair is refused.'
+        % exc
+    )
+
+
+def validate_registry_or_raise(state, cfg=None):
+    """Shared pre/post mutation gate used by all registry writers."""
+    try:
+        return validate_registry_state(state, cfg)
+    except ValueError as exc:
+        raise ValueError(format_registry_corruption(exc)) from exc

@@ -256,7 +256,18 @@ state = json.loads(Path(sys.argv[1]).read_text())
 state.setdefault("reserved", []).append(6002)
 state.setdefault("clients", {})["machine-a"] = {
     "hostname": "a",
-    "services": {"ssh": {"remote_port": 6002, "enabled": True}},
+    "services": {
+        "ssh": {
+            "id": "ssh",
+            "preset": "ssh",
+            "protocol": "tcp",
+            "local_ip": "127.0.0.1",
+            "local_port": 22,
+            "remote_port": 6002,
+            "enabled": True,
+            "ssh_user": "aella",
+        },
+    },
 }
 Path(sys.argv[1]).write_text(json.dumps(state, indent=2) + "\n")
 PY

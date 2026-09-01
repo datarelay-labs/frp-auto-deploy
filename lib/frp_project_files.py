@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Canonical server project-file manifest loader.
+"""Canonical project-file manifest loader.
 
 This is the source of truth for:
   full installation managed files
   project-update staging/install/validation
   snapshot/rollback managed project files
+  uninstall managed project/optional/unit removal
 """
 from __future__ import annotations
 
@@ -12,7 +13,10 @@ import argparse
 import os
 from pathlib import Path
 
-MANIFEST_NAME = "server-project-files.manifest"
+SERVER_MANIFEST_NAME = "server-project-files.manifest"
+CLIENT_MANIFEST_NAME = "client-project-files.manifest"
+# Backward-compatible alias
+MANIFEST_NAME = SERVER_MANIFEST_NAME
 MANAGED_CLASSES = ("project", "optional", "unit", "unit-single443")
 SNAPSHOT_EXTRA_CLASSES = ("generated", "binary", "version")
 
@@ -28,24 +32,45 @@ class FileEntry:
         self.validate = validate
 
 
-def manifest_path(explicit=None):
+def _resolve_manifest(name, explicit=None, env_key="FRP_PROJECT_FILE_MANIFEST"):
     if explicit:
         return Path(explicit)
     here = Path(__file__).resolve().parent
-    candidate = here / MANIFEST_NAME
+    candidate = here / name
     if candidate.is_file():
         return candidate
-    installed = Path("/usr/local/lib/frp-auto-deploy") / MANIFEST_NAME
+    installed = Path("/usr/local/lib/frp-auto-deploy") / name
     if installed.is_file():
         return installed
-    env = os.environ.get("FRP_PROJECT_FILE_MANIFEST", "")
+    env = os.environ.get(env_key, "")
     if env:
         return Path(env)
-    raise FileNotFoundError("server-project-files.manifest is missing")
+    raise FileNotFoundError("%s is missing" % name)
+
+
+def manifest_path(explicit=None):
+    return _resolve_manifest(SERVER_MANIFEST_NAME, explicit)
+
+
+def client_manifest_path(explicit=None):
+    return _resolve_manifest(
+        CLIENT_MANIFEST_NAME,
+        explicit,
+        env_key="FRP_CLIENT_PROJECT_FILE_MANIFEST",
+    )
 
 
 def load_entries(path=None):
     text = manifest_path(path).read_text(encoding="utf-8")
+    return _parse_entries(text)
+
+
+def load_client_entries(path=None):
+    text = client_manifest_path(path).read_text(encoding="utf-8")
+    return _parse_entries(text)
+
+
+def _parse_entries(text):
     entries = []
     for raw in text.splitlines():
         line = raw.strip()
@@ -80,6 +105,20 @@ def managed_entries(single443=False, source_root=None, include_optional=True, pa
     return out
 
 
+def client_managed_entries(source_root=None, include_optional=True, path=None):
+    out = []
+    for entry in load_client_entries(path):
+        if entry.cls not in MANAGED_CLASSES:
+            continue
+        if entry.cls == "optional":
+            if not include_optional:
+                continue
+            if source_root is not None and not _source_exists(source_root, entry.source):
+                continue
+        out.append(entry)
+    return out
+
+
 def snapshot_rels(path=None):
     rels = []
     for entry in load_entries(path):
@@ -90,6 +129,40 @@ def snapshot_rels(path=None):
 
 def managed_dests(single443=False, source_root=None, path=None):
     return [entry.dest for entry in managed_entries(single443, source_root, True, path)]
+
+
+def client_managed_dests(source_root=None, path=None):
+    return [entry.dest for entry in client_managed_entries(source_root, True, path)]
+
+
+def uninstall_rels(single443=True, source_root=None, path=None):
+    """Managed project/optional/unit paths removed by default server uninstall.
+
+    Excludes protected/protected-prefix/generated/version persistent state.
+    Binary (frps) is not in this list; uninstall removes it separately.
+    """
+    return managed_dests(single443=single443, source_root=source_root, path=path)
+
+
+def client_uninstall_rels(source_root=None, path=None):
+    """Managed client project/optional/unit paths removed by client uninstall."""
+    return client_managed_dests(source_root=source_root, path=path)
+
+
+def dual_role_shared_lib_basenames(server_path=None, client_path=None):
+    """Basenames under usr/local/lib/frp-auto-deploy shared by both roles."""
+    prefix = "usr/local/lib/frp-auto-deploy/"
+    server = {
+        e.dest[len(prefix) :]
+        for e in load_entries(server_path)
+        if e.cls in MANAGED_CLASSES and e.dest.startswith(prefix)
+    }
+    client = {
+        e.dest[len(prefix) :]
+        for e in load_client_entries(client_path)
+        if e.cls in MANAGED_CLASSES and e.dest.startswith(prefix)
+    }
+    return tuple(sorted(server & client))
 
 
 def protected_exact(path=None):
@@ -107,6 +180,13 @@ def destination_lines(single443=False, source_root=None, path=None):
     return lines
 
 
+def client_destination_lines(source_root=None, path=None):
+    lines = []
+    for entry in client_managed_entries(source_root, True, path):
+        lines.append("%s:%s:%s" % (entry.dest, entry.mode, entry.source))
+    return lines
+
+
 def validate_paths(kind, staged_root=None, single443=False, source_root=None, path=None):
     paths = []
     for entry in managed_entries(single443, source_root, True, path):
@@ -118,16 +198,27 @@ def validate_paths(kind, staged_root=None, single443=False, source_root=None, pa
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Server project-file manifest")
+    parser = argparse.ArgumentParser(description="Project-file manifest")
     parser.add_argument(
         "action",
-        choices=("destinations", "snapshot-rels", "managed-rels", "validate-list"),
+        choices=(
+            "destinations",
+            "snapshot-rels",
+            "managed-rels",
+            "uninstall-rels",
+            "client-destinations",
+            "client-managed-rels",
+            "client-uninstall-rels",
+            "dual-role-shared-libs",
+            "validate-list",
+        ),
     )
     parser.add_argument("--single443", action="store_true")
     parser.add_argument("--source")
     parser.add_argument("--staged")
     parser.add_argument("--kind", choices=("bash", "python"))
     parser.add_argument("--manifest")
+    parser.add_argument("--client-manifest")
     args = parser.parse_args(argv)
     if args.action == "destinations":
         for line in destination_lines(args.single443, args.source, args.manifest):
@@ -140,6 +231,27 @@ def main(argv=None):
     if args.action == "managed-rels":
         for rel in managed_dests(args.single443, args.source, args.manifest):
             print(rel)
+        return 0
+    if args.action == "uninstall-rels":
+        # Always include unit-single443 so a leftover frontend unit is removed.
+        for rel in uninstall_rels(True, args.source, args.manifest):
+            print(rel)
+        return 0
+    if args.action == "client-destinations":
+        for line in client_destination_lines(args.source, args.client_manifest):
+            print(line)
+        return 0
+    if args.action == "client-managed-rels":
+        for rel in client_managed_dests(args.source, args.client_manifest):
+            print(rel)
+        return 0
+    if args.action == "client-uninstall-rels":
+        for rel in client_uninstall_rels(args.source, args.client_manifest):
+            print(rel)
+        return 0
+    if args.action == "dual-role-shared-libs":
+        for name in dual_role_shared_lib_basenames(args.manifest, args.client_manifest):
+            print(name)
         return 0
     if args.action == "validate-list":
         if not args.kind:

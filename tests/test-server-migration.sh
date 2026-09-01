@@ -147,12 +147,14 @@ state['clients']={'machine-d': {
   'last_enrolled_at': '2026-08-26T00:00:00Z',
   'services': {
     'ssh': {
+      'id': 'ssh',
       'name': 'SSH',
       'protocol': 'tcp',
       'local_ip': '127.0.0.1',
       'local_port': 22,
       'remote_port': 6000,
       'preset': 'ssh',
+      'ssh_user': 'aella',
       'enabled': True,
     }
   },

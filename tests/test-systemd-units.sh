@@ -48,6 +48,8 @@ unit_has_kv "$ROOT/server/frps.service" Wants "network-online.target" \
   || fail "frps Wants=network-online.target"
 unit_has_kv "$ROOT/server/frps.service" ExecStart "/usr/local/bin/frps -c /etc/frp/frps.toml" \
   || fail "frps ExecStart"
+grep -q '^NoNewPrivileges=true' "$ROOT/server/frps.service" || fail "frps NoNewPrivileges"
+grep -q '^PrivateTmp=true' "$ROOT/server/frps.service" || fail "frps PrivateTmp"
 pass "frps.service static keys"
 
 unit_has_kv "$ROOT/server/frp-port-allocator.service" After "network-online.target frps.service" \
@@ -76,6 +78,8 @@ unit_has_kv "$ROOT/client/frpc.service" Wants "network-online.target" \
   || fail "frpc Wants"
 unit_has_kv "$ROOT/client/frpc.service" ExecStart "/usr/local/bin/frpc -c /etc/frp/frpc.toml" \
   || fail "frpc ExecStart"
+grep -q '^NoNewPrivileges=true' "$ROOT/client/frpc.service" || fail "frpc NoNewPrivileges"
+grep -q '^PrivateTmp=true' "$ROOT/client/frpc.service" || fail "frpc PrivateTmp"
 pass "frpc.service static keys"
 
 # Ordering intent encoded in After= lines above.

@@ -7,11 +7,20 @@ $script:FrpTlsLoaded = $true
 function Get-FrpAllocatorOrigin {
     param([Parameter(Mandatory = $true)][string]$AllocatorUrl)
     $u = [string]$AllocatorUrl
-    if ($u -notmatch '^https://') {
-        throw 'ERROR: allocator URL must be https://'
+    if ([string]::IsNullOrWhiteSpace($u)) {
+        throw 'ERROR: allocator URL is empty'
+    }
+    foreach ($ch in $u.ToCharArray()) {
+        $code = [int][char]$ch
+        if ($code -lt 32 -or $code -eq 127) {
+            throw 'ERROR: allocator URL contains control characters'
+        }
     }
     if ($u -match '[\r\n\t ]') {
         throw 'ERROR: allocator URL contains illegal whitespace'
+    }
+    if ($u -notmatch '^https://') {
+        throw 'ERROR: allocator URL must be https://'
     }
     try {
         $uri = [Uri]$u
@@ -20,6 +29,20 @@ function Get-FrpAllocatorOrigin {
     }
     if (-not $uri.IsAbsoluteUri -or $uri.Scheme -ne 'https' -or [string]::IsNullOrWhiteSpace($uri.Host)) {
         throw 'ERROR: allocator URL must be an https:// URL with a host'
+    }
+    if (-not [string]::IsNullOrEmpty($uri.UserInfo)) {
+        throw 'ERROR: allocator URL must not contain userinfo'
+    }
+    if ($uri.IsDefaultPort) {
+        # ok
+    } elseif ($uri.Port -lt 1 -or $uri.Port -gt 65535) {
+        throw 'ERROR: allocator URL port is out of range'
+    }
+    # Reject URLs whose authority embeds credentials even if Uri normalized them away.
+    $authority = $u.Substring('https://'.Length)
+    $authority = $authority.Split([char[]]@('/', '?', '#'), 2)[0]
+    if ($authority.Contains('@')) {
+        throw 'ERROR: allocator URL must not contain userinfo'
     }
     $builder = New-Object System.UriBuilder $uri
     $builder.Path = ''

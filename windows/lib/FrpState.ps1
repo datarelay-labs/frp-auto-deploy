@@ -12,6 +12,7 @@ function Initialize-FrpDirectories {
         (Get-FrpCertsDir),
         (Get-FrpLogsDir),
         (Get-FrpToolsDir),
+        (Get-FrpLibDir),
         (Get-FrpBackupDir)
     )
     foreach ($d in $dirs) {
@@ -23,16 +24,18 @@ function Initialize-FrpDirectories {
         Restrict-FrpDirectoryAcl -Path (Get-FrpStateDir)
         Restrict-FrpDirectoryAcl -Path (Get-FrpConfigDir)
         Restrict-FrpDirectoryAcl -Path (Get-FrpCertsDir)
+        # Harden backups before any sensitive snapshot copies can land there.
+        Restrict-FrpDirectoryAcl -Path (Get-FrpBackupDir)
     }
 }
 
 function Restrict-FrpDirectoryAcl {
     param([Parameter(Mandatory = $true)][string]$Path)
-    if (-not (Test-FrpIsWindowsHost)) { return }
-    if (-not (Test-Path -LiteralPath $Path)) { return }
     if ($env:FRP_WINDOWS_FAIL_ACL -eq '1') {
         throw 'ERROR: simulated ACL failure (FRP_WINDOWS_FAIL_ACL=1)'
     }
+    if (-not (Test-FrpIsWindowsHost)) { return }
+    if (-not (Test-Path -LiteralPath $Path)) { return }
     try {
         $acl = Get-Acl -LiteralPath $Path
         $acl.SetAccessRuleProtection($true, $false)
@@ -168,6 +171,8 @@ function Test-FrpIsEnrolled {
     if (-not (Test-Path -LiteralPath $statePath)) { return $false }
     if (-not (Test-Path -LiteralPath $tomlPath)) { return $false }
     if (-not (Test-Path -LiteralPath $pubPath)) { return $false }
+    # Windows plaintext-only identity is never enrolled (DPAPI required).
+    if (Test-FrpWindowsPlaintextIdentityOnly) { return $false }
     if (-not (Test-Path -LiteralPath $keyPath)) { return $false }
     return $true
 }
@@ -233,10 +238,12 @@ function Save-FrpIdentityKey {
 }
 
 function Read-FrpIdentityKey {
-    $stateDir = Get-FrpStateDir
-    $dpapi = Join-Path $stateDir 'client-identity.key.dpapi'
-    $plain = Join-Path $stateDir 'client-identity.key'
-    if ((Test-Path -LiteralPath $dpapi) -and (Test-FrpIsWindowsHost)) {
+    $dpapi = Get-FrpIdentityDpapiKeyPath
+    $plain = Get-FrpIdentityPlainKeyPath
+    if (Test-Path -LiteralPath $dpapi) {
+        if (-not (Test-FrpIsWindowsHost)) {
+            throw 'ERROR: DPAPI identity blob present on non-Windows host; cannot decrypt'
+        }
         [void](Initialize-FrpDpapi)
         $protected = [System.IO.File]::ReadAllBytes($dpapi)
         try {
@@ -248,10 +255,190 @@ function Read-FrpIdentityKey {
         }
         return [System.Text.Encoding]::UTF8.GetString($bytes)
     }
+    if (Test-FrpEnforceWindowsIdentityPolicy) {
+        # Fail closed: never silently consume plaintext under Windows identity policy.
+        if (Test-Path -LiteralPath $plain) {
+            throw 'ERROR: plaintext client-identity.key is not accepted on Windows; use DPAPI (.dpapi) or ConvertTo-FrpDpapiIdentity'
+        }
+        throw 'ERROR: management identity is missing'
+    }
     if (Test-Path -LiteralPath $plain) {
         return [System.IO.File]::ReadAllText($plain)
     }
     throw 'ERROR: management identity is missing'
+}
+
+function ConvertTo-FrpDpapiIdentity {
+    <#
+    .SYNOPSIS
+      Explicit one-shot migration: plaintext identity -> DPAPI. Never called from Read.
+    #>
+    if (-not (Test-FrpIsWindowsHost)) {
+        throw 'ERROR: DPAPI migration is only supported on Windows'
+    }
+    $plain = Get-FrpIdentityPlainKeyPath
+    $dpapi = Get-FrpIdentityDpapiKeyPath
+    if (Test-Path -LiteralPath $dpapi) {
+        throw 'ERROR: DPAPI identity already exists; refuse to overwrite'
+    }
+    if (-not (Test-Path -LiteralPath $plain)) {
+        throw 'ERROR: plaintext client-identity.key not found'
+    }
+    $aclResult = Test-FrpIdentityKeyAcl -Path $plain
+    if ($aclResult -ne 'PASS') {
+        throw ("ERROR: plaintext identity ACL is not secure ({0}); refuse migration" -f $aclResult)
+    }
+    $pem = [System.IO.File]::ReadAllText($plain)
+    if ([string]::IsNullOrWhiteSpace($pem)) {
+        throw 'ERROR: plaintext identity is empty'
+    }
+    $saved = Save-FrpIdentityKey -PrivatePem $pem
+    $roundTrip = Read-FrpIdentityKey
+    if ($roundTrip -ne $pem) {
+        if (Test-Path -LiteralPath $saved) {
+            Remove-Item -LiteralPath $saved -Force -ErrorAction SilentlyContinue
+        }
+        throw 'ERROR: DPAPI round-trip mismatch; plaintext retained'
+    }
+    Restrict-FrpFileAcl -Path $saved
+    Remove-Item -LiteralPath $plain -Force
+    return $saved
+}
+
+function Get-FrpMutationLockTimeoutMs {
+    if ($env:FRP_WINDOWS_MUTATION_LOCK_MS -and $env:FRP_WINDOWS_MUTATION_LOCK_MS.Trim().Length -gt 0) {
+        try { return [int]$env:FRP_WINDOWS_MUTATION_LOCK_MS } catch { }
+    }
+    return 30000
+}
+
+function Get-FrpMutationMutexName {
+    if (Test-FrpIsWindowsHost) {
+        return 'Global\FrpAutoDeployClientMutation'
+    }
+    # .NET on non-Windows: avoid backslash in mutex names.
+    return 'FrpAutoDeployClientMutation'
+}
+
+function Get-FrpMutationLockFilePath {
+    return (Join-Path (Get-FrpWindowsRoot) 'client-mutation.lock')
+}
+
+function Invoke-FrpWithMutationLock {
+    <#
+    .SYNOPSIS
+      Exclusive lock around client mutations (update/pause/resume/restart/uninstall/install).
+      Windows: named Mutex. Non-Windows test hosts: exclusive lock file (named Mutex is not
+      cross-process on Unix).
+    #>
+    param(
+        [Parameter(Mandatory = $true)][scriptblock]$Script,
+        [int]$TimeoutMs = -1
+    )
+    if ($TimeoutMs -lt 0) { $TimeoutMs = Get-FrpMutationLockTimeoutMs }
+
+    if (-not (Test-FrpIsWindowsHost)) {
+        Initialize-FrpDirectories
+        $lockPath = Get-FrpMutationLockFilePath
+        $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+        $stream = $null
+        while ($true) {
+            try {
+                $stream = [System.IO.File]::Open(
+                    $lockPath,
+                    [System.IO.FileMode]::OpenOrCreate,
+                    [System.IO.FileAccess]::ReadWrite,
+                    [System.IO.FileShare]::None
+                )
+                break
+            } catch {
+                if ([DateTime]::UtcNow -ge $deadline) {
+                    throw 'ERROR: another frp-auto-deploy client mutation is in progress; try again later'
+                }
+                Start-Sleep -Milliseconds 50
+            }
+        }
+        try {
+            return & $Script
+        } finally {
+            if ($null -ne $stream) {
+                try { $stream.Dispose() } catch { }
+            }
+        }
+    }
+
+    $mutex = $null
+    $acquired = $false
+    try {
+        $createdNew = $false
+        $name = Get-FrpMutationMutexName
+        $mutex = New-Object System.Threading.Mutex($false, $name, [ref]$createdNew)
+        try {
+            $acquired = $mutex.WaitOne($TimeoutMs)
+        } catch [System.Threading.AbandonedMutexException] {
+            $acquired = $true
+        }
+        if (-not $acquired) {
+            throw 'ERROR: another frp-auto-deploy client mutation is in progress; try again later'
+        }
+        return & $Script
+    } finally {
+        if ($acquired -and $null -ne $mutex) {
+            try { [void]$mutex.ReleaseMutex() } catch { }
+        }
+        if ($null -ne $mutex) {
+            try { $mutex.Dispose() } catch { }
+        }
+    }
+}
+
+function Remove-FrpOldUpdateBackups {
+    param([int]$Keep = 5)
+    if ($Keep -lt 1) { $Keep = 1 }
+    $root = Get-FrpBackupDir
+    if (-not (Test-Path -LiteralPath $root)) { return }
+    $dirs = @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like 'update-*' } |
+        Sort-Object -Property Name)
+    $extra = $dirs.Count - $Keep
+    if ($extra -le 0) { return }
+    for ($i = 0; $i -lt $extra; $i++) {
+        Remove-Item -LiteralPath $dirs[$i].FullName -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function New-FrpUpdateBackupSnapshot {
+    <#
+    .SYNOPSIS
+      Create ACL-hardened update-* backup dir, then copy sensitive files.
+      Aborts before any copy if directory ACL hardening fails.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][System.Collections.IDictionary]$SnapshotMap
+    )
+    Initialize-FrpDirectories
+    $stamp = (Get-Date -Format 'yyyyMMddHHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $backupRoot = Join-Path (Get-FrpBackupDir) ("update-" + $stamp)
+    if (Test-Path -LiteralPath $backupRoot) {
+        throw ("ERROR: update backup path already exists: {0}" -f $backupRoot)
+    }
+    New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
+    # Restrict dir ACL BEFORE copying secrets (frpc.toml etc.).
+    try {
+        Restrict-FrpDirectoryAcl -Path $backupRoot
+    } catch {
+        Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction SilentlyContinue
+        throw
+    }
+    foreach ($name in @($SnapshotMap.Keys)) {
+        $src = [string]$SnapshotMap[$name]
+        if (-not (Test-Path -LiteralPath $src)) { continue }
+        $dest = Join-Path $backupRoot $name
+        Copy-Item -LiteralPath $src -Destination $dest -Force
+        Restrict-FrpFileAcl -Path $dest
+    }
+    Remove-FrpOldUpdateBackups -Keep 5
+    return $backupRoot
 }
 
 function Save-FrpIdentityPublic {
@@ -510,6 +697,180 @@ function Test-FrpCanResumeInstall {
     if (-not (Test-FrpIsEnrolled)) { return $false }
     $status = Get-FrpInstallStatus
     return ($status -eq 'enrolled_incomplete')
+}
+
+function Save-FrpEnrollRecovery {
+    <#
+    .SYNOPSIS
+      Persist zero-touch post-redeem recovery journal (no bootstrap ticket).
+      Windows: DPAPI-sealed blob + secret ACL. Non-Windows tests: plaintext 0600.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$AllocatorUrl,
+        [Parameter(Mandatory = $true)][string]$MachineId,
+        [Parameter(Mandatory = $true)][string]$Hostname,
+        [Parameter(Mandatory = $true)][string]$EnrollmentId,
+        [Parameter(Mandatory = $true)][string]$EnrollmentSecret,
+        [Parameter(Mandatory = $true)]$Services,
+        [string]$CaSha256,
+        [string]$IdentityKeyRef
+    )
+    Initialize-FrpDirectories
+    if ([string]::IsNullOrWhiteSpace($EnrollmentId) -or [string]::IsNullOrWhiteSpace($EnrollmentSecret)) {
+        throw 'ERROR: recovery journal requires enrollment credentials'
+    }
+    if ([string]::IsNullOrWhiteSpace($MachineId) -or [string]::IsNullOrWhiteSpace($AllocatorUrl)) {
+        throw 'ERROR: recovery journal requires machine_id and allocator_url'
+    }
+    $payload = [ordered]@{
+        schema_version     = 1
+        allocator_url      = $AllocatorUrl
+        machine_id         = $MachineId
+        hostname           = $Hostname
+        enrollment_id      = $EnrollmentId
+        enrollment_secret  = $EnrollmentSecret
+        services           = @($Services)
+        ca_sha256          = $(if ($CaSha256) { $CaSha256.Trim().ToLowerInvariant() } else { '' })
+        identity_key_ref   = $(if ($IdentityKeyRef) { $IdentityKeyRef } else { (Get-FrpIdentityKeyPath) })
+    }
+    $json = ($payload | ConvertTo-Json -Depth 8) + "`n"
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+
+    if (Initialize-FrpDpapi) {
+        $path = Get-FrpEnrollRecoveryDpapiPath
+        $scope = [System.Security.Cryptography.DataProtectionScope]::LocalMachine
+        try {
+            $protected = [System.Security.Cryptography.ProtectedData]::Protect($bytes, $null, $scope)
+        } catch {
+            $protected = [System.Security.Cryptography.ProtectedData]::Protect(
+                $bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+        }
+        $tmp = "$path.tmp"
+        [System.IO.File]::WriteAllBytes($tmp, $protected)
+        Restrict-FrpFileAcl -Path $tmp
+        Move-Item -LiteralPath $tmp -Destination $path -Force
+        Restrict-FrpFileAcl -Path $path
+        # Remove any leftover plaintext journal.
+        $plain = Get-FrpEnrollRecoveryPlainPath
+        if (Test-Path -LiteralPath $plain) {
+            Remove-Item -LiteralPath $plain -Force -ErrorAction SilentlyContinue
+        }
+        return $path
+    }
+
+    if (Test-FrpIsWindowsHost) {
+        throw 'ERROR: DPAPI required to persist enroll recovery journal on Windows; no plaintext fallback'
+    }
+    Write-Warning 'DPAPI unavailable; storing enroll recovery journal as a plain file under the test root. Do not use this mode on production Windows hosts.'
+    $path = Get-FrpEnrollRecoveryPlainPath
+    $tmp = "$path.tmp"
+    [System.IO.File]::WriteAllText($tmp, $json)
+    Restrict-FrpFileAcl -Path $tmp
+    Move-Item -LiteralPath $tmp -Destination $path -Force
+    Restrict-FrpFileAcl -Path $path
+    return $path
+}
+
+function Read-FrpEnrollRecovery {
+    <#
+    .SYNOPSIS
+      Load recovery journal. Fail closed on corrupt/malformed/missing required fields.
+      Must not contain a bootstrap ticket.
+    #>
+    $dpapi = Get-FrpEnrollRecoveryDpapiPath
+    $plain = Get-FrpEnrollRecoveryPlainPath
+    $raw = $null
+
+    if (Test-Path -LiteralPath $dpapi) {
+        if (-not (Test-FrpIsWindowsHost)) {
+            throw 'ERROR: DPAPI recovery journal present on non-Windows host; cannot decrypt'
+        }
+        [void](Initialize-FrpDpapi)
+        $protected = [System.IO.File]::ReadAllBytes($dpapi)
+        try {
+            $bytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
+                $protected, $null, [System.Security.Cryptography.DataProtectionScope]::LocalMachine)
+        } catch {
+            $bytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
+                $protected, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+        }
+        $raw = [System.Text.Encoding]::UTF8.GetString($bytes)
+    } elseif (Test-Path -LiteralPath $plain) {
+        if (Test-FrpIsWindowsHost) {
+            throw 'ERROR: plaintext enroll-recovery.json is not accepted on Windows; DPAPI required'
+        }
+        $raw = [System.IO.File]::ReadAllText($plain)
+    } else {
+        throw 'ERROR: enroll recovery journal is missing'
+    }
+
+    try {
+        $data = $raw | ConvertFrom-Json
+    } catch {
+        throw 'ERROR: enroll recovery journal is not valid JSON'
+    }
+    if ($null -eq $data -or $data -isnot [System.Management.Automation.PSObject]) {
+        throw 'ERROR: enroll recovery journal is malformed'
+    }
+    if ([int]$data.schema_version -ne 1) {
+        throw 'ERROR: unsupported enroll recovery journal schema'
+    }
+    foreach ($bad in @('bootstrap_ticket', 'ticket', 'FRP_BOOTSTRAP_TICKET')) {
+        if ($data.PSObject.Properties.Name -contains $bad -and $data.$bad) {
+            throw 'ERROR: enroll recovery journal must not contain a bootstrap ticket'
+        }
+    }
+    foreach ($req in @('allocator_url', 'machine_id', 'enrollment_id', 'enrollment_secret')) {
+        if (($data.PSObject.Properties.Name -notcontains $req) -or
+            [string]::IsNullOrWhiteSpace([string]$data.$req)) {
+            throw ("ERROR: enroll recovery journal missing {0}" -f $req)
+        }
+    }
+    if (($data.PSObject.Properties.Name -notcontains 'services') -or ($null -eq $data.services)) {
+        throw 'ERROR: enroll recovery journal missing services'
+    }
+    return @{
+        AllocatorUrl     = [string]$data.allocator_url
+        MachineId        = [string]$data.machine_id
+        Hostname         = [string]$data.hostname
+        EnrollmentId     = [string]$data.enrollment_id
+        EnrollmentSecret = [string]$data.enrollment_secret
+        Services         = @($data.services)
+        CaSha256         = [string]$data.ca_sha256
+        IdentityKeyRef   = [string]$data.identity_key_ref
+    }
+}
+
+function Remove-FrpEnrollRecovery {
+    foreach ($path in @((Get-FrpEnrollRecoveryDpapiPath), (Get-FrpEnrollRecoveryPlainPath))) {
+        if (Test-Path -LiteralPath $path) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-FrpHasEnrollRecovery {
+    return (
+        (Test-Path -LiteralPath (Get-FrpEnrollRecoveryDpapiPath)) -or
+        (Test-Path -LiteralPath (Get-FrpEnrollRecoveryPlainPath))
+    )
+}
+
+function Test-FrpCanResumeFromRecovery {
+    if (-not (Test-FrpHasEnrollRecovery)) { return $false }
+    if (Test-FrpIsEnrolled) { return $false }
+    try {
+        $rec = Read-FrpEnrollRecovery
+        if ([string]::IsNullOrWhiteSpace($rec.EnrollmentId) -or
+            [string]::IsNullOrWhiteSpace($rec.EnrollmentSecret) -or
+            [string]::IsNullOrWhiteSpace($rec.MachineId)) {
+            return $false
+        }
+        return $true
+    } catch {
+        # Present but corrupt: caller should fail closed, not treat as absent.
+        throw
+    }
 }
 
 function Get-FrpEnabledServiceCount {

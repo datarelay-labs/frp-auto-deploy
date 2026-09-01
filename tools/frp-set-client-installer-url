@@ -1,28 +1,48 @@
 #!/usr/bin/env python3
+import importlib.util
 import json
 import os
 import sys
 import tempfile
 from pathlib import Path
-from urllib.parse import urlsplit
 
 
-def validate_https_url(url):
-    """Match lib/frp-common.sh frp_validate_https_url (+ control-char reject)."""
-    if not url or any(ord(ch) < 32 or ord(ch) == 127 for ch in url):
-        return False
+def _load_lib(name, filename):
+    here = Path(__file__).resolve()
+    candidates = (
+        here.parent.parent / 'lib' / filename,
+        Path('/usr/local/lib/frp-auto-deploy') / filename,
+    )
+    root = os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
+    if root:
+        candidates = (Path(root) / 'usr/local/lib/frp-auto-deploy' / filename,) + candidates
+    for path in candidates:
+        if path.is_file():
+            spec = importlib.util.spec_from_file_location(name, str(path))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+    return None
+
+
+def _atomic_write_json(path, data):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix='config.', suffix='.tmp', dir=str(path.parent))
     try:
-        parsed = urlsplit(url)
-        port = parsed.port
-    except (TypeError, ValueError):
-        return False
-    if parsed.scheme != 'https' or not parsed.hostname:
-        return False
-    if parsed.username is not None or parsed.password is not None:
-        return False
-    if port is not None and not (1 <= port <= 65535):
-        return False
-    return True
+        with os.fdopen(fd, 'w') as handle:
+            json.dump(data, handle, indent=2, sort_keys=True)
+            handle.write('\n')
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 if len(sys.argv) != 2:
@@ -30,7 +50,11 @@ if len(sys.argv) != 2:
     sys.exit(2)
 
 url = sys.argv[1]
-if not validate_https_url(url):
+frp_url = _load_lib('frp_url', 'frp_url.py')
+if frp_url is None:
+    print('ERROR: frp_url.py is unavailable', file=sys.stderr)
+    sys.exit(1)
+if not frp_url.validate_https_allocator_url(url):
     print(
         'ERROR: client installer URL must be a valid https:// URL '
         '(no http/file/ftp, empty host, userinfo, or control characters).',
@@ -38,15 +62,60 @@ if not validate_https_url(url):
     )
     sys.exit(1)
 
-path = Path(os.environ.get('FRP_DEPLOY_TEST_ROOT', '') + '/etc/frp-auto-deploy/config.json')
-cfg = json.loads(path.read_text())
-cfg['client_installer_url'] = url
-fd, tmp = tempfile.mkstemp(prefix='config.', suffix='.tmp', dir=str(path.parent))
-with os.fdopen(fd, 'w') as f:
-    json.dump(cfg, f, indent=2, sort_keys=True)
-    f.write('\n')
-    f.flush()
-    os.fsync(f.fileno())
-os.chmod(tmp, 0o600)
-os.replace(tmp, path)
-print('Client installer URL updated.')
+root = Path(os.environ.get('FRP_DEPLOY_TEST_ROOT', '') or '/')
+path = root / 'etc/frp-auto-deploy/config.json'
+
+locks = _load_lib('frp_control_locks', 'frp_control_locks.py')
+if locks is None:
+    print('ERROR: frp_control_locks.py is unavailable', file=sys.stderr)
+    sys.exit(1)
+
+scfg = _load_lib('frp_server_config', 'frp_server_config.py')
+if scfg is None:
+    print('ERROR: frp_server_config.py is unavailable', file=sys.stderr)
+    sys.exit(1)
+timeout = float(os.environ.get('FRP_CONTROL_LOCK_TIMEOUT', '30'))
+
+try:
+    lock_cm = locks.acquire_control_locks(root, timeout=timeout)
+    lock_cm.__enter__()
+except locks.LockTimeout as exc:
+    print('ERROR: timed out waiting for server control locks: %s' % exc, file=sys.stderr)
+    sys.exit(1)
+except Exception as exc:
+    print('ERROR: unable to acquire server control locks: %s' % exc, file=sys.stderr)
+    sys.exit(1)
+
+try:
+    try:
+        cfg = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError) as exc:
+        print('ERROR: unable to read server config.json: %s' % exc, file=sys.stderr)
+        sys.exit(1)
+    if not isinstance(cfg, dict):
+        print('ERROR: server config.json is not an object', file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        scfg.validate_server_config(cfg)
+    except ValueError as exc:
+        print('ERROR: current server configuration is unsafe: %s' % exc, file=sys.stderr)
+        sys.exit(1)
+
+    cfg = dict(cfg)
+    cfg['client_installer_url'] = url
+
+    try:
+        scfg.validate_server_config(cfg)
+    except ValueError as exc:
+        print('ERROR: updated server configuration is unsafe: %s' % exc, file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        _atomic_write_json(path, cfg)
+    except OSError as exc:
+        print('ERROR: unable to write server config.json: %s' % exc, file=sys.stderr)
+        sys.exit(1)
+    print('Client installer URL updated.')
+finally:
+    lock_cm.__exit__(None, None, None)

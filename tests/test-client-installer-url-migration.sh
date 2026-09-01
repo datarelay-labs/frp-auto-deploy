@@ -142,12 +142,21 @@ frp_validate_https_url 'https://user:pass@example.test/x' && fail "userinfo URL 
 pass "URL_VALIDATION_INTACT"
 
 # --- frp-set-client-installer-url enforces https ---
-mkdir -p "$WORKDIR/set-url/etc/frp-auto-deploy"
+mkdir -p "$WORKDIR/set-url/etc/frp-auto-deploy" "$WORKDIR/set-url/var/lib/frp-auto-deploy"
 python3 - "$WORKDIR/set-url/etc/frp-auto-deploy/config.json" <<'PY'
 import json, sys
 from pathlib import Path
 Path(sys.argv[1]).write_text(json.dumps({
   "public_ip": "203.0.113.10",
+  "public_host": "203.0.113.10",
+  "deployment_mode": "direct",
+  "frp_transport": "tcp",
+  "port_start": 6100,
+  "port_end": 6200,
+  "frp_control_listen_port": 7000,
+  "frp_control_public_port": 7000,
+  "allocator_listen_port": 6099,
+  "allocator_public_port": 6099,
   "client_installer_url": "https://example.test/old.sh",
 }, indent=2) + "\n")
 PY
@@ -172,8 +181,39 @@ python3 "$ROOT/tools/frp-set-client-installer-url" \
 nl_rc=$?
 set -e
 [[ "$nl_rc" -ne 0 ]] || fail "newline set accepted"
-unset FRP_DEPLOY_TEST_ROOT
 pass "SET_CLIENT_INSTALLER_URL_HTTPS_ONLY"
+
+# Setter shares control locks with restore / project-update (lifecycle + registry).
+python3 - "$ROOT" "$WORKDIR/set-url" <<'PY' || fail "CONFIG_SETTER_CONTROL_LOCK"
+import os, sys, time
+from pathlib import Path
+root_repo, tree = Path(sys.argv[1]), Path(sys.argv[2])
+sys.path.insert(0, str(root_repo / "lib"))
+import frp_control_locks as locks
+
+os.environ["FRP_DEPLOY_TEST_ROOT"] = str(tree)
+os.environ["FRP_CONTROL_LOCK_TIMEOUT"] = "1"
+setter = root_repo / "tools" / "frp-set-client-installer-url"
+
+with locks.acquire_control_locks(tree, timeout=5):
+    import subprocess
+    started = time.monotonic()
+    proc = subprocess.run(
+        [sys.executable, str(setter), "https://mirror.example/other.sh"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
+        env=dict(os.environ),
+    )
+    elapsed = time.monotonic() - started
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert "lock" in (proc.stderr or "").lower(), proc.stderr
+    assert elapsed < 8, elapsed
+print("CONFIG_SETTER_CONTROL_LOCK_OK")
+PY
+pass "CONFIG_SETTER_CONTROL_LOCK"
+unset FRP_DEPLOY_TEST_ROOT
+unset FRP_CONTROL_LOCK_TIMEOUT
 
 # --- Legacy historical owner URL migrates ---
 LEGACY="$(frp_legacy_project_client_installer_url)"

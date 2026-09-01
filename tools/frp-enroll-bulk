@@ -163,7 +163,7 @@ def main(argv=None):
                 raise RuntimeError('simulated mid-batch issuance failure')
             row_ttl = args.ttl + index
             ticket, enroll_record, ticket_record = allocator.issue_bootstrap_ticket(
-                enrollments, bootstrap, services, row_ttl, note, label=label
+                enrollments, bootstrap, services, row_ttl, note, label=label, cfg=cfg
             )
             ticket_id = str(ticket_record.get('id') or '')
             enroll_id = str(enroll_record.get('id') or '')

@@ -29,6 +29,13 @@ def load_creg():
 
 CREG = load_creg()
 
+def require_valid_registry(state, cfg=None):
+    try:
+        return CREG.validate_registry_or_raise(state, cfg)
+    except ValueError as exc:
+        raise SystemExit('ERROR: %s' % exc)
+
+
 
 def lock_registry(path):
     lock_path = Path(path).resolve().parent / 'registry.lock'
@@ -64,50 +71,46 @@ def atomic_write_json(path, data, mode=0o600):
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
-def require_v2(state):
-    if not isinstance(state, dict) or state.get('schema_version') != 2:
-        version = 1
-        if isinstance(state, dict) and 'schema_version' in state:
-            version = state.get('schema_version')
-        raise SystemExit(
-            f'ERROR: unsupported registry schema version {version}.\n\n'
-            'This release requires registry schema version 2.\n\n'
-            'Back up the existing registry and redeploy/reset it explicitly before continuing.'
-        )
-    for client in (state.get('clients') or {}).values():
-        if not isinstance(client, dict):
-            raise SystemExit(
-                'ERROR: unsupported registry schema version 2.\n\n'
-                'This release requires registry schema version 2.\n\n'
-                'Back up the existing registry and redeploy/reset it explicitly before continuing.'
-            )
-        if 'ssh_port' in client or 'https_port' in client:
-            raise SystemExit(
-                'ERROR: unsupported registry schema version 2.\n\n'
-                'Legacy SSH/HTTPS fields are present. This release requires the generic multi-service registry.\n\n'
-                'Back up the existing registry and redeploy/reset it explicitly before continuing.'
-            )
-
 
 parser = argparse.ArgumentParser(
     description='Release all service port reservations; keep the client management record'
 )
 parser.add_argument('query', help='immutable CLIENT ID (exact registry key)')
-parser.add_argument('--force', action='store_true', help='release even if a published port is currently active')
 args = parser.parse_args()
+
+
+def load_release_guard():
+    here = Path(__file__).resolve()
+    candidates = [
+        here.parent.parent / 'lib' / 'frp_release_guard.py',
+        Path('/usr/local/lib/frp-auto-deploy/frp_release_guard.py'),
+    ]
+    if ROOT:
+        candidates.insert(1, Path(ROOT) / 'usr/local/lib/frp-auto-deploy/frp_release_guard.py')
+    for path in candidates:
+        if path.is_file():
+            spec = importlib.util.spec_from_file_location('frp_release_guard', str(path))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+    raise SystemExit('ERROR: missing frp_release_guard.py')
+
+
+RG = load_release_guard()
 
 
 def ensure_releasable(services, force=False):
     snapshot = CREG.passive_listening_ports()
-    states = [
-        CREG.passive_port_state(service.get('remote_port'), snapshot)
-        for service in services.values() if isinstance(service, dict) and service.get('remote_port')
-    ]
-    if any(state != 'offline' for state in states) and not force:
-        raise SystemExit(
-            'Client state is %s. Uninstall/stop frpc first, or use --force.'
-            % ('online' if 'online' in states else 'unknown')
-        )
+    for service in services.values():
+        if not isinstance(service, dict):
+            continue
+        port = service.get('remote_port')
+        if not port:
+            continue
+        try:
+            RG.ensure_port_releasable(port, cfg=cfg, force=force)
+        except ValueError as exc:
+            raise SystemExit('ERROR: %s' % exc) from exc
 
 
 cfg = json.loads(Path(ROOT + '/etc/frp-auto-deploy/config.json').read_text())
@@ -115,7 +118,7 @@ path = Path(cfg['registry_file'])
 if ROOT and not str(path).startswith(ROOT):
     path = Path(ROOT + str(path))
 state = json.loads(path.read_text())
-require_v2(state)
+require_valid_registry(state, cfg)
 
 mid, client = CREG.resolve_client_id_only_or_exit(state, args.query)
 
@@ -130,7 +133,7 @@ for sid, svc in sorted(services.items()):
     if port:
         ports.append((sid, int(port), svc.get('enabled', True) is not False))
 
-ensure_releasable(services, args.force)
+ensure_releasable(services)
 
 print(f'Releasing services for {CREG.sanitize_display(CREG.display_name(client, mid), 64)} '
       f'({CREG.sanitize_display(mid, 128)})')
@@ -149,15 +152,16 @@ if answer != 'RELEASE':
 lock_fd = lock_registry(path)
 try:
     state = json.loads(path.read_text())
-    require_v2(state)
+    require_valid_registry(state, cfg)
     mid, client = CREG.resolve_client_id_only_or_exit(state, args.query)
     services = client.get('services') or {}
     if not isinstance(services, dict):
         services = {}
     # Re-check under the registry lock to close the TOCTOU window.
-    ensure_releasable(services, args.force)
+    ensure_releasable(services)
     client['services'] = {}
     state['clients'][mid] = client
+    require_valid_registry(state, cfg)
     atomic_write_json(path, state)
 finally:
     unlock_registry(lock_fd)

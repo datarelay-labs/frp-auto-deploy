@@ -17,6 +17,7 @@ function New-FrpClientToml {
         [Parameter(Mandatory = $true)][string]$Token,
         [Parameter(Mandatory = $true)][string]$HostId,
         [Parameter(Mandatory = $true)]$Services,
+        [string]$MachineId,
         [string]$Transport = 'tcp',
         [string]$TrustedCaFile,
         [string]$DestinationPath
@@ -48,6 +49,22 @@ function New-FrpClientToml {
         [void]$lines.Add(('transport.tls.trustedCaFile = "{0}"' -f (Escape-FrpTomlString $TrustedCaFile)))
     }
 
+    $proofAdded = $false
+    if ($MachineId) {
+        try {
+            $priv = Read-FrpIdentityKey
+            $proof = Protect-FrpDataPlaneProof -MachineId $MachineId -PrivatePem $priv
+            [void]$lines.Add('')
+            [void]$lines.Add(('clientID = "{0}"' -f (Escape-FrpTomlString $MachineId)))
+            [void]$lines.Add(('metadatas.frp_ad_client_id = "{0}"' -f (Escape-FrpTomlString $MachineId)))
+            [void]$lines.Add('metadatas.frp_ad_proof_schema = "1"')
+            [void]$lines.Add(('metadatas.frp_ad_proof = "{0}"' -f (Escape-FrpTomlString $proof)))
+            $proofAdded = $true
+        } catch {
+            throw ("ERROR: failed to generate data-plane proof: {0}" -f $_.Exception.Message)
+        }
+    }
+
     $map = ConvertTo-FrpServiceMap -Services $Services
     foreach ($sid in $map.Keys) {
         $item = $map[$sid]
@@ -62,6 +79,9 @@ function New-FrpClientToml {
         [void]$lines.Add(('localIP = "{0}"' -f (Escape-FrpTomlString $item.local_ip)))
         [void]$lines.Add(('localPort = {0}' -f [int]$item.local_port))
         [void]$lines.Add(('remotePort = {0}' -f [int]$item.remote_port))
+        if ($proofAdded) {
+            [void]$lines.Add(('metadatas.frp_ad_service_id = "{0}"' -f (Escape-FrpTomlString $item.id)))
+        }
     }
 
     $text = ($lines -join "`n") + "`n"
@@ -110,4 +130,36 @@ function Get-FrpTokenFromToml {
         }
     }
     return $null
+}
+
+function Test-FrpClientTomlNeedsDataPlaneRefresh {
+    param([string]$TomlPath)
+    if (-not $TomlPath) { $TomlPath = Get-FrpTomlPath }
+    if (-not (Test-Path -LiteralPath $TomlPath)) { return $false }
+    $text = [System.IO.File]::ReadAllText($TomlPath)
+    return ($text -notmatch 'frp_ad_proof' -or $text -notmatch 'frp_ad_service_id')
+}
+
+function Update-FrpClientDataPlaneMetadataIfNeeded {
+    $toml = Get-FrpTomlPath
+    if (-not (Test-FrpClientTomlNeedsDataPlaneRefresh -TomlPath $toml)) {
+        return $false
+    }
+    $statePath = Get-FrpStatePath
+    if (-not (Test-Path -LiteralPath $statePath)) {
+        throw 'ERROR: client state missing; cannot refresh data-plane metadata'
+    }
+    $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+    $token = Get-FrpTokenFromToml -TomlPath $toml
+    if (-not $token) {
+        throw 'ERROR: FRP token not available from frpc.toml'
+    }
+    $transport = 'tcp'
+    if ($state.PSObject.Properties.Name -contains 'frp_transport' -and $state.frp_transport) {
+        $transport = [string]$state.frp_transport
+    }
+    New-FrpClientToml -ServerAddr [string]$state.frp_server -ServerPort ([int]$state.frp_server_port) `
+        -Token $token -HostId [string]$state.host_id -Services $state.services `
+        -MachineId [string]$state.machine_id -Transport $transport | Out-Null
+    return $true
 }

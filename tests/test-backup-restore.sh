@@ -19,25 +19,49 @@ seed_state() {
     "$tree/etc/frp" \
     "$tree/var/lib/frp-auto-deploy/enrollments" \
     "$tree/var/lib/frp-auto-deploy/bootstrap"
-  printf '{"deployment_mode":"direct","marker":"%s"}\n' "$marker" \
-    >"$tree/etc/frp-auto-deploy/config.json"
+  python3 - "$ROOT" "$tree" "$marker" <<'PY'
+import json, sys
+from pathlib import Path
+root, tree, marker = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+sys.path.insert(0, str(root / "lib"))
+import frp_pki
+pki_dir = tree / "etc/frp-auto-deploy/pki"
+result = frp_pki.ensure_pki(str(pki_dir), "203.0.113.10")
+cfg = {
+    "deployment_mode": "direct",
+    "frp_transport": "tcp",
+    "public_host": "203.0.113.10",
+    "public_ip": "203.0.113.10",
+    "port_start": 6100,
+    "port_end": 6200,
+    "frp_control_listen_port": 7000,
+    "frp_control_public_port": 7000,
+    "allocator_listen_port": 6099,
+    "allocator_public_port": 6099,
+    "client_installer_url": "https://example.test/bootstrap-client.sh",
+    "marker": marker,
+    "pki_fingerprint": result["fingerprint"],
+}
+(tree / "etc/frp-auto-deploy/config.json").write_text(json.dumps(cfg, indent=2) + "\n")
+(tree / "var/lib/frp-auto-deploy/registry.json").write_text(json.dumps({
+    "schema_version": 2,
+    "clients": {},
+    "reserved": [6100],
+    "groups": {},
+    "label": marker,
+}, indent=2) + "\n")
+PY
   cat >"$tree/etc/frp-auto-deploy/version" <<EOF
 PROJECT_VERSION=2.1.0
 FRP_VERSION=0.70.1
 RELEASE_CHANNEL=dev
 SOURCE_REF=main
 BUNDLE_SHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+MARKER=$marker
 EOF
-  printf 'bindPort = 443\n# %s\n' "$marker" >"$tree/etc/frp/frps.toml"
+  printf 'bindPort = 7000\n# %s\n' "$marker" >"$tree/etc/frp/frps.toml"
   printf 'token-%s-super-secret\n' "$marker" >"$tree/etc/frp/server_token"
-  printf '{"schema_version":2,"clients":{"client-a":{"label":"%s","notes":"private note","services":{"ssh":{"remote_port":6001}}}},"reserved":[6002]}\n' \
-    "$marker" >"$tree/var/lib/frp-auto-deploy/registry.json"
   printf 'nonce-%s\n' "$marker" >"$tree/var/lib/frp-auto-deploy/mgmt-nonces.json"
-  printf 'ca-key-%s\n' "$marker" >"$tree/etc/frp-auto-deploy/pki/ca.key"
-  printf 'ca-cert-%s\n' "$marker" >"$tree/etc/frp-auto-deploy/pki/ca.crt"
-  printf 'server-key-%s\n' "$marker" >"$tree/etc/frp-auto-deploy/pki/server.key"
-  printf 'server-cert-%s\n' "$marker" >"$tree/etc/frp-auto-deploy/pki/server.crt"
-  printf 'serial-%s\n' "$marker" >"$tree/etc/frp-auto-deploy/pki/ca.srl"
   printf '{"ticket":"%s-enrollment"}\n' "$marker" \
     >"$tree/var/lib/frp-auto-deploy/enrollments/ticket.json"
   printf '{"ticket":"%s-bootstrap"}\n' "$marker" \
@@ -49,6 +73,9 @@ EOF
     "$tree/var/lib/frp-auto-deploy/bootstrap"
   find "$tree/etc/frp-auto-deploy" "$tree/etc/frp" "$tree/var/lib/frp-auto-deploy" \
     -type f -exec chmod 600 {} +
+  # Keys must remain 0600; ensure_pki already sets modes, re-assert after find.
+  chmod 600 "$tree/etc/frp-auto-deploy/pki/ca.key" "$tree/etc/frp-auto-deploy/pki/server.key"
+  chmod 644 "$tree/etc/frp-auto-deploy/pki/ca.crt" "$tree/etc/frp-auto-deploy/pki/server.crt"
 }
 
 mode_of() {
@@ -147,12 +174,27 @@ printf 'stale\n' >"$TREE/etc/frp-auto-deploy/frontend.conf"
 RESTORE_STDOUT="$WORKDIR/restore.stdout"
 python3 "$ROOT/tools/frp-restore" "$BACKUP" >"$RESTORE_STDOUT" \
   || fail "exact restore"
-grep -q '"marker":"original"' "$TREE/etc/frp-auto-deploy/config.json" || fail "config restore"
-grep -q '"label":"original"' "$TREE/var/lib/frp-auto-deploy/registry.json" || fail "registry restore"
-grep -q '6002' "$TREE/var/lib/frp-auto-deploy/registry.json" || fail "reservation restore"
+grep -q '"marker": "original"' "$TREE/etc/frp-auto-deploy/config.json" \
+  || grep -q '"marker":"original"' "$TREE/etc/frp-auto-deploy/config.json" \
+  || fail "config restore"
+grep -q '"label": "original"' "$TREE/var/lib/frp-auto-deploy/registry.json" \
+  || grep -q '"label":"original"' "$TREE/var/lib/frp-auto-deploy/registry.json" \
+  || fail "registry restore"
+grep -q '6100' "$TREE/var/lib/frp-auto-deploy/registry.json" || fail "reservation restore"
 grep -q 'token-original-super-secret' "$TREE/etc/frp/server_token" || fail "token restore"
-grep -q 'ca-key-original' "$TREE/etc/frp-auto-deploy/pki/ca.key" || fail "CA restore"
-grep -q 'serial-original' "$TREE/etc/frp-auto-deploy/pki/ca.srl" || fail "PKI serial restore"
+python3 - "$ROOT" "$TREE" <<'PY' || fail "CA restore fingerprint"
+import json, sys
+from pathlib import Path
+root, tree = Path(sys.argv[1]), Path(sys.argv[2])
+sys.path.insert(0, str(root / "lib"))
+import frp_pki
+cfg = json.loads((tree / "etc/frp-auto-deploy/config.json").read_text())
+fp = frp_pki.fingerprint_from_cert_file(tree / "etc/frp-auto-deploy/pki/ca.crt")
+assert fp == cfg["pki_fingerprint"], (fp, cfg.get("pki_fingerprint"))
+frp_pki.validate_existing_materials(frp_pki.pki_paths(tree / "etc/frp-auto-deploy/pki"))
+print("PKI_OK")
+PY
+grep -q 'MARKER=original' "$TREE/etc/frp-auto-deploy/version" || fail "version marker restore"
 grep -q 'original-enrollment' "$TREE/var/lib/frp-auto-deploy/enrollments/ticket.json" \
   || fail "enrollment restore"
 grep -q 'original-bootstrap' "$TREE/var/lib/frp-auto-deploy/bootstrap/ticket.json" \
@@ -178,8 +220,18 @@ cmp -s "$TREE/var/lib/frp-auto-deploy/registry.json" "$ROLLBACK_BEFORE" \
   || fail "registry was not rolled back"
 grep -q 'token-rollback-source-super-secret' "$TREE/etc/frp/server_token" \
   || fail "token was not rolled back"
-grep -q 'ca-key-rollback-source' "$TREE/etc/frp-auto-deploy/pki/ca.key" \
-  || fail "CA was not rolled back"
+python3 - "$ROOT" "$TREE" <<'PY' || fail "CA was not rolled back"
+import json, sys
+from pathlib import Path
+root, tree = Path(sys.argv[1]), Path(sys.argv[2])
+sys.path.insert(0, str(root / "lib"))
+import frp_pki
+cfg = json.loads((tree / "etc/frp-auto-deploy/config.json").read_text())
+assert cfg.get("marker") == "rollback-source"
+fp = frp_pki.fingerprint_from_cert_file(tree / "etc/frp-auto-deploy/pki/ca.crt")
+assert fp == cfg["pki_fingerprint"]
+print("ROLLBACK_PKI_OK")
+PY
 grep -q 'previous state was restored' "$WORKDIR/rollback.stderr" || fail "rollback diagnostic"
 pass "RESTORE_FAILURE_ROLLBACK"
 
@@ -238,8 +290,8 @@ with tempfile.TemporaryDirectory() as name:
         archive.extractall(dest)
     data = json.loads((dest / "payload/var/lib/frp-auto-deploy/registry.json").read_text())
     assert data.get("schema_version") == 2
-    assert "client-a" in data.get("clients", {})
-    assert data["clients"]["client-a"]["label"] == "concurrent"
+    assert data.get("label") == "concurrent"
+    assert 6100 in data.get("reserved", [])
 print("BACKUP_JSON_OK")
 PY
 pass "BACKUP_CONCURRENT_REGISTRY_MUTATION"
@@ -369,5 +421,60 @@ grep -qi 'symlink' "$WORKDIR/asyml.stderr" || fail "symlink archive diagnostic"
 [[ "$(sha256sum "$SAFE_TREE/etc/frp-auto-deploy/config.json" | awk '{print $1}')" == "$BEFORE_CFG" ]] \
   || fail "symlink archive restore mutated state"
 pass "RESTORE_REFUSES_SYMLINK_ARCHIVE"
+
+# Crossed PKI in a backup must be rejected before live mutation.
+PAIR_TREE="$WORKDIR/pair-tree"
+seed_state "$PAIR_TREE" pair-live
+export FRP_DEPLOY_TEST_ROOT="$PAIR_TREE"
+PAIR_BACKUP="$WORKDIR/pair-good.tar.gz"
+python3 "$ROOT/tools/frp-backup" "$PAIR_BACKUP" >/dev/null
+CROSS_BACKUP="$WORKDIR/pair-crossed.tar.gz"
+python3 - "$ROOT" "$PAIR_BACKUP" "$CROSS_BACKUP" <<'PY' || fail "cross PKI archive build"
+import hashlib, json, sys, tarfile, tempfile
+from pathlib import Path
+root, src, dst = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
+sys.path.insert(0, str(root / "lib"))
+import frp_pki
+with tempfile.TemporaryDirectory() as name:
+    dest = Path(name)
+    with tarfile.open(src, "r:gz") as archive:
+        archive.extractall(dest)
+    foreign = dest / "foreign-pki"
+    foreign.mkdir()
+    frp_pki.ensure_pki(str(foreign), "198.51.100.10")
+    target = dest / "payload/etc/frp-auto-deploy/pki/ca.key"
+    target.write_bytes((foreign / "ca.key").read_bytes())
+    manifest = json.loads((dest / "manifest.json").read_text())
+    files = []
+    checksum_lines = []
+    for item in manifest.get("files") or []:
+        rel = item.get("path")
+        payload = dest / "payload" / rel
+        if not payload.is_file():
+            continue
+        digest = hashlib.sha256(payload.read_bytes()).hexdigest()
+        entry = dict(item)
+        entry["sha256"] = digest
+        entry["size"] = payload.stat().st_size
+        files.append(entry)
+        checksum_lines.append("%s  payload/%s" % (digest, rel))
+    manifest["files"] = files
+    (dest / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    (dest / "checksums.sha256").write_text("\n".join(checksum_lines) + "\n")
+    with tarfile.open(dst, "w:gz") as archive:
+        archive.add(dest / "manifest.json", arcname="manifest.json")
+        archive.add(dest / "checksums.sha256", arcname="checksums.sha256")
+        archive.add(dest / "payload", arcname="payload")
+PY
+BEFORE_PAIR="$(sha256sum "$PAIR_TREE/etc/frp-auto-deploy/config.json" | awk '{print $1}')"
+if python3 "$ROOT/tools/frp-restore" "$CROSS_BACKUP" \
+  >"$WORKDIR/pair.stdout" 2>"$WORKDIR/pair.stderr"; then
+  fail "crossed PKI restore should refuse"
+fi
+grep -qiE 'pair|pki|certificate|key|corrupted' "$WORKDIR/pair.stderr" \
+  || fail "crossed PKI diagnostic"
+[[ "$(sha256sum "$PAIR_TREE/etc/frp-auto-deploy/config.json" | awk '{print $1}')" == "$BEFORE_PAIR" ]] \
+  || fail "crossed PKI restore mutated live state"
+pass "RESTORE_PK_PAIR_PREVALIDATION"
 
 echo "BACKUP_RESTORE_TEST=PASS"

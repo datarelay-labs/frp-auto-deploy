@@ -31,6 +31,18 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+_LIB_DIR = Path(__file__).resolve().parent
+if str(_LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(_LIB_DIR))
+try:
+    import frp_client_registry as CREG
+except Exception:
+    CREG = None
+try:
+    import frp_server_config as SCFG
+except Exception:
+    SCFG = None
+
 REPORT_SCHEMA = 1
 CERT_WARN_DAYS = 30
 NETWORK_TIMEOUT = 5
@@ -656,6 +668,28 @@ def verify_signed_by_ca(ca_path, cert_path):
     return True, ''
 
 
+def _load_doctor_lib(name, filename):
+    import importlib.util
+    here = Path(__file__).resolve().parent
+    candidates = [
+        here / filename,
+        Path('/usr/local/lib/frp-auto-deploy') / filename,
+    ]
+    root = os.environ.get('FRP_DEPLOY_TEST_ROOT', '') or os.environ.get('FRP_DOCTOR_TEST_ROOT', '')
+    if root:
+        candidates.insert(0, Path(root) / 'usr/local/lib/frp-auto-deploy' / filename)
+    for path in candidates:
+        if path.is_file():
+            try:
+                spec = importlib.util.spec_from_file_location(name, str(path))
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                return mod
+            except Exception:
+                return None
+    return None
+
+
 def pubkey_from_private(key_path):
     openssl = openssl_bin()
     if not openssl:
@@ -994,6 +1028,17 @@ def server_config_ports(cfg):
 def validate_registry(state, cfg=None):
     issues = []
     infos = []
+    # Canonical fail-closed invariants first — doctor still collects additional
+    # diagnostics below, but severe corruption always surfaces as FAIL.
+    if CREG is not None:
+        try:
+            CREG.validate_registry_state(state, cfg)
+        except ValueError as exc:
+            issues.append(str(exc))
+            return FAIL, 'registry failed canonical validation', issues
+        except Exception as exc:
+            issues.append(str(exc))
+            return FAIL, 'registry failed canonical validation', issues
     if not isinstance(state, dict):
         return FAIL, 'registry is not a JSON object', issues
     version = state.get('schema_version')
@@ -1640,6 +1685,35 @@ def check_server(report, paths, facts, skip_network):
                 )
             else:
                 report.add('server_config', PASS, 'server config structure is valid', '', '', 'installation')
+            scfg = SCFG
+            if scfg is None:
+                scfg = _load_doctor_lib('frp_server_config', 'frp_server_config.py')
+            if scfg is not None:
+                try:
+                    scfg.validate_server_config(cfg)
+                    report.add(
+                        'server_public_namespace', PASS,
+                        'public namespace and service range are consistent',
+                        '',
+                        '',
+                        'installation',
+                    )
+                except ValueError as exc:
+                    report.add(
+                        'server_public_namespace', FAIL,
+                        'server public namespace is unsafe',
+                        str(exc),
+                        'fix config.json or restore from a known-good backup before mutating state',
+                        'installation',
+                    )
+            elif not missing:
+                report.add(
+                    'server_public_namespace', WARN,
+                    'frp_server_config.py unavailable; public-namespace validation skipped',
+                    '',
+                    '',
+                    'installation',
+                )
             report.display['server_ports'] = ports
             # Public vs listen difference is intentional (P2.8). Never FAIL for that.
             if ports['frp_public'] and ports['frp_listen'] and ports['frp_public'] != ports['frp_listen']:
@@ -1658,6 +1732,59 @@ def check_server(report, paths, facts, skip_network):
                     '',
                     'network',
                 )
+            strict = cfg.get('data_plane_auth_strict', True)
+            plugin_port = int(cfg.get('frp_plugin_listen_port') or 6100)
+            toml_abs = '/etc/frp/frps.toml'
+            toml_text = paths.read_text(toml_abs) or ''
+            if strict is False:
+                report.add(
+                    'data_plane_auth_strict', WARN,
+                    'strict data-plane authorization is disabled',
+                    'upgrade clients then set data_plane_auth_strict=true with operator cutover confirmation',
+                    'set FRP_CONFIRM_DATA_PLANE_AUTH_CUTOVER=yes during server update after all clients emit proofs',
+                    'security',
+                )
+            else:
+                report.add(
+                    'data_plane_auth_strict', PASS,
+                    'strict data-plane authorization is enabled',
+                    '',
+                    '',
+                    'security',
+                )
+                if 'httpPlugins' in toml_text and 'NewProxy' in toml_text:
+                    report.add(
+                        'data_plane_frps_plugin', PASS,
+                        'frps NewProxy plugin is configured',
+                        '',
+                        '',
+                        'security',
+                    )
+                else:
+                    report.add(
+                        'data_plane_frps_plugin', FAIL,
+                        'frps NewProxy plugin is not configured',
+                        toml_abs,
+                        're-run server install/project-update to regenerate frps.toml',
+                        'security',
+                    )
+                listen = facts.get('listening') or {}
+                if listen.get(plugin_port):
+                    report.add(
+                        'data_plane_authorizer', PASS,
+                        'data-plane authorizer is listening on loopback',
+                        'port=%s' % plugin_port,
+                        '',
+                        'security',
+                    )
+                else:
+                    report.add(
+                        'data_plane_authorizer', FAIL,
+                        'data-plane authorizer is not listening',
+                        'expected 127.0.0.1:%s' % plugin_port,
+                        'restart frp-port-allocator.service',
+                        'security',
+                    )
 
     token_path = '/etc/frp/server_token'
     if cfg:
@@ -1769,6 +1896,34 @@ def check_server(report, paths, facts, skip_network):
                 're-run the server installer to reissue the allocator server certificate under the existing CA. Do not rotate the CA.',
                 'security',
             )
+
+    pki = _load_doctor_lib('frp_pki', 'frp_pki.py')
+    if pki is not None and all(paths.is_file(p) for p in (ca_key, ca_crt, server_key, server_crt)):
+        try:
+            pki.validate_pki_key_cert_pairs(pki.pki_paths(paths.p(pki_dir)))
+            report.add(
+                'allocator_key_cert_pairs', PASS,
+                'allocator CA and server private keys match their certificates',
+                '',
+                '',
+                'security',
+            )
+        except Exception as exc:
+            report.add(
+                'allocator_key_cert_pairs', FAIL,
+                'allocator private key does not match its certificate',
+                redact(str(exc)),
+                'restore matching key/certificate pairs from backup; do not regenerate the CA',
+                'security',
+            )
+    elif all(paths.is_file(p) for p in (ca_key, ca_crt, server_key, server_crt)) and pki is None:
+        report.add(
+            'allocator_key_cert_pairs', WARN,
+            'frp_pki.py unavailable; key/certificate pair check skipped',
+            '',
+            '',
+            'security',
+        )
 
     if cfg and paths.is_file(server_crt):
         ports = server_config_ports(cfg)

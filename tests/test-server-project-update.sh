@@ -71,7 +71,16 @@ EOF
       "labels": ["production", "database"],
       "notes": "must survive update",
       "services": {
-        "ssh": {"local_port": 22, "remote_port": 6002, "enabled": true}
+        "ssh": {
+          "id": "ssh",
+          "preset": "ssh",
+          "protocol": "tcp",
+          "local_ip": "127.0.0.1",
+          "local_port": 22,
+          "remote_port": 6002,
+          "enabled": true,
+          "ssh_user": "aella"
+        }
       }
     }
   }
@@ -477,10 +486,21 @@ d["clients"] = {
     "label": "aella",
     "notes": "oci",
     "tags": {"site": "oci"},
-    "services": {"ssh": {"local_port": 22, "remote_port": 6000, "enabled": True, "ssh_user": "aella"}},
+    "services": {
+      "ssh": {
+        "id": "ssh",
+        "preset": "ssh",
+        "protocol": "tcp",
+        "local_ip": "127.0.0.1",
+        "local_port": 22,
+        "remote_port": 6000,
+        "enabled": True,
+        "ssh_user": "aella",
+      },
+    },
   }
 }
-d["reserved"] = [6000]
+d["reserved"] = []
 p.write_text(json.dumps(d, indent=2) + "\n")
 PY
 printf '{"operation":"project-update","phase":"commit","previous_version":"2.1.0","candidate_version":"2.1.0"}\n' \

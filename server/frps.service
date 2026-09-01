@@ -8,6 +8,10 @@ Type=simple
 ExecStart=/usr/local/bin/frps -c /etc/frp/frps.toml
 Restart=always
 RestartSec=5
+# Hardening below requires systemd 232+ for some directives. The installer
+# strips unsupported lines on older systemd (Amazon Linux 2 is 219).
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target

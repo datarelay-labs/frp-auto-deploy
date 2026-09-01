@@ -23,6 +23,7 @@ for f in \
   "$BASE_DIR/lib/frp_audit.py" \
   "$BASE_DIR/lib/frp_project_files.py" \
   "$BASE_DIR/lib/frp_control_locks.py" \
+  "$BASE_DIR/lib/frp_server_config.py" \
   "$BASE_DIR/lib/server-project-files.manifest" \
   "$BASE_DIR/lib/frp-doctor-common.sh" \
   "$BASE_DIR/lib/frp_doctor.py" \
@@ -1077,6 +1078,10 @@ cfg = {
     'tls_ca_cert': pki.rstrip('/') + '/ca.crt',
     'tls_server_cert': pki.rstrip('/') + '/server.crt',
     'tls_server_key': pki.rstrip('/') + '/server.key',
+    'frp_plugin_listen_host': os.environ.get('FRP_PLUGIN_LISTEN_HOST') or '127.0.0.1',
+    'frp_plugin_listen_port': int(os.environ.get('FRP_PLUGIN_LISTEN_PORT') or '6100'),
+    'data_plane_auth_strict': (os.environ.get('FRP_DATA_PLANE_AUTH_STRICT') or '1') == '1',
+    'proxy_lease_dir': '/run/frp-auto-deploy/proxy-leases',
 }
 payload = json.dumps(cfg, indent=2, sort_keys=True) + '\n'
 path.parent.mkdir(parents=True, exist_ok=True)
@@ -1100,6 +1105,18 @@ PY
 
 write_frps_toml() {
   local dest="$1"
+  local plugin_block=""
+  if [[ "${FRP_DATA_PLANE_AUTH_STRICT:-1}" == "1" ]]; then
+    local plugin_host="${FRP_PLUGIN_LISTEN_HOST:-127.0.0.1}"
+    local plugin_port="${FRP_PLUGIN_LISTEN_PORT:-6100}"
+    plugin_block="
+[[httpPlugins]]
+name = \"frp-auto-deploy-port-authorizer\"
+addr = \"${plugin_host}:${plugin_port}\"
+path = \"/handler\"
+ops = [\"NewProxy\", \"CloseProxy\"]
+"
+  fi
   if frp_mode_is_single443; then
     frp_atomic_write "$dest" 0600 <<EOF2
 bindAddr = "${FRP_CONTROL_BIND_ADDR:-127.0.0.1}"
@@ -1115,7 +1132,7 @@ transport.tls.force = false
 allowPorts = [
   { start = ${FRP_PORT_START}, end = ${FRP_PORT_END} }
 ]
-EOF2
+${plugin_block}EOF2
   else
     frp_atomic_write "$dest" 0600 <<EOF2
 bindPort = ${FRP_CONTROL_LISTEN_PORT}
@@ -1129,7 +1146,7 @@ transport.tls.force = true
 allowPorts = [
   { start = ${FRP_PORT_START}, end = ${FRP_PORT_END} }
 ]
-EOF2
+${plugin_block}EOF2
   fi
 }
 
@@ -1703,6 +1720,42 @@ frp_server_main() {
   if [[ -f "$(frp_server_config_path)" || -s "$token_file" || -f "$registry_file" ]]; then
     existing_install=1
   fi
+
+  frp_confirm_data_plane_auth_cutover() {
+    local reg="$1"
+    [[ -f "$reg" ]] || return 0
+    local count
+    count="$(python3 - "$reg" <<'PY' || echo 0
+import json, sys
+from pathlib import Path
+try:
+    data = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+    clients = data.get('clients') or {}
+    print(len(clients) if isinstance(clients, dict) else 0)
+except Exception:
+    print(0)
+PY
+)"
+    if [[ "${count:-0}" -le 0 ]]; then
+      export FRP_DATA_PLANE_AUTH_STRICT=1
+      return 0
+    fi
+    if [[ "${FRP_CONFIRM_DATA_PLANE_AUTH_CUTOVER:-}" == "yes" ]]; then
+      export FRP_DATA_PLANE_AUTH_STRICT=1
+      return 0
+    fi
+    echo "WARNING: registry contains enrolled clients; strict data-plane auth deferred." >&2
+    echo "WARNING: upgrade every client to 2.1.1 project code with data-plane proofs first." >&2
+    echo "WARNING: then re-run with FRP_CONFIRM_DATA_PLANE_AUTH_CUTOVER=yes to enable strict mode." >&2
+    export FRP_DATA_PLANE_AUTH_STRICT=0
+  }
+
+  if [[ "$existing_install" == "1" ]]; then
+    frp_confirm_data_plane_auth_cutover "$registry_file"
+  else
+    export FRP_DATA_PLANE_AUTH_STRICT=1
+  fi
+
   local previous_project
   previous_project="$(frp_read_kv_file "$version_file" PROJECT_VERSION)"
   if [[ -n "$previous_project" ]]; then
@@ -1809,7 +1862,7 @@ frp_server_main() {
   chmod 600 "$registry_file"
 
   frp_server_install_manifest_files "$lib_dir" "$sbin_dir"
-  install -m 0644 "$BASE_DIR/server/frps.service" "$unit_frps"
+  frp_write_compatible_systemd_unit "$BASE_DIR/server/frps.service" "$unit_frps"
   frp_write_compatible_systemd_unit \
     "$BASE_DIR/server/frp-port-allocator.service" \
     "$unit_alloc"

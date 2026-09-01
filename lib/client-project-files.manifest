@@ -1,0 +1,31 @@
+# Canonical client project-file manifest.
+# Columns: class dest mode source validate
+# class:
+#   project   replaceable client management software (install + upgrade + uninstall)
+#   optional  same, installed only when the source exists
+#   unit      systemd unit
+#   binary    pinned FRP runtime binary (uninstalled with client software)
+# validate: python | bash | none
+#
+# Shared libs also appear on the server manifest. Dual-role uninstall keeps the
+# intersection when the other role is still present.
+
+project usr/local/lib/frp-auto-deploy/frp-client-common.sh 0644 lib/frp-client-common.sh bash
+project usr/local/lib/frp-auto-deploy/frp-common.sh 0644 lib/frp-common.sh bash
+project usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py 0644 lib/frp_mgmt_auth.py python
+project usr/local/lib/frp-auto-deploy/frp_data_plane_auth.py 0644 lib/frp_data_plane_auth.py python
+project usr/local/lib/frp-auto-deploy/frp_clock_sync.py 0644 lib/frp_clock_sync.py python
+project usr/local/lib/frp-auto-deploy/frp-doctor-common.sh 0644 lib/frp-doctor-common.sh bash
+project usr/local/lib/frp-auto-deploy/frp_doctor.py 0644 lib/frp_doctor.py python
+project usr/local/lib/frp-auto-deploy/frp_ctl_grammar.py 0644 lib/frp_ctl_grammar.py python
+project usr/local/lib/frp-auto-deploy/frp_ctl_repl.py 0644 lib/frp_ctl_repl.py python
+project usr/local/lib/frp-auto-deploy/frp_project_files.py 0644 lib/frp_project_files.py python
+project usr/local/lib/frp-auto-deploy/client-project-files.manifest 0644 lib/client-project-files.manifest none
+project usr/local/lib/frp-auto-deploy/frp_client_lifecycle.py 0644 lib/frp_client_lifecycle.py python
+project usr/local/lib/frp-auto-deploy/frp-client-lifecycle.sh 0644 lib/frp-client-lifecycle.sh bash
+project usr/local/lib/frp-auto-deploy/uninstall-client.sh 0755 uninstall-client.sh bash
+project usr/local/bin/frp-client 0755 tools/frp-client bash
+project usr/local/bin/frpctl 0755 tools/frpctl bash
+optional usr/local/bin/frpcli 0755 tools/frpcli bash
+unit etc/systemd/system/frpc.service 0644 client/frpc.service none
+binary usr/local/bin/frpc - - none
