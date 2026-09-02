@@ -354,13 +354,20 @@ function Test-FrpCertificateHostname {
 }
 
 function New-FrpPinnedServerCertificateValidator {
-    param([Parameter(Mandatory = $true)][string]$CaPath)
+    param(
+        [Parameter(Mandatory = $true)][string]$CaPath,
+        [Parameter(Mandatory = $true)][string]$ExpectedHost
+    )
     $ca = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($CaPath)
     $caHandle = $ca
+    $expectedHost = ([string]$ExpectedHost).Trim()
+    # Capture expected host + CA in closure. Prefer explicit host over sender type
+    # checks (PS 5.1 GetNewClosure + HttpWebRequest sender can be unreliable).
     $validator = {
         param($sender, $certificate, $chain, $sslPolicyErrors)
         try {
             if ($null -eq $certificate) { return $false }
+            if ([string]::IsNullOrWhiteSpace($expectedHost)) { return $false }
             $serverCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $certificate
             $build = New-Object System.Security.Cryptography.X509Certificates.X509Chain
             $build.ChainPolicy.Revision = [System.Security.Cryptography.X509Certificates.X509ChainPolicy]::Default.Revision
@@ -372,7 +379,6 @@ function New-FrpPinnedServerCertificateValidator {
             $trusted = $false
             foreach ($el in $build.ChainElements) {
                 if ($el.Certificate.Thumbprint -eq $caHandle.Thumbprint) { $trusted = $true; break }
-                # Also compare raw DER equality
                 $a = $el.Certificate.GetRawCertData()
                 $b = $caHandle.GetRawCertData()
                 if ($a.Length -eq $b.Length) {
@@ -382,25 +388,38 @@ function New-FrpPinnedServerCertificateValidator {
                 }
             }
             if (-not $trusted) { return $false }
-
-            # Hostname required after CA trust; fail closed if hostname cannot be determined.
-            $hostName = $null
-            if ($sender -is [System.Net.HttpWebRequest]) {
-                $uri = ([System.Net.HttpWebRequest]$sender).RequestUri
-                if ($null -ne $uri) { $hostName = $uri.Host }
-            } elseif ($null -ne $sender) {
-                try {
-                    $uriProp = $sender.RequestUri
-                    if ($null -ne $uriProp) { $hostName = $uriProp.Host }
-                } catch { }
-            }
-            if ([string]::IsNullOrWhiteSpace($hostName)) { return $false }
-            return (Test-FrpCertificateHostname -Certificate $serverCert -Hostname $hostName)
+            return (Test-FrpCertificateHostname -Certificate $serverCert -Hostname $expectedHost)
         } catch {
             return $false
         }
     }.GetNewClosure()
     return @{ Callback = $validator; Ca = $caHandle }
+}
+
+function Get-FrpWebExceptionDetail {
+    <#
+    .SYNOPSIS
+      Secret-safe WebException / TLS failure summary for diagnostics.
+    #>
+    param([Parameter(Mandatory = $true)]$Exception)
+    $parts = New-Object System.Collections.Generic.List[string]
+    $ex = $Exception
+    $guard = 0
+    while ($null -ne $ex -and $guard -lt 6) {
+        $guard++
+        $name = $ex.GetType().FullName
+        $msg = [string]$ex.Message
+        if ($msg.Length -gt 240) { $msg = $msg.Substring(0, 240) }
+        # Never echo URLs/tickets/tokens that may appear in long messages.
+        $msg = ($msg -replace '(?i)(ticket|token|authorization|bearer)\s*[:=]\s*\S+', '$1=<redacted>')
+        $parts.Add(("{0}: {1}" -f $name, $msg))
+        if ($ex -is [System.Net.WebException]) {
+            $status = [string]$ex.Status
+            if ($status) { $parts.Add(("WebExceptionStatus={0}" -f $status)) }
+        }
+        $ex = $ex.InnerException
+    }
+    return ($parts -join ' | ')
 }
 
 function Invoke-FrpHttpsExchange {
@@ -425,12 +444,22 @@ function Invoke-FrpHttpsExchange {
         throw "ERROR: trusted allocator CA is missing ($CaPath)"
     }
 
+    $uri = $null
+    try { $uri = [Uri]$Url } catch {
+        throw 'ERROR: invalid allocator URL'
+    }
+    $expectedHost = $uri.Host
+    if ([string]::IsNullOrWhiteSpace($expectedHost)) {
+        throw 'ERROR: allocator URL hostname is missing'
+    }
+
     # Prefer curl --cacert when available (matches Linux client semantics).
     # FRP_WINDOWS_FORCE_DOTNET_HTTP=1 skips curl for tests; does not weaken production.
     $forceDotNetHttp = ($env:FRP_WINDOWS_FORCE_DOTNET_HTTP -eq '1')
     if (-not $forceDotNetHttp -and (Get-Command curl.exe -ErrorAction SilentlyContinue)) {
         $tmpBody = $null
         $tmpResp = [System.IO.Path]::GetTempFileName()
+        $tmpErr = [System.IO.Path]::GetTempFileName()
         $args = @(
             '--silent', '--show-error',
             '--max-time', ([string]$TimeoutSec),
@@ -452,28 +481,46 @@ function Invoke-FrpHttpsExchange {
         }
         $args += @('-o', $tmpResp, $Url)
         try {
-            $codeText = & curl.exe @args 2>$null
-            $exit = $LASTEXITCODE
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try {
+                $codeText = & curl.exe @args 2>$tmpErr
+                $exit = $LASTEXITCODE
+            } finally {
+                $ErrorActionPreference = $prevEap
+            }
             $respBody = ''
             if (Test-Path -LiteralPath $tmpResp) {
                 $respBody = [System.IO.File]::ReadAllText($tmpResp, [System.Text.Encoding]::UTF8)
             }
             if ($exit -ne 0 -and [string]::IsNullOrWhiteSpace($codeText)) {
-                throw 'ERROR: allocator request failed'
+                $errText = ''
+                if (Test-Path -LiteralPath $tmpErr) {
+                    $errText = ([System.IO.File]::ReadAllText($tmpErr)).Trim()
+                    if ($errText.Length -gt 200) { $errText = $errText.Substring(0, 200) }
+                }
+                if ($errText) {
+                    throw ("ERROR: allocator request failed (curl exit {0}: {1})" -f $exit, $errText)
+                }
+                throw ("ERROR: allocator request failed (curl exit {0})" -f $exit)
             }
             $status = 0
             if (-not [int]::TryParse(([string]$codeText).Trim(), [ref]$status)) {
-                throw 'ERROR: allocator request failed'
+                throw 'ERROR: allocator request failed (invalid HTTP status from curl)'
             }
             return @{ StatusCode = $status; Body = $respBody }
         } finally {
             if ($tmpBody) { Remove-Item -LiteralPath $tmpBody -Force -ErrorAction SilentlyContinue }
             Remove-Item -LiteralPath $tmpResp -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $tmpErr -Force -ErrorAction SilentlyContinue
         }
     }
 
     # .NET path with request-local validation callback (restored afterwards).
-    $pin = New-FrpPinnedServerCertificateValidator -CaPath $CaPath
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    } catch { }
+    $pin = New-FrpPinnedServerCertificateValidator -CaPath $CaPath -ExpectedHost $expectedHost
     $previous = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
     try {
         [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $pin.Callback
@@ -514,7 +561,11 @@ function Invoke-FrpHttpsExchange {
                 return @{ StatusCode = [int]$httpResp.StatusCode; Body = $errBody }
             } finally { $sr.Close() }
         }
-        throw 'ERROR: allocator request failed'
+        $detail = Get-FrpWebExceptionDetail -Exception $ex
+        throw ("ERROR: allocator request failed ({0})" -f $detail)
+    } catch {
+        $detail = Get-FrpWebExceptionDetail -Exception $_.Exception
+        throw ("ERROR: allocator request failed ({0})" -f $detail)
     } finally {
         [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $previous
         if ($pin.Ca) { $pin.Ca.Dispose() }

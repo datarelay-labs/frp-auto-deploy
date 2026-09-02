@@ -121,6 +121,7 @@ python3 tests/test-config-setter-control-lock.py
 ./tests/test-server-project-update.sh
 ./tests/test-project-file-manifest.sh
 ./tests/test-server-uninstall-manifest-parity.sh
+./tests/test-server-uninstall-pending-marker.sh
 ./tests/test-client-uninstall-manifest-parity.sh
 python3 tests/test-allocator-url-validation.py
 ./tests/test-real-bundle-project-update.sh
@@ -130,6 +131,7 @@ python3 tests/test-allocator-url-validation.py
 ./tests/test-probe-tcp-injection.sh
 ./tests/test-candidate-release-channel.sh
 ./tests/test-candidate-operator-guidance.sh
+./tests/test-zero-touch-candidate-identity.sh
 ./tests/test-immutable-release-channel.sh
 ./tests/test-client-installer-url-migration.sh
 ./tests/test-install-txn-rollback.sh

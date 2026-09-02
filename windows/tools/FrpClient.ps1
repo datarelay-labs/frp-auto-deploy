@@ -83,6 +83,10 @@ frp-client (Windows)
 '@ | Write-Host
 }
 
+function Get-FrpClientToolsCmdPath {
+    return (Join-Path (Get-FrpToolsDir) 'frp-client.cmd')
+}
+
 function Show-FrpClientInfo {
     if (-not (Test-Path -LiteralPath (Get-FrpStatePath))) {
         Write-Host 'ERROR: not enrolled (client-state.json missing)'
@@ -93,6 +97,19 @@ function Show-FrpClientInfo {
     Write-Host ("FRP Server: {0}" -f $server)
     Write-Host ("Transport: {0}" -f $state.frp_transport)
     Write-Host ("Machine ID: {0}" -f $state.machine_id)
+    try {
+        $channel = Get-FrpReleaseChannel
+        $sourceRef = ''
+        if ($channel -eq 'candidate') {
+            $sourceRef = Get-FrpResolveCandidateSourceRef
+        } elseif ($channel -eq 'dev') {
+            $sourceRef = 'main'
+        } else {
+            $sourceRef = ("v{0}" -f (Get-FrpProjectVersion))
+        }
+        Write-Host ("Release channel : {0}" -f $channel)
+        Write-Host ("Source ref      : {0}" -f $sourceRef)
+    } catch { }
     Write-Host ''
     Write-Host 'Services:'
     Write-Host ''
@@ -569,7 +586,7 @@ function Invoke-FrpClientDoctor {
 function Invoke-FrpClientAutostart {
     Write-Host 'Autostart: not configured'
     Write-Host 'Optional Task Scheduler / Windows Service registration is not part of the MVP.'
-    Write-Host 'After reboot, run: frp-client start'
+    Write-Host ("After reboot, run: {0} start" -f (Get-FrpClientToolsCmdPath))
     return 0
 }
 
@@ -591,6 +608,19 @@ switch ($Command) {
         if ($null -ne $st.Pid) { Write-Host ("pid={0}" -f $st.Pid) }
         if ($st.Server) { Write-Host ("server={0}" -f $st.Server) }
         if ($st.Transport) { Write-Host ("transport={0}" -f $st.Transport) }
+        try {
+            $channel = Get-FrpReleaseChannel
+            $sourceRef = ''
+            if ($channel -eq 'candidate') {
+                $sourceRef = Get-FrpResolveCandidateSourceRef
+            } elseif ($channel -eq 'dev') {
+                $sourceRef = 'main'
+            } else {
+                $sourceRef = ("v{0}" -f (Get-FrpProjectVersion))
+            }
+            Write-Host ("Release channel : {0}" -f $channel)
+            Write-Host ("Source ref      : {0}" -f $sourceRef)
+        } catch { }
         exit 0
     }
     'info' { exit (Show-FrpClientInfo) }

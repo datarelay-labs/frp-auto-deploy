@@ -695,7 +695,10 @@ function Complete-FrpZeroTouchPostEnroll {
         Write-Host 'Management-only enrollment: no public services; skipping frpc start.'
         Set-FrpInstallStatus -Status 'management_only'
         Write-Host ''
-        Write-Host 'Enrollment complete (management-only). Use frp-client info for details.'
+        $toolsCmd = Join-Path (Get-FrpToolsDir) 'frp-client.cmd'
+        Write-Host 'Enrollment complete (management-only).'
+        Write-Host ("Info:   {0} info" -f $toolsCmd)
+        Write-Host ("Status: {0} status" -f $toolsCmd)
         Write-Host 'ENROLL ONCE / RUN MANY TIMES: later starts use existing identity and ports.'
         return 0
     }
@@ -709,8 +712,12 @@ function Complete-FrpZeroTouchPostEnroll {
     }
 
     Set-FrpInstallStatus -Status 'installed'
+    $toolsCmd = Join-Path (Get-FrpToolsDir) 'frp-client.cmd'
     Write-Host ''
-    Write-Host 'Enrollment complete. Use frp-client info for connection details.'
+    Write-Host 'Enrollment complete.'
+    Write-Host ("Info:   {0} info" -f $toolsCmd)
+    Write-Host ("Status: {0} status" -f $toolsCmd)
+    Write-Host ("After reboot, run: {0} start" -f $toolsCmd)
     Write-Host 'ENROLL ONCE / RUN MANY TIMES: later starts use existing identity and ports.'
     return 0
 }
@@ -737,14 +744,16 @@ function Invoke-FrpZeroTouch {
                     return (Complete-FrpZeroTouchPostEnroll -SkipStart:$SkipStart -SkipDownload:$SkipDownload)
                 }
                 if (Test-FrpIsInstallComplete) {
+                    $toolsCmd = Join-Path (Get-FrpToolsDir) 'frp-client.cmd'
                     Write-Host 'ERROR: this machine is already enrolled.'
-                    Write-Host 'ENROLL ONCE: refuse re-ticket path. Use: frp-client start'
+                    Write-Host ("ENROLL ONCE: refuse re-ticket path. Use: {0} start" -f $toolsCmd)
                     Write-Host 'To replace this install, uninstall locally first (server reservations are preserved).'
                     return 2
                 }
                 # Legacy enrolled installs without install_status: treat as complete / refuse re-ticket
+                $toolsCmd = Join-Path (Get-FrpToolsDir) 'frp-client.cmd'
                 Write-Host 'ERROR: this machine is already enrolled.'
-                Write-Host 'ENROLL ONCE: refuse re-ticket path. Use: frp-client start'
+                Write-Host ("ENROLL ONCE: refuse re-ticket path. Use: {0} start" -f $toolsCmd)
                 Write-Host 'To replace this install, uninstall locally first (server reservations are preserved).'
                 return 2
             }

@@ -346,10 +346,129 @@ def derive_sha256sums_url(installer_url):
     for suffix in (
         '/dist/bootstrap-client.ps1',
         '/dist/bootstrap-client.sh',
+        '/dist/windows-join.ps1',
     ):
         if url.endswith(suffix):
             return url[: -len(suffix)] + '/SHA256SUMS'
     return ''
+
+
+def derive_windows_join_url(installer_url):
+    url = str(installer_url or '').strip()
+    if url.endswith('/dist/bootstrap-client.ps1'):
+        return url[: -len('/dist/bootstrap-client.ps1')] + '/dist/windows-join.ps1'
+    if url.endswith('/dist/windows-join.ps1'):
+        return url
+    return ''
+
+
+def parse_managed_installer_ref(installer_url):
+    """Return git ref when URL is project-managed raw GitHub installer/join URL."""
+    url = str(installer_url or '').strip()
+    try:
+        from urllib.parse import unquote, urlsplit
+        parsed = urlsplit(url)
+    except Exception:
+        return ''
+    if parsed.scheme != 'https':
+        return ''
+    host = (parsed.hostname or '').lower()
+    if host != 'raw.githubusercontent.com':
+        return ''
+    if parsed.username is not None or parsed.password is not None:
+        return ''
+    if parsed.port not in (None, 443):
+        return ''
+    if parsed.query or parsed.fragment:
+        return ''
+    parts = [unquote(part) for part in parsed.path.split('/') if part]
+    if len(parts) != 5:
+        return ''
+    owner, repo, ref, dist, name = parts
+    if owner != 'datarelay-labs' or repo != 'frp-auto-deploy' or dist != 'dist':
+        return ''
+    if name not in (
+        'bootstrap-client.sh',
+        'bootstrap-client.ps1',
+        'windows-join.ps1',
+    ):
+        return ''
+    if ref == 'main':
+        return ref
+    if re.fullmatch(r'v\d+\.\d+\.\d+', ref):
+        return ref
+    if re.fullmatch(r'[0-9a-f]{40}', ref):
+        return ref
+    return ''
+
+
+def read_persisted_release_identity():
+    path = remap('/etc/frp-auto-deploy/version')
+    channel = ''
+    source_ref = ''
+    if not path.is_file():
+        return channel, source_ref
+    try:
+        for line in path.read_text(encoding='utf-8').splitlines():
+            line = line.strip()
+            if line.startswith('RELEASE_CHANNEL='):
+                channel = line.split('=', 1)[1].strip()
+            elif line.startswith('SOURCE_REF='):
+                source_ref = line.split('=', 1)[1].strip()
+    except OSError:
+        return '', ''
+    return channel, source_ref
+
+
+def resolve_release_identity(installer_url):
+    """
+    Resolve channel + source_ref for generated zero-touch commands.
+    Prefer persisted server version identity; fall back to managed installer URL ref.
+    """
+    channel, source_ref = read_persisted_release_identity()
+    channel = str(channel or '').strip().lower()
+    source_ref = str(source_ref or '').strip()
+    if channel in ('stable', 'dev', 'candidate') and (
+        channel != 'candidate' or re.fullmatch(r'[0-9a-f]{40}', source_ref)
+    ):
+        if channel == 'dev' and not source_ref:
+            source_ref = 'main'
+        if channel == 'stable' and not source_ref:
+            source_ref = ''
+        return channel, source_ref
+
+    ref = parse_managed_installer_ref(installer_url)
+    if re.fullmatch(r'[0-9a-f]{40}', ref or ''):
+        return 'candidate', ref
+    if ref == 'main':
+        return 'dev', 'main'
+    if re.fullmatch(r'v\d+\.\d+\.\d+', ref or ''):
+        return 'stable', ref
+    return '', ''
+
+
+def encode_windows_join_descriptor(allocator, ca_fp, ticket, channel, source_ref, platform='windows'):
+    """Compact opaque join credential (not command obfuscation).
+
+    Wire format: frpj1.<urlsafe-b64(pipe-separated fields)>
+    Fields: allocator|ca|ticket|channel|source_ref
+    Platform is implied windows for this launcher.
+    """
+    import base64
+    _ = platform  # reserved; windows-join.ps1 is Windows-only
+    fields = [
+        str(allocator),
+        str(ca_fp).lower(),
+        str(ticket),
+        str(channel or ''),
+        str(source_ref or ''),
+    ]
+    for field in fields:
+        if '|' in field or '\n' in field or '\r' in field:
+            fail('join field contains illegal separator')
+    raw = '|'.join(fields).encode('utf-8')
+    b64 = base64.urlsafe_b64encode(raw).decode('ascii').rstrip('=')
+    return 'frpj1.' + b64
 
 
 def load_services_file(path):
@@ -577,62 +696,39 @@ def print_manual(cfg, record, ttl, public_host, control_public, allocator, ca_fp
     print()
 
 
-def print_one_line_windows(ticket, ttl, note, public_host, control_public, allocator, ca_fp, installer, rdp_port=None, client_name='', management_only=False, ticket_id='', sha256sums_url=''):
-    sums_url = str(sha256sums_url or '').strip() or derive_sha256sums_url(installer)
-    if not sums_url:
+def print_one_line_windows(ticket, ttl, note, public_host, control_public, allocator, ca_fp, installer, rdp_port=None, client_name='', management_only=False, ticket_id='', sha256sums_url='', release_channel='', source_ref=''):
+    join_url = derive_windows_join_url(installer)
+    if not join_url:
         fail(
-            'cannot derive SHA256SUMS URL from Windows installer URL; '
+            'cannot derive windows-join.ps1 URL from Windows installer URL; '
             'use an official .../dist/bootstrap-client.ps1 path'
         )
-    # Build with token replacement so PowerShell braces/$ are not confused with
-    # Python str.format.
+    channel = str(release_channel or '').strip().lower()
+    source_ref = str(source_ref or '').strip()
+    if not channel or (channel == 'candidate' and not re.fullmatch(r'[0-9a-f]{40}', source_ref)):
+        channel, source_ref = resolve_release_identity(installer)
+    descriptor = encode_windows_join_descriptor(
+        allocator, ca_fp, ticket, channel, source_ref, platform='windows'
+    )
+    # Readable two-step: download immutable launcher, then -File with Join.
+    # No irm|iex, no EncodedCommand obfuscation of the full payload.
     inner = (
-        "$ErrorActionPreference='Stop';"
-        "$ProgressPreference='SilentlyContinue';"
-        "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;"
-        "$dir=Join-Path $env:TEMP ('frp-bs-'+[guid]::NewGuid().ToString('N'));"
-        "New-Item -ItemType Directory -Force -Path $dir|Out-Null;"
-        "try{"
-        "$sums=Join-Path $dir 'SHA256SUMS';"
-        "$script=Join-Path $dir 'bootstrap-client.ps1';"
-        "(New-Object Net.WebClient).DownloadFile(__SUMS_URL__,$sums);"
-        "(New-Object Net.WebClient).DownloadFile(__INSTALLER_URL__,$script);"
-        "$want=$null;"
-        "Get-Content -LiteralPath $sums | ForEach-Object {"
-        " if($_ -match '^([0-9a-fA-F]{64})\\s+dist/bootstrap-client\\.ps1\\s*$')"
-        "{ $want=$Matches[1].ToLowerInvariant() }"
-        "};"
-        "if(-not $want){ throw 'bootstrap-client.ps1 hash missing from SHA256SUMS' };"
-        "$got=(Get-FileHash -Algorithm SHA256 -LiteralPath $script).Hash.ToLowerInvariant();"
-        "if($got -ne $want){ throw 'bootstrap-client.ps1 SHA256 mismatch' };"
-        "$env:FRP_ALLOCATOR_URL=__ALLOCATOR__;"
-        "$env:FRP_ALLOCATOR_CA_SHA256=__CA__;"
-        "$env:FRP_BOOTSTRAP_TICKET=__TICKET__;"
-        "$env:FRP_ZERO_TOUCH='1';"
-        "$env:FRP_PLATFORM='windows';"
-        "& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -ZeroTouch;"
-        "$rc=$LASTEXITCODE;"
-        "Remove-Item Env:FRP_BOOTSTRAP_TICKET -ErrorAction SilentlyContinue;"
-        "if($rc -ne 0){ exit $rc }"
-        "} finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }"
+        "$f=$env:TEMP+'\\wj.ps1';"
+        "(New-Object Net.WebClient).DownloadFile(__JOIN_URL__,$f);"
+        "powershell -NoP -EP Bypass -File $f -Join __JOIN__"
     )
     inner = (
         inner
-        .replace('__SUMS_URL__', ps_single_quote(sums_url))
-        .replace('__INSTALLER_URL__', ps_single_quote(installer))
-        .replace('__ALLOCATOR__', ps_single_quote(allocator))
-        .replace('__CA__', ps_single_quote(ca_fp))
-        .replace('__TICKET__', ps_single_quote(ticket))
+        .replace('__JOIN_URL__', ps_single_quote(join_url))
+        .replace('__JOIN__', ps_single_quote(descriptor))
     )
-    command = (
-        'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '
-        + ps_single_quote(inner)
-    )
+    command = 'powershell -NoP -EP Bypass -C ' + ps_single_quote(inner)
     tracking_id = str(ticket_id or '').strip()
     if not tracking_id and ticket:
         parts = str(ticket).split('.')
         if len(parts) >= 2:
             tracking_id = parts[1]
+    tools_cmd = r'C:\ProgramData\frp-auto-deploy\tools\frp-client.cmd'
     print()
     print('Zero-touch Windows client command')
     print()
@@ -643,6 +739,11 @@ def print_one_line_windows(ticket, ttl, note, public_host, control_public, alloc
     print()
     if tracking_id:
         print('Enrollment ID: %s' % tracking_id)
+        print()
+    if channel:
+        print('Release channel: %s' % channel)
+        if source_ref:
+            print('Source ref: %s' % source_ref)
         print()
     print(command)
     print()
@@ -657,8 +758,8 @@ def print_one_line_windows(ticket, ttl, note, public_host, control_public, alloc
         print('RDP local target: 127.0.0.1:%s' % int(rdp_port))
         print('After enrollment, connect with: mstsc /v:%s:<public-port>' % (public_host or 'FRP-SERVER'))
     print()
-    print('The installer downloads bootstrap-client.ps1, verifies SHA256 against SHA256SUMS,')
-    print('then executes with -File (no irm|iex).')
+    print('Downloads trusted windows-join.ps1 from an exact immutable source,')
+    print('then runs it with -File and one compact Join descriptor (no irm|iex).')
     print()
     print('Send that single line to the remote user. They paste it and press Enter.')
     print('No Enrollment Code prompt or FRP configuration is required.')
@@ -667,7 +768,12 @@ def print_one_line_windows(ticket, ttl, note, public_host, control_public, alloc
     print()
     print('The ticket is not the FRP token. It cannot manage the client after enrollment.')
     print('It cannot be reused by another machine once bound.')
-    print('After reboot, run: frp-client start  (re-enrollment is not required).')
+    print('After reboot, run:')
+    print('  %s start' % tools_cmd)
+    print('Status:')
+    print('  %s status' % tools_cmd)
+    print('Info:')
+    print('  %s info' % tools_cmd)
     if tracking_id:
         print()
         print('Track or revoke with the Enrollment ID (not the ticket secret):')
@@ -676,13 +782,21 @@ def print_one_line_windows(ticket, ttl, note, public_host, control_public, alloc
     print()
 
 
-def print_one_line(ticket, ttl, note, public_host, control_public, allocator, ca_fp, installer, ssh_user, ssh_port, client_name='', management_only=False, ticket_id=''):
+def print_one_line(ticket, ttl, note, public_host, control_public, allocator, ca_fp, installer, ssh_user, ssh_port, client_name='', management_only=False, ticket_id='', release_channel='', source_ref=''):
     env_parts = [
         'FRP_ALLOCATOR_URL=%s' % shell_quote(allocator),
         'FRP_ALLOCATOR_CA_SHA256=%s' % shell_quote(ca_fp),
         'FRP_BOOTSTRAP_TICKET=%s' % shell_quote(ticket),
         'FRP_ZERO_TOUCH=1',
     ]
+    channel = str(release_channel or '').strip().lower()
+    source_ref = str(source_ref or '').strip()
+    if not channel or (channel == 'candidate' and not re.fullmatch(r'[0-9a-f]{40}', source_ref)):
+        channel, source_ref = resolve_release_identity(installer)
+    if channel:
+        env_parts.append('FRP_RELEASE_CHANNEL=%s' % shell_quote(channel))
+    if source_ref:
+        env_parts.append('FRP_SOURCE_REF=%s' % shell_quote(source_ref))
     if ssh_user:
         env_parts.append('FRP_SSH_USER=%s' % shell_quote(ssh_user))
     if ssh_port and int(ssh_port) != 22:
@@ -706,6 +820,11 @@ def print_one_line(ticket, ttl, note, public_host, control_public, allocator, ca
     print()
     if tracking_id:
         print('Enrollment ID: %s' % tracking_id)
+        print()
+    if channel:
+        print('Release channel: %s' % channel)
+        if source_ref:
+            print('Source ref: %s' % source_ref)
         print()
     print(command)
     print()
@@ -898,6 +1017,7 @@ def main(argv=None):
         fail('failed to issue bootstrap ticket: %s' % exc)
 
     ticket_id = str((ticket_record or {}).get('id') or '')
+    release_channel, source_ref = resolve_release_identity(installer)
     if platform == 'windows':
         print_one_line_windows(
             ticket,
@@ -912,6 +1032,8 @@ def main(argv=None):
             client_name=client_name,
             management_only=not services,
             ticket_id=ticket_id,
+            release_channel=release_channel,
+            source_ref=source_ref,
         )
     else:
         print_one_line(
@@ -928,6 +1050,8 @@ def main(argv=None):
             client_name=client_name,
             management_only=not services,
             ticket_id=ticket_id,
+            release_channel=release_channel,
+            source_ref=source_ref,
         )
     try:
         here = Path(__file__).resolve()

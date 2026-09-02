@@ -54,7 +54,7 @@ Environment equivalents: `FRP_ALLOCATOR_URL`, `FRP_ALLOCATOR_CA_SHA256`, `FRP_BO
 
 ### ENROLL ONCE / RUN MANY TIMES
 
-If identity + config already exist and install completed, zero-touch **refuses** another ticket and tells you to run `frp-client start`. Port reservations and machine identity stay stable across restarts.
+If identity + config already exist and install completed, zero-touch **refuses** another ticket and tells you to run `C:\ProgramData\frp-auto-deploy\tools\frp-client.cmd start`. Port reservations and machine identity stay stable across restarts.
 
 If enrollment finished but binary download/start did not (`install_status=enrolled_incomplete`), re-running the installer **resumes** with the same identity and reserved ports — it does not redeem a new ticket or mint a new management key.
 
@@ -64,7 +64,7 @@ When the redeemed ticket carries `services: []`, Windows keeps an empty service 
 
 ### TLS
 
-Pinned allocator CA verification and hostname/IP SAN checks both apply on the .NET HTTPS path. A trusted CA with the wrong hostname fails. Set `FRP_WINDOWS_FORCE_DOTNET_HTTP_HTTP=1` only in tests to exercise that path; production prefers `curl --cacert` when present.
+Pinned allocator CA verification and hostname/IP SAN checks both apply on the .NET HTTPS path. A trusted CA with the wrong hostname fails. Set `FRP_WINDOWS_FORCE_DOTNET_HTTP=1` only in tests to exercise that path; production prefers `curl --cacert` when present.
 
 ### Updates, PID, secrets
 
@@ -107,15 +107,17 @@ A Windows PC can forward LAN targets by setting `local_ip` to a reachable LAN ad
 
 ## Lifecycle
 
+Tools are installed under `C:\ProgramData\frp-auto-deploy\tools\` and are **not** added to PATH.
+
 ```text
-tools\frp-client.cmd start
-tools\frp-client.cmd stop
-tools\frp-client.cmd status
-tools\frp-client.cmd info
-tools\frp-client.cmd update [--check]
-tools\frp-client.cmd uninstall
-tools\frp-client.cmd doctor
-tools\frp-client.cmd autostart
+C:\ProgramData\frp-auto-deploy\tools\frp-client.cmd start
+C:\ProgramData\frp-auto-deploy\tools\frp-client.cmd stop
+C:\ProgramData\frp-auto-deploy\tools\frp-client.cmd status
+C:\ProgramData\frp-auto-deploy\tools\frp-client.cmd info
+C:\ProgramData\frp-auto-deploy\tools\frp-client.cmd update [--check]
+C:\ProgramData\frp-auto-deploy\tools\frp-client.cmd uninstall
+C:\ProgramData\frp-auto-deploy\tools\frp-client.cmd doctor
+C:\ProgramData\frp-auto-deploy\tools\frp-client.cmd autostart
 ```
 
 | Command | Behavior |
@@ -128,7 +130,13 @@ tools\frp-client.cmd autostart
 
 ## Reboot semantics
 
-frpc does **not** auto-start after reboot unless you configure optional autostart yourself. After reboot, run `frp-client start`. Enrollment state under `ProgramData` persists.
+frpc does **not** auto-start after reboot unless you configure optional autostart yourself. After reboot, run:
+
+```text
+C:\ProgramData\frp-auto-deploy\tools\frp-client.cmd start
+```
+
+Enrollment state under `ProgramData` persists.
 
 ## Unsupported / out of scope
 

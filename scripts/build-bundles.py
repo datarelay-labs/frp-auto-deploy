@@ -146,7 +146,13 @@ ps_lines.extend([
 ])
 (dist / 'bootstrap-client.ps1').write_text('\n'.join(ps_lines) + '\n', encoding='utf-8')
 
+# Compact Windows zero-touch launcher (exact-SHA download target).
+win_join_src = root / 'windows' / 'windows-join.ps1'
+if not win_join_src.is_file():
+    raise SystemExit('ERROR: windows/windows-join.ps1 missing')
+(dist / 'windows-join.ps1').write_bytes(win_join_src.read_bytes())
+
 for src, dst in [('uninstall-client.sh', 'uninstall-client.sh'), ('uninstall-server.sh', 'uninstall-server.sh')]:
     (dist / dst).write_bytes((root / src).read_bytes())
     (dist / dst).chmod(0o755)
-print('Built dist/bootstrap-server.sh, bootstrap-client.sh, and bootstrap-client.ps1')
+print('Built dist/bootstrap-server.sh, bootstrap-client.sh, bootstrap-client.ps1, and windows-join.ps1')

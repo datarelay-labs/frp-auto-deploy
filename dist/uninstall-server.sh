@@ -180,6 +180,50 @@ if [[ "$SKIP_SYSTEMD" != "1" ]] && command -v systemctl >/dev/null 2>&1; then
   systemctl reset-failed 2>/dev/null || true
 fi
 
+# Default uninstall: clear only server-owned update-pending markers so a later
+# reinstall is not blocked by a stale install/project-update transaction.
+# Preserve client-owned / corrupt / unknown markers (transaction safety).
+if [[ "$PURGE" != true ]]; then
+  pending_marker="$(frp_u_path /var/lib/frp-auto-deploy/update-pending.json)"
+  if [[ -e "$pending_marker" || -L "$pending_marker" ]]; then
+    if python3 - "$pending_marker" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+SERVER_OWNED = {"install", "project-update", "frp-update"}
+try:
+    raw = path.read_text(encoding="utf-8")
+    data = json.loads(raw)
+except Exception:
+    print(
+        "WARNING: preserving update-pending.json (unreadable or corrupt); "
+        "not removing during server uninstall.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+if not isinstance(data, dict):
+    print(
+        "WARNING: preserving update-pending.json (unexpected shape); "
+        "not removing during server uninstall.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+operation = str(data.get("operation") or "").strip()
+if operation in SERVER_OWNED:
+    raise SystemExit(0)
+print(
+    "WARNING: preserving update-pending.json (operation=%s); "
+    "not a server-owned marker." % (operation or "unknown"),
+    file=sys.stderr,
+)
+raise SystemExit(2)
+PY
+    then
+      frp_u_rm_file "$pending_marker"
+    fi
+  fi
+fi
+
 if [[ "$PURGE" == true ]]; then
   if [[ "$PURGE_YES" != true && -z "${FRP_PURGE_CONFIRM:-}" ]]; then
     echo "ERROR: --purge permanently deletes the CA, token, registry, and reservations." >&2
