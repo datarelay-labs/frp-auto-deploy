@@ -112,11 +112,18 @@ export FRP_UNINSTALL_TEST_ROOT="$DUAL"
 [[ -f "$DUAL/usr/local/sbin/frp-clients" ]] || fail "dual deleted server tool"
 pass "CLIENT_DUAL_ROLE_PRESERVES_SHARED_AND_SERVER"
 
-# Fallback path when project_files helper is already gone (idempotent re-run).
+# Fallback path when project_files helper is unreachable from the script location.
 FB="$WORKDIR/dual-fallback"
-mkdir -p "$FB/usr/local/lib/frp-auto-deploy" "$FB/usr/local/bin" \
+FB_SCRIPT="$WORKDIR/fb-script"
+mkdir -p "$FB_SCRIPT" "$FB/usr/local/lib/frp-auto-deploy" "$FB/usr/local/bin" \
   "$FB/usr/local/sbin" "$FB/etc/systemd/system" "$FB/etc/frp" "$FB/etc/frp-auto-deploy"
-# No frp_project_files.py → uninstall uses fallback list.
+cp "$ROOT/uninstall-client.sh" "$FB_SCRIPT/uninstall-client.sh"
+# Isolated copy: no lib/frp_project_files.py beside the script.
+[[ ! -f "$FB_SCRIPT/lib/frp_project_files.py" ]] || fail "fallback script dir has helper"
+[[ ! -f "$FB/usr/local/lib/frp-auto-deploy/frp_project_files.py" ]] || fail "fallback root has helper"
+if [[ -f /usr/local/lib/frp-auto-deploy/frp_project_files.py ]]; then
+  fail "system frp_project_files.py would mask fallback uninstall test"
+fi
 echo shared >"$FB/usr/local/lib/frp-auto-deploy/frp-common.sh"
 echo shared >"$FB/usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py"
 echo shared >"$FB/usr/local/lib/frp-auto-deploy/frp_clock_sync.py"
@@ -132,7 +139,9 @@ echo token >"$FB/etc/frp/server_token"
 echo state >"$FB/etc/frp/client-state.json"
 export FRP_UNINSTALL_TEST_ROOT="$FB"
 unset FRP_PROJECT_FILES_PY || true
-"$ROOT/uninstall-client.sh" >"$WORKDIR/fb.out" 2>"$WORKDIR/fb.err" || fail "fallback dual uninstall"
+"$FB_SCRIPT/uninstall-client.sh" >"$WORKDIR/fb.out" 2>"$WORKDIR/fb.err" || fail "fallback dual uninstall"
+grep -q 'Local software will be removed' "$WORKDIR/fb.out" || fail "fallback uninstall produced no output"
+[[ ! -f "$FB/usr/local/bin/frp-client" ]] || fail "fallback left frp-client"
 [[ ! -f "$FB/usr/local/lib/frp-auto-deploy/frp-client-common.sh" ]] || fail "fallback left client lib"
 [[ -f "$FB/usr/local/lib/frp-auto-deploy/frp_clock_sync.py" ]] || fail "fallback deleted shared clock"
 [[ -f "$FB/usr/local/lib/frp-auto-deploy/frp_doctor.py" ]] || fail "fallback deleted shared doctor"

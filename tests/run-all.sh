@@ -29,7 +29,7 @@ printf '%s\n' "${PY_INVENTORY[@]}" | grep -qx 'lib/frp_server_config.py' \
 printf '%s\n' "${PY_INVENTORY[@]}" | grep -qx 'tools/frp-enrollment-purge' \
   || { echo "FAIL missing tools/frp-enrollment-purge in compile inventory" >&2; exit 1; }
 python3 -m py_compile "${PY_INVENTORY[@]}"
-python3 -m py_compile tests/test-allocator.py tests/test-enrollment-security.py tests/test-mgmt-identity.py tests/test-pki-https.py tests/test-bootstrap-ticket.py tests/test-frontend-proxy.py tests/test-client-registry.py tests/test-clock-skew-auth.py tests/test-deployment-mode-fail-closed.py tests/test-audit-log.py tests/test-audit-query.py tests/test-server-config-validation.py tests/test-canonical-registry-validation.py tests/test-pki-key-cert-pairs.py tests/test-config-setter-control-lock.py tests/test-restore-https-health.py tests/test-mgmt-nonce-ordering.py tests/test-enroll-bind-ordering.py tests/test-audit-followup-p1.py tests/test-frp-data-plane-auth.py tests/test-pre-e2e-remediation-five.py tests/test-frp-release-data-plane-auth.py tests/test-server-bundle-manifest-parity.py tests/test-server-snapshot-restore-validation.py
+python3 -m py_compile tests/test-allocator.py tests/test-enrollment-security.py tests/test-enrollment-id-validation.py tests/test-mgmt-identity.py tests/test-pki-https.py tests/test-bootstrap-ticket.py tests/test-frontend-proxy.py tests/test-client-registry.py tests/test-clock-skew-auth.py tests/test-deployment-mode-fail-closed.py tests/test-audit-log.py tests/test-audit-query.py tests/test-server-config-validation.py tests/test-canonical-registry-validation.py tests/test-pki-key-cert-pairs.py tests/test-config-setter-control-lock.py tests/test-restore-https-health.py tests/test-mgmt-nonce-ordering.py tests/test-enroll-bind-ordering.py tests/test-audit-followup-p1.py tests/test-frp-data-plane-auth.py tests/test-pre-e2e-remediation-five.py tests/test-frp-release-data-plane-auth.py tests/test-server-bundle-manifest-parity.py tests/test-server-snapshot-restore-validation.py
 
 # Mandatory security/remediation regression inventory (must stay in === tests ===).
 MANDATORY_SECURITY_TESTS=(
@@ -52,6 +52,7 @@ echo "=== tests ==="
 python3 tests/test-allocator.py
 python3 tests/test-bootstrap-ticket.py
 python3 tests/test-enrollment-security.py
+python3 tests/test-enrollment-id-validation.py
 python3 tests/test-clock-skew-auth.py
 python3 tests/test-mgmt-identity.py
 ./tests/test-client-config.sh

@@ -467,7 +467,7 @@ def _show_help(rest, role):
             "===========\n\n"
             "Usage:\n"
             "  show groups\n\n"
-            "Lists manual groups with client counts.\n"
+            "Lists groups with client counts and group types.\n"
         )
     if topic == "clients":
         return (

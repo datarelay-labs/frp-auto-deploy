@@ -37,11 +37,13 @@ ALLOWED_PRESETS = ('ssh', 'http', 'https', 'rdp', 'custom')
 ALLOWED_PROTOCOLS = ('tcp',)
 NONCE_RE = re.compile(r'^[0-9a-f]{64}$')
 BOOTSTRAP_TICKET_PREFIX = 'bt1'
+ENROLLMENT_ID_HEX_LEN = 16
 BOOTSTRAP_ID_HEX_LEN = 16
 BOOTSTRAP_SECRET_HEX_LEN = 64
 BOOTSTRAP_TICKET_MAX_LEN = 160
 BOOTSTRAP_DUMMY_HASH = '0' * 64
 HEX_RE = re.compile(r'^[0-9a-f]+$')
+ENROLLMENT_ID_RE = re.compile(r'^[0-9a-f]{16}$')
 MACHINE_ID_MAX_LEN = 128
 HOSTNAME_MAX_LEN = 253
 # Request body already caps at 64KiB; also bound idle reads and fan-out.
@@ -342,10 +344,18 @@ def ensure_secret_dir(path, mode=0o700):
     return p
 
 
-def enrollment_file_path(enrollments_dir, enrollment_id):
-    if not enrollment_id or any(c not in '0123456789abcdef' for c in enrollment_id.lower()):
+def normalize_enrollment_id(enrollment_id):
+    eid = str(enrollment_id or '').strip().lower()
+    if not ENROLLMENT_ID_RE.fullmatch(eid):
         return None
-    return Path(enrollments_dir) / (enrollment_id.lower() + '.json')
+    return eid
+
+
+def enrollment_file_path(enrollments_dir, enrollment_id):
+    eid = normalize_enrollment_id(enrollment_id)
+    if eid is None:
+        return None
+    return Path(enrollments_dir) / (eid + '.json')
 
 
 def bootstrap_file_path(bootstrap_dir, ticket_id):
@@ -799,9 +809,10 @@ class Allocator:
         raise PortRangeExhausted('No available FRP service ports')
 
     def enrollment_path(self, enrollment_id):
-        if not enrollment_id or any(c not in '0123456789abcdef' for c in enrollment_id.lower()):
+        eid = normalize_enrollment_id(enrollment_id)
+        if eid is None:
             return None
-        return self.enrollments_dir / f'{enrollment_id.lower()}.json'
+        return self.enrollments_dir / f'{eid}.json'
 
     def load_enrollment(self, enrollment_id):
         path = self.enrollment_path(enrollment_id)
