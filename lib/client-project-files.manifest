@@ -12,6 +12,8 @@
 
 project usr/local/lib/frp-auto-deploy/frp-client-common.sh 0644 lib/frp-client-common.sh bash
 project usr/local/lib/frp-auto-deploy/frp-common.sh 0644 lib/frp-common.sh bash
+project usr/local/lib/frp-auto-deploy/frp-macos.sh 0644 lib/frp-macos.sh bash
+project usr/local/lib/frp-auto-deploy/com.datarelay.frp-auto-deploy.frpc.plist 0644 client/com.datarelay.frp-auto-deploy.frpc.plist none
 project usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py 0644 lib/frp_mgmt_auth.py python
 project usr/local/lib/frp-auto-deploy/frp_data_plane_auth.py 0644 lib/frp_data_plane_auth.py python
 project usr/local/lib/frp-auto-deploy/frp_clock_sync.py 0644 lib/frp_clock_sync.py python

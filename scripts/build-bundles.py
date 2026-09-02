@@ -70,6 +70,8 @@ client_files = [
     'release-manifest.json',
     'install-client.sh',
     'lib/frp-common.sh',
+    'lib/frp-macos.sh',
+    'client/com.datarelay.frp-auto-deploy.frpc.plist',
     'lib/frp-client-common.sh',
     'lib/frp_mgmt_auth.py',
     'lib/frp_data_plane_auth.py',
@@ -87,13 +89,27 @@ client_files = [
     'tools/frpctl',
     'tools/frpcli',
 ]
-client_lines = ['#!/usr/bin/env bash', 'set -euo pipefail', 'TMP="$(mktemp -d)"', 'trap \'rm -rf "$TMP"\' EXIT']
+# The client bundle also runs on macOS, whose BSD base64 spells decode -D on
+# older releases. Pick a working decoder once instead of assuming GNU flags.
+client_lines = [
+    '#!/usr/bin/env bash',
+    'set -euo pipefail',
+    'TMP="$(mktemp -d)"',
+    'trap \'rm -rf "$TMP"\' EXIT',
+    "if printf 'Zg==' | base64 -d >/dev/null 2>&1; then",
+    '  _frp_b64d() { base64 -d; }',
+    "elif printf 'Zg==' | base64 -D >/dev/null 2>&1; then",
+    '  _frp_b64d() { base64 -D; }',
+    'else',
+    "  _frp_b64d() { python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.buffer.read()))'; }",
+    'fi',
+]
 for rel in client_files:
     data = base64.b64encode(bundle_payload(rel)).decode()
     parent = str(Path(rel).parent)
     if parent != '.':
         client_lines.append(f'mkdir -p "$TMP/{parent}"')
-    client_lines.append(f"base64 -d >\"$TMP/{rel}\" <<'B64'")
+    client_lines.append(f"_frp_b64d >\"$TMP/{rel}\" <<'B64'")
     for i in range(0, len(data), 76):
         client_lines.append(data[i:i + 76])
     client_lines.append('B64')

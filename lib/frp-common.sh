@@ -17,6 +17,8 @@ FRP_SHA256_AMD64="${FRP_SHA256_AMD64:-333da23d1b9009d7c01638e9ba38cf4600f7d37d39
 FRP_SHA256_ARM64="${FRP_SHA256_ARM64:-3990f396a9a490ee7f0e5f355287750ed41520064ed999eab443b5e9a78d773d}"
 # Official fatedier/frp v0.70.1 Windows amd64 zip (verified against GitHub release asset).
 FRP_SHA256_WINDOWS_AMD64="${FRP_SHA256_WINDOWS_AMD64:-531f3cd3cc41c0b4f077b54fe6b7dd83c0ff727e7f0bf412a4c78fa279165de5}"
+# Official fatedier/frp v0.70.1 macOS Apple Silicon tarball. Intel Darwin is not shipped.
+FRP_SHA256_DARWIN_ARM64="${FRP_SHA256_DARWIN_ARM64:-cfa733b5a261c1647edee3c1fc4133d2542989b28f5602e81d47fc821d25c55f}"
 
 _FRP_COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${_FRP_COMMON_DIR}/../VERSION" ]]; then
@@ -27,6 +29,48 @@ fi
 FRP_GITHUB_OWNER="${FRP_GITHUB_OWNER:-datarelay-labs}"
 FRP_GITHUB_REPO="${FRP_GITHUB_REPO:-frp-auto-deploy}"
 FRP_GITHUB_RAW_HOST="${FRP_GITHUB_RAW_HOST:-raw.githubusercontent.com}"
+
+# ---------------------------------------------------------------------------
+# Host OS
+# ---------------------------------------------------------------------------
+# frp_os is the hot path used by filesystem helpers: it never fails and never
+# prints diagnostics. frp_detect_os is the validating entry point installers
+# call once, and it is the only one that rejects an unsupported kernel.
+
+frp_os() {
+  local raw
+  if [[ -n "${FRP_TEST_UNAME_S:-}" ]]; then
+    raw="${FRP_TEST_UNAME_S}"
+  else
+    if [[ -z "${_FRP_UNAME_S_CACHE:-}" ]]; then
+      _FRP_UNAME_S_CACHE="$(uname -s 2>/dev/null || printf 'Linux')"
+    fi
+    raw="${_FRP_UNAME_S_CACHE}"
+  fi
+  case "$raw" in
+    Darwin|darwin) printf 'darwin' ;;
+    *) printf 'linux' ;;
+  esac
+}
+
+frp_is_darwin() {
+  [[ "$(frp_os)" == darwin ]]
+}
+
+frp_detect_os() {
+  local raw
+  raw="${FRP_TEST_UNAME_S:-$(uname -s 2>/dev/null || printf 'Linux')}"
+  case "$raw" in
+    Linux|linux) FRP_OS=linux ;;
+    Darwin|darwin) FRP_OS=darwin ;;
+    *)
+      echo "ERROR: unsupported operating system: ${raw}" >&2
+      echo "This release supports Linux and Apple Silicon macOS." >&2
+      return 1
+      ;;
+  esac
+  printf '%s' "$FRP_OS"
+}
 
 frp_normalize_release_channel() {
   local ch
@@ -41,10 +85,12 @@ frp_normalize_release_channel() {
 
 frp_version_state_file() {
   local root="${FRP_DEPLOY_TEST_ROOT:-${FRP_CLIENT_TEST_ROOT:-${FRP_CTL_TEST_ROOT:-${FRP_UPDATE_ROOT:-${FRP_SERVER_TEST_ROOT:-}}}}}"
+  local p
+  p="$(frp_platform_map_path /etc/frp-auto-deploy/version)"
   if [[ -n "$root" ]]; then
-    printf '%s' "${root}/etc/frp-auto-deploy/version"
+    printf '%s' "${root}${p}"
   else
-    printf '%s' '/etc/frp-auto-deploy/version'
+    printf '%s' "$p"
   fi
 }
 
@@ -532,8 +578,21 @@ frp_test_harness_enabled() {
   return 0
 }
 
+# Canonical logical paths in this project are written in Linux FHS form. On
+# macOS they are rewritten to Apple locations by lib/frp-macos.sh. On Linux
+# this is an identity function, so Linux layout is unchanged by construction.
+frp_platform_map_path() {
+  local p="${1:-}"
+  if frp_is_darwin && declare -F frp_macos_map_path >/dev/null 2>&1; then
+    frp_macos_map_path "$p"
+    return 0
+  fi
+  printf '%s' "$p"
+}
+
 frp_path() {
-  local p="$1"
+  local p
+  p="$(frp_platform_map_path "$1")"
   local root="${FRP_DEPLOY_TEST_ROOT:-${FRP_UPDATE_ROOT:-}}"
   if frp_test_harness_enabled && [[ -n "$root" ]]; then
     printf '%s' "${root}${p}"
@@ -547,9 +606,46 @@ frp_curl_https_fetch() {
   curl -fL --proto '=https' --proto-redir '=https' "$@"
 }
 
+frp_rosetta_translated() {
+  # 1 when this shell is an x86_64 process emulated on Apple Silicon.
+  local v="${FRP_TEST_PROC_TRANSLATED:-}"
+  if [[ -z "$v" ]] && frp_command_exists sysctl; then
+    v="$(frp_invoke sysctl -n sysctl.proc_translated 2>/dev/null || true)"
+  fi
+  [[ "$v" == "1" ]]
+}
+
+frp_print_darwin_arch_error() {
+  local machine="$1"
+  echo "ERROR: unsupported macOS architecture: ${machine}" >&2
+  echo "The macOS client requires Apple Silicon (arm64): M1, M2, M3, or newer." >&2
+  echo "Intel Macs are not supported by this release." >&2
+  if frp_rosetta_translated; then
+    echo >&2
+    echo "This shell is running under Rosetta 2, which reports x86_64." >&2
+    echo "Re-run the installer from a native arm64 shell:" >&2
+    echo "  arch -arm64 /bin/bash" >&2
+  fi
+}
+
 frp_detect_arch() {
-  local machine
+  local machine os
   machine="${FRP_TEST_UNAME_M:-$(uname -m)}"
+  os="$(frp_os)"
+  FRP_OS="$os"
+  if [[ "$os" == darwin ]]; then
+    case "$machine" in
+      arm64|aarch64)
+        FRP_ARCH=arm64
+        EXPECTED_SHA="${FRP_SHA256_DARWIN_ARM64}"
+        ;;
+      *)
+        frp_print_darwin_arch_error "$machine"
+        return 1
+        ;;
+    esac
+    return 0
+  fi
   case "$machine" in
     x86_64)
       FRP_ARCH=amd64
@@ -571,14 +667,19 @@ frp_detect_architecture() {
 }
 
 frp_checksum_for() {
-  local version="$1" arch="$2"
+  local version="$1" arch="$2" os="${3:-$(frp_os)}"
   if [[ "$version" != "$FRP_VERSION" ]]; then
     echo "ERROR: FRP ${version} is not the tested version (${FRP_VERSION})" >&2
     return 1
   fi
-  case "$arch" in
-    amd64) printf '%s' "$FRP_SHA256_AMD64" ;;
-    arm64) printf '%s' "$FRP_SHA256_ARM64" ;;
+  case "${os}/${arch}" in
+    linux/amd64) printf '%s' "$FRP_SHA256_AMD64" ;;
+    linux/arm64) printf '%s' "$FRP_SHA256_ARM64" ;;
+    darwin/arm64) printf '%s' "$FRP_SHA256_DARWIN_ARM64" ;;
+    darwin/*)
+      echo "ERROR: macOS is supported on Apple Silicon (arm64) only; got ${arch}" >&2
+      return 1
+      ;;
     *)
       echo "ERROR: unsupported architecture: ${arch}" >&2
       return 1
@@ -587,9 +688,16 @@ frp_checksum_for() {
 }
 
 frp_release_url() {
-  local version="$1" arch="$2"
-  printf 'https://github.com/fatedier/frp/releases/download/v%s/frp_%s_linux_%s.tar.gz' \
-    "$version" "$version" "$arch"
+  local version="$1" arch="$2" os="${3:-$(frp_os)}"
+  case "$os" in
+    linux|darwin) ;;
+    *)
+      echo "ERROR: unsupported operating system: ${os}" >&2
+      return 1
+      ;;
+  esac
+  printf 'https://github.com/fatedier/frp/releases/download/v%s/frp_%s_%s_%s.tar.gz' \
+    "$version" "$version" "$os" "$arch"
 }
 
 frp_parse_binary_version() {
@@ -1042,6 +1150,35 @@ frp_require_systemd() {
   fi
 }
 
+frp_service_manager() {
+  if frp_is_darwin; then
+    if frp_launchd_usable; then
+      printf 'launchd'
+    else
+      printf 'none'
+    fi
+    return 0
+  fi
+  if frp_command_exists systemctl && frp_systemd_usable; then
+    printf 'systemd'
+  else
+    printf 'none'
+  fi
+}
+
+# Init-system gate for both platforms. Linux keeps the exact systemd message
+# that existing installer/doctor tests assert on.
+frp_require_service_manager() {
+  if frp_is_darwin; then
+    if ! frp_launchd_usable; then
+      echo "ERROR: this release requires launchd (launchctl) on macOS." >&2
+      return 1
+    fi
+    return 0
+  fi
+  frp_require_systemd
+}
+
 frp_systemd_version() {
   local v="${FRP_TEST_SYSTEMD_VERSION:-}"
   if [[ -n "$v" ]]; then
@@ -1089,6 +1226,14 @@ frp_print_detected_linux() {
   echo "  Package mgr  : ${pm}"
   echo "  Architecture : ${FRP_ARCH:-unknown}"
   echo "  Init system  : ${init}"
+}
+
+frp_print_detected_host() {
+  if frp_is_darwin; then
+    frp_macos_print_detected
+    return 0
+  fi
+  frp_print_detected_linux
 }
 
 frp_require_bash() {
@@ -1530,10 +1675,12 @@ PY
 
 frp_txn_marker_path() {
   local root="${FRP_UPDATE_ROOT:-${FRP_DEPLOY_TEST_ROOT:-${FRP_SERVER_TEST_ROOT:-${FRP_CLIENT_TEST_ROOT:-${FRP_UNINSTALL_TEST_ROOT:-}}}}}"
+  local p
+  p="$(frp_platform_map_path /var/lib/frp-auto-deploy/update-pending.json)"
   if [[ -n "$root" ]]; then
-    printf '%s' "${root}/var/lib/frp-auto-deploy/update-pending.json"
+    printf '%s' "${root}${p}"
   else
-    printf '%s' /var/lib/frp-auto-deploy/update-pending.json
+    printf '%s' "$p"
   fi
 }
 
@@ -1603,7 +1750,8 @@ frp_audit_emit() {
 }
 
 frp_role_fs() {
-  local p="$1"
+  local p
+  p="$(frp_platform_map_path "$1")"
   local root="${FRP_ROLE_TEST_ROOT:-${FRP_SERVER_TEST_ROOT:-${FRP_CLIENT_TEST_ROOT:-${FRP_UNINSTALL_TEST_ROOT:-${FRP_DEPLOY_TEST_ROOT:-${FRP_UPDATE_ROOT:-}}}}}}"
   if [[ -n "$root" ]]; then
     printf '%s' "${root}${p}"
@@ -1645,3 +1793,22 @@ frp_detect_host_role() {
     FRP_HOST_ROLE=absent
   fi
 }
+# ---------------------------------------------------------------------------
+# macOS module
+# ---------------------------------------------------------------------------
+# Loaded unconditionally so that frp_platform_map_path and the launchd helpers
+# resolve identically regardless of source order, and so Linux hosts can run
+# the portable macOS unit tests with FRP_TEST_UNAME_S=Darwin. Every function it
+# defines is inert unless frp_is_darwin.
+if [[ -z "${FRP_MACOS_LOADED:-}" ]]; then
+  for _frp_macos_candidate in \
+    "${_FRP_COMMON_DIR}/frp-macos.sh" \
+    /usr/local/lib/frp-auto-deploy/frp-macos.sh; do
+    if [[ -f "$_frp_macos_candidate" ]]; then
+      # shellcheck source=frp-macos.sh
+      . "$_frp_macos_candidate"
+      break
+    fi
+  done
+  unset _frp_macos_candidate
+fi
