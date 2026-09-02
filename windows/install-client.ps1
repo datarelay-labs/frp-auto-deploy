@@ -53,8 +53,8 @@ if ($Help) { Show-FrpInstallHelp; exit 0 }
 
 $libDir = Join-Path $PSScriptRoot 'lib'
 foreach ($mod in @(
-        'FrpPaths.ps1', 'FrpCrypto.ps1', 'FrpTls.ps1', 'FrpState.ps1',
-        'FrpConfig.ps1', 'FrpProcess.ps1', 'FrpBootstrap.ps1'
+        'FrpPaths.ps1', 'FrpCrypto.ps1', 'FrpTls.ps1', 'FrpClockSync.ps1',
+        'FrpState.ps1', 'FrpConfig.ps1', 'FrpProcess.ps1', 'FrpBootstrap.ps1'
     )) {
     $path = Join-Path $libDir $mod
     if (-not (Test-Path -LiteralPath $path)) {
