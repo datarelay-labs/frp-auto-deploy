@@ -775,8 +775,13 @@ PY
   if ! frp_client_restart; then
     restore_needed=1
   else
-    mapfile -t PROXY_NAMES < <(SERVICES_FILE="$enabled_list" proxy_names_from_services "$host_id")
-    if ! frp_client_wait_proxies "${PROXY_NAMES[@]}"; then
+    # Read loop rather than mapfile: this runs under bash 3.2 on macOS.
+    PROXY_NAMES=()
+    while IFS= read -r proxy_line; do
+      [[ -n "$proxy_line" ]] || continue
+      PROXY_NAMES+=("$proxy_line")
+    done < <(SERVICES_FILE="$enabled_list" proxy_names_from_services "$host_id")
+    if ! frp_client_wait_proxies ${PROXY_NAMES[@]+"${PROXY_NAMES[@]}"}; then
       restore_needed=1
     fi
   fi

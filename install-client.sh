@@ -228,8 +228,14 @@ for item in services:
 PY
     return 0
   fi
-  python3 - "$server" "$services_json_file" <<'PY'
-import json,sys
+  local service_hint='Systemd service:
+  sudo systemctl status frpc --no-pager'
+  if frp_is_darwin; then
+    service_hint="launchd daemon:
+  sudo launchctl print system/${FRP_MACOS_LAUNCHD_LABEL}"
+  fi
+  FRP_SERVICE_HINT="$service_hint" python3 - "$server" "$services_json_file" <<'PY'
+import json,os,sys
 from pathlib import Path
 server = sys.argv[1]
 services = json.loads(Path(sys.argv[2]).read_text(encoding='utf-8'))
@@ -291,8 +297,7 @@ print('  sudo frp-client')
 print('  sudo frp-client status')
 print('  sudo frp-client info')
 print()
-print('Systemd service:')
-print('  sudo systemctl status frpc --no-pager')
+print(os.environ.get('FRP_SERVICE_HINT', ''))
 print()
 print('=========================================')
 PY
@@ -330,6 +335,83 @@ frp_client_existing_install_message() {
   echo >&2
   echo "Use sudo frp-client to change published services." >&2
   echo "An Enrollment Code is only for first install or trust recovery." >&2
+}
+
+# Write the platform service definition (systemd unit or launchd plist) without
+# enabling or starting it.
+frp_client_install_service_definition() {
+  local unit_src="" unit_tmp
+  if frp_is_darwin; then
+    frp_macos_launchd_install || return 1
+    return 0
+  fi
+  if [[ -f "${_FRP_INSTALL_CLIENT_DIR}/client/frpc.service" ]]; then
+    unit_src="${_FRP_INSTALL_CLIENT_DIR}/client/frpc.service"
+  fi
+  if [[ -n "$unit_src" ]]; then
+    frp_write_compatible_systemd_unit "$unit_src" /etc/systemd/system/frpc.service
+    return 0
+  fi
+  unit_tmp="$(mktemp)"
+  cat >"$unit_tmp" <<'EOF2'
+[Unit]
+Description=FRP Client
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/frpc -c /etc/frp/frpc.toml
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF2
+  frp_write_compatible_systemd_unit "$unit_tmp" /etc/systemd/system/frpc.service
+  rm -f "$unit_tmp"
+}
+
+# Reload the service manager after writing a definition. launchd has no
+# daemon-reload equivalent; loading the plist is the reload.
+frp_client_service_daemon_reload() {
+  if frp_is_darwin; then
+    return 0
+  fi
+  systemctl daemon-reload
+}
+
+# Enable at boot and (re)start now.
+frp_client_service_enable_and_start() {
+  if frp_is_darwin; then
+    # RunAtLoad in the plist is the launchd equivalent of `systemctl enable`;
+    # a bootout/bootstrap cycle is the equivalent of `systemctl restart`.
+    frp_macos_launchd_bootout
+    if ! frp_macos_launchd_bootstrap; then
+      frp_emit_failure_class SERVICE_START_FAILED
+      return 1
+    fi
+    sleep 1
+    if ! frp_macos_launchd_running; then
+      echo "ERROR: frpc failed to start under launchd; local files were written and the server reservation is preserved." >&2
+      frp_emit_failure_class SERVICE_START_FAILED
+      return 1
+    fi
+    return 0
+  fi
+  if ! systemctl enable frpc >/dev/null; then
+    echo "ERROR: systemd enable failed; installation is not complete." >&2
+    frp_emit_failure_class SYSTEMD_ENABLE_FAILED
+    return 1
+  fi
+  if ! systemctl restart frpc; then
+    echo "ERROR: frpc failed to start; local files were written and the server reservation is preserved." >&2
+    frp_emit_failure_class SERVICE_START_FAILED
+    return 1
+  fi
+  return 0
 }
 
 frp_client_upgrade_from_this_tree() {
@@ -392,26 +474,46 @@ frp_client_main() {
     fi
   fi
   frp_bootstrap_allocator_ca "$ALLOCATOR_URL" || return 1
+  frp_detect_os >/dev/null || frp_client_fail 1 || return 1
   frp_detect_architecture || frp_client_fail 1 || return 1
 
   if [[ -z "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
     frp_require_bash || frp_client_fail 1 || return 1
-    frp_detect_platform
-    frp_detect_package_manager
-    frp_print_detected_linux
-    echo
-    frp_require_systemd || frp_client_fail 1 || return 1
-    FRP_DEPENDENCY_ROLE=client
-    if [[ "${FRP_INSTALL_HOOK_DEP_FAIL:-}" == "1" ]]; then
-      echo "ERROR: simulated package manager failure" >&2
-      frp_emit_failure_class DEPENDENCY_INSTALL_FAILED
-      frp_client_fail 1 || return 1
+    if frp_is_darwin; then
+      frp_macos_require_supported_release || frp_client_fail 1 || return 1
+      frp_macos_print_detected
+      echo
+      frp_require_service_manager || frp_client_fail 1 || return 1
+      if [[ "${FRP_INSTALL_HOOK_DEP_FAIL:-}" == "1" ]]; then
+        echo "ERROR: simulated dependency failure" >&2
+        frp_emit_failure_class DEPENDENCY_INSTALL_FAILED
+        frp_client_fail 1 || return 1
+      fi
+      # No apt/dnf/brew mutation on macOS: dependencies are required, not installed.
+      frp_macos_require_dependencies || {
+        frp_emit_failure_class DEPENDENCY_INSTALL_FAILED
+        frp_client_fail 1 || return 1
+      }
+      frp_require_python || frp_client_fail 1 || return 1
+      frp_macos_ensure_dirs || frp_client_fail 1 || return 1
+    else
+      frp_detect_platform
+      frp_detect_package_manager
+      frp_print_detected_linux
+      echo
+      frp_require_service_manager || frp_client_fail 1 || return 1
+      FRP_DEPENDENCY_ROLE=client
+      if [[ "${FRP_INSTALL_HOOK_DEP_FAIL:-}" == "1" ]]; then
+        echo "ERROR: simulated package manager failure" >&2
+        frp_emit_failure_class DEPENDENCY_INSTALL_FAILED
+        frp_client_fail 1 || return 1
+      fi
+      ensure_dependencies || {
+        frp_emit_failure_class DEPENDENCY_INSTALL_FAILED
+        frp_client_fail 1 || return 1
+      }
+      frp_require_python || frp_client_fail 1 || return 1
     fi
-    ensure_dependencies || {
-      frp_emit_failure_class DEPENDENCY_INSTALL_FAILED
-      frp_client_fail 1 || return 1
-    }
-    frp_require_python || frp_client_fail 1 || return 1
   fi
 
   frp_client_begin_tmp
@@ -440,6 +542,10 @@ frp_client_main() {
   mkdir -p "$etc_frp"
   if [[ -n "${FRP_TEST_MACHINE_ID:-}" ]]; then
     MACHINE_ID="$FRP_TEST_MACHINE_ID"
+  elif frp_is_darwin; then
+    # IOPlatformUUID survives renames and user changes; hostname stays mutable
+    # metadata and is never folded into the identity.
+    MACHINE_ID="$(frp_macos_machine_id)" || frp_client_fail 1 || return 1
   elif [[ -s /etc/machine-id ]]; then
     MACHINE_ID="$(tr -d '\n' </etc/machine-id)"
   elif [[ -s "${etc_frp}/client-id" ]]; then
@@ -530,8 +636,8 @@ frp_client_main() {
 
   if [[ "${FRP_SKIP_DOWNLOAD:-}" != "1" ]]; then
     ARCHIVE="$TMPDIR/frp.tar.gz"
-    URL="https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/frp_${FRP_VERSION}_linux_${FRP_ARCH}.tar.gz"
-    echo "Downloading FRP ${FRP_VERSION} (${FRP_ARCH}) ..."
+    URL="$(frp_release_url "$FRP_VERSION" "$FRP_ARCH")" || frp_client_fail 1 || return 1
+    echo "Downloading FRP ${FRP_VERSION} ($(frp_os)/${FRP_ARCH}) ..."
     if [[ "${FRP_INSTALL_HOOK_DOWNLOAD_FAIL:-}" == "1" ]]; then
       echo "ERROR: failed to download FRP archive" >&2
       frp_emit_failure_class DOWNLOAD_FAILED
@@ -543,19 +649,34 @@ frp_client_main() {
       frp_client_fail 1 || return 1
     fi
     echo "Verifying checksum ..."
-    printf '%s  %s\n' "$EXPECTED_SHA" "$ARCHIVE" | sha256sum -c - || {
-      frp_emit_failure_class INTEGRITY_FAILED
-      frp_client_fail 1 || return 1
-    }
+    # macOS has shasum, not GNU sha256sum; both accept the same check format.
+    if frp_is_darwin; then
+      frp_macos_sha256_check "$EXPECTED_SHA" "$ARCHIVE" || {
+        echo "ERROR: SHA256 checksum mismatch" >&2
+        frp_emit_failure_class INTEGRITY_FAILED
+        frp_client_fail 1 || return 1
+      }
+    else
+      printf '%s  %s\n' "$EXPECTED_SHA" "$ARCHIVE" | sha256sum -c - || {
+        frp_emit_failure_class INTEGRITY_FAILED
+        frp_client_fail 1 || return 1
+      }
+    fi
     extracted="$(frp_extract_frp_member "$ARCHIVE" "$TMPDIR" frpc)" || {
       frp_emit_failure_class STAGING_FAILED
       frp_client_fail 1 || return 1
     }
+    if frp_is_darwin && frp_command_exists xattr; then
+      # curl does not set com.apple.quarantine, but a proxy or mirror might.
+      xattr -d com.apple.quarantine "$extracted" 2>/dev/null || true
+    fi
+    # Mach-O binaries are not ELF, so the ELF arch probe reports non-elf and is
+    # skipped; the pinned Apple Silicon SHA256 above is what constrains the arch.
     frp_validate_frp_binary "$extracted" "$FRP_VERSION" "$FRP_ARCH" || {
       frp_emit_failure_class INTEGRITY_FAILED
       frp_client_fail 1 || return 1
     }
-    frp_atomic_install "$extracted" /usr/local/bin/frpc 0755 || {
+    frp_atomic_install "$extracted" "$(frp_client_path /usr/local/bin/frpc)" 0755 || {
       frp_emit_failure_class FILE_COMMIT_FAILED
       frp_client_fail 1 || return 1
     }
@@ -570,91 +691,46 @@ frp_client_main() {
   render_frpc_toml "$FRPC_TOML" "$FRP_SERVER" "$FRP_SERVER_PORT" "$FRP_TOKEN" "$HOST_ID" "$SERVICES_FILE" "${FRP_TRANSPORT:-tcp}" "$MACHINE_ID" "$(frp_client_identity_key_path)"
   frp_client_verify_config "$FRPC_TOML" || frp_client_fail 1 || return 1
 
+  local service_label="systemd service"
+  if frp_is_darwin; then
+    service_label="launchd daemon"
+  fi
   if [[ "$(services_count)" != "0" && "${FRP_SKIP_SYSTEMD:-}" != "1" && -z "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
-    echo "Installing systemd service ..."
-    UNIT_SRC=""
-    if [[ -f "${_FRP_INSTALL_CLIENT_DIR}/client/frpc.service" ]]; then
-      UNIT_SRC="${_FRP_INSTALL_CLIENT_DIR}/client/frpc.service"
-    fi
-    if [[ -n "$UNIT_SRC" ]]; then
-      frp_write_compatible_systemd_unit "$UNIT_SRC" /etc/systemd/system/frpc.service
-    else
-      _frpc_unit_tmp="$(mktemp)"
-      cat >"$_frpc_unit_tmp" <<'EOF2'
-[Unit]
-Description=FRP Client
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/frpc -c /etc/frp/frpc.toml
-Restart=always
-RestartSec=5
-NoNewPrivileges=true
-PrivateTmp=true
-
-[Install]
-WantedBy=multi-user.target
-EOF2
-      frp_write_compatible_systemd_unit "$_frpc_unit_tmp" /etc/systemd/system/frpc.service
-      rm -f "$_frpc_unit_tmp"
-    fi
+    echo "Installing ${service_label} ..."
+    frp_client_install_service_definition || {
+      frp_emit_failure_class FILE_COMMIT_FAILED
+      frp_client_fail 1 || return 1
+    }
     echo "Starting FRP client ..."
-    systemctl daemon-reload || {
+    frp_client_service_daemon_reload || {
       frp_emit_failure_class SYSTEMD_RELOAD_FAILED
       frp_client_fail 1 || return 1
     }
-    if ! systemctl enable frpc >/dev/null; then
-      echo "ERROR: systemd enable failed; installation is not complete." >&2
-      frp_emit_failure_class SYSTEMD_ENABLE_FAILED
-      frp_client_fail 1 || return 1
-    fi
-    if ! systemctl restart frpc; then
-      echo "ERROR: frpc failed to start; local files were written and the server reservation is preserved." >&2
-      frp_emit_failure_class SERVICE_START_FAILED
-      frp_client_fail 1 || return 1
-    fi
+    frp_client_service_enable_and_start || frp_client_fail 1 || return 1
 
     echo "Verifying published proxies ..."
-    mapfile -t PROXY_NAMES < <(proxy_names_from_services "$HOST_ID")
-    if ! wait_for_proxies "${PROXY_NAMES[@]}"; then
+    # Read loop rather than mapfile: macOS ships bash 3.2 and the zero-touch
+    # one-liner pipes this script straight into /bin/bash.
+    PROXY_NAMES=()
+    while IFS= read -r proxy_line; do
+      [[ -n "$proxy_line" ]] || continue
+      PROXY_NAMES+=("$proxy_line")
+    done < <(proxy_names_from_services "$HOST_ID")
+    if ! wait_for_proxies ${PROXY_NAMES[@]+"${PROXY_NAMES[@]}"}; then
       echo "ERROR: frpc did not register every requested proxy successfully" >&2
-      journalctl -u frpc -n 80 --no-pager >&2 || true
+      frp_client_recent_service_logs 80 >&2 || true
       frp_emit_failure_class HEALTH_CHECK_FAILED
       frp_client_fail 1 || return 1
     fi
   elif [[ "$(services_count)" == "0" ]]; then
     echo "Management-only mode: frpc is not started until a service is enabled."
     if [[ "${FRP_SKIP_SYSTEMD:-}" != "1" && -z "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
-      echo "Installing inactive systemd service for future services ..."
-      if [[ -f "${_FRP_INSTALL_CLIENT_DIR}/client/frpc.service" ]]; then
-        frp_write_compatible_systemd_unit \
-          "${_FRP_INSTALL_CLIENT_DIR}/client/frpc.service" \
-          /etc/systemd/system/frpc.service
-      else
-        _frpc_unit_tmp="$(mktemp)"
-        cat >"$_frpc_unit_tmp" <<'EOF2'
-[Unit]
-Description=FRP Client
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/frpc -c /etc/frp/frpc.toml
-Restart=always
-RestartSec=5
-NoNewPrivileges=true
-PrivateTmp=true
-
-[Install]
-WantedBy=multi-user.target
-EOF2
-        frp_write_compatible_systemd_unit "$_frpc_unit_tmp" /etc/systemd/system/frpc.service
-        rm -f "$_frpc_unit_tmp"
-      fi
-      systemctl daemon-reload || {
+      echo "Installing inactive ${service_label} for future services ..."
+      frp_client_install_service_definition || {
+        frp_emit_failure_class FILE_COMMIT_FAILED
+        frp_client_fail 1 || return 1
+      }
+      frp_client_service_daemon_reload || {
         frp_emit_failure_class SYSTEMD_RELOAD_FAILED
         frp_client_fail 1 || return 1
       }

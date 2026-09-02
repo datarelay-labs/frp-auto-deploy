@@ -2266,13 +2266,28 @@ for item in services:
 PY
 }
 
+# Recent frpc service output. systemd keeps it in the journal; launchd writes
+# it to the StandardOut/StandardError paths declared in the plist.
+frp_client_recent_service_logs() {
+  local lines="${1:-400}" log_dir
+  if frp_is_darwin; then
+    log_dir="$(frp_client_path /etc/frp)/logs"
+    {
+      [[ -f "${log_dir}/frpc.out.log" ]] && tail -n "$lines" "${log_dir}/frpc.out.log"
+      [[ -f "${log_dir}/frpc.err.log" ]] && tail -n "$lines" "${log_dir}/frpc.err.log"
+    } 2>/dev/null || true
+    return 0
+  fi
+  journalctl -u frpc -n "$lines" --no-pager 2>/dev/null || true
+}
+
 wait_for_proxies() {
   local logs proxy missing
   local -a names=("$@")
   local i
   for i in {1..20}; do
     sleep 1
-    logs="$(journalctl -u frpc -n 400 --no-pager 2>/dev/null || true)"
+    logs="$(frp_client_recent_service_logs 400)"
     if ! grep -q 'login to server success' <<<"$logs"; then
       continue
     fi

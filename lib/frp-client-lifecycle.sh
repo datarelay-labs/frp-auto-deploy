@@ -35,6 +35,12 @@ frp_client_autostart_enabled() {
     [[ "${FRP_CLIENT_LIFECYCLE_AUTOSTART:-}" == "enabled" ]]
     return $?
   fi
+  if frp_is_darwin; then
+    # A LaunchDaemon plist that is present and bootstrapped starts at boot via
+    # RunAtLoad, so "loaded" is the launchd equivalent of `is-enabled`.
+    frp_macos_launchd_loaded
+    return $?
+  fi
   if ! command -v systemctl >/dev/null 2>&1; then
     return 1
   fi
@@ -44,6 +50,11 @@ frp_client_autostart_enabled() {
 frp_client_project_frpc_pids() {
   # Return PIDs of project-owned frpc only (binary + project config), never all frpc.
   local cfg bin pid cmdline
+  if frp_is_darwin; then
+    # macOS has no /proc; ps(1) supplies the command line instead.
+    frp_macos_project_frpc_pids
+    return 0
+  fi
   cfg="$(frp_client_toml_path 2>/dev/null || true)"
   [[ -n "$cfg" ]] || cfg="/etc/frp/frpc.toml"
   bin="$(frp_client_path /usr/local/bin/frpc)"
@@ -100,6 +111,15 @@ frp_client_stop_frpc() {
   if [[ "${FRP_SKIP_SYSTEMD:-}" == "1" || -n "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
     return 0
   fi
+  if frp_is_darwin; then
+    frp_macos_launchd_bootout
+    frp_client_kill_project_frpc
+    if frp_client_project_frpc_running; then
+      echo "ERROR: project frpc is still running" >&2
+      return 1
+    fi
+    return 0
+  fi
   # Prefer project unit stop; never pkill -x frpc globally.
   if command -v systemctl >/dev/null 2>&1; then
     systemctl stop frpc >/dev/null 2>&1 || true
@@ -131,6 +151,20 @@ frp_client_start_frpc() {
   local cfg
   cfg="$(frp_client_toml_path)"
   frp_client_verify_config "$cfg" || return 1
+  if frp_is_darwin; then
+    # kickstart restarts an already-bootstrapped daemon; bootstrap covers the
+    # case where pause booted it out. Neither one changes RunAtLoad, so
+    # autostart intent is preserved exactly like the systemd path.
+    if ! frp_macos_launchd_kickstart; then
+      frp_macos_launchd_bootstrap || return 1
+    fi
+    sleep 1
+    if ! frp_macos_launchd_running; then
+      echo "ERROR: frpc failed to start" >&2
+      return 1
+    fi
+    return 0
+  fi
   # Do not systemctl enable here — resume restores autostart; restart preserves it.
   systemctl start frpc
   sleep 1
@@ -163,8 +197,12 @@ frp_client_pause_remote_access() {
   if ! frp_client_stop_frpc; then
     return 1
   fi
-  if [[ "${FRP_SKIP_SYSTEMD:-}" != "1" && -z "${FRP_CLIENT_TEST_ROOT:-}" ]] && command -v systemctl >/dev/null 2>&1; then
-    systemctl disable frpc >/dev/null 2>&1 || true
+  if [[ "${FRP_SKIP_SYSTEMD:-}" != "1" && -z "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
+    if frp_is_darwin; then
+      frp_macos_launchd_set_enabled disable
+    elif command -v systemctl >/dev/null 2>&1; then
+      systemctl disable frpc >/dev/null 2>&1 || true
+    fi
   fi
   python3 - "$autostart" "$(frp_client_pause_marker_path)" <<'PY'
 import json, os, sys
@@ -220,8 +258,12 @@ PY
 )"
   rm -f "$marker"
   if [[ "$autostart" == "1" ]]; then
-    if [[ "${FRP_SKIP_SYSTEMD:-}" != "1" && -z "${FRP_CLIENT_TEST_ROOT:-}" ]] && command -v systemctl >/dev/null 2>&1; then
-      systemctl enable frpc >/dev/null 2>&1 || true
+    if [[ "${FRP_SKIP_SYSTEMD:-}" != "1" && -z "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
+      if frp_is_darwin; then
+        frp_macos_launchd_set_enabled enable
+      elif command -v systemctl >/dev/null 2>&1; then
+        systemctl enable frpc >/dev/null 2>&1 || true
+      fi
     fi
     frp_client_start_frpc || return 1
   else

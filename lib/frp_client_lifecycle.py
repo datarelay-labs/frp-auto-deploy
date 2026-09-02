@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import re
 import socket
 import ssl
@@ -40,6 +41,47 @@ SENSITIVE_VALUE_RE = re.compile(
 CONNECT_TIMEOUT = 2.0
 
 
+MACOS_LAUNCHD_LABEL = (
+    os.environ.get('FRP_MACOS_LAUNCHD_LABEL') or 'com.datarelay.frp-auto-deploy.frpc'
+)
+
+
+def _is_darwin():
+    return (os.environ.get('FRP_TEST_UNAME_S') or platform.system()) == 'Darwin'
+
+
+def _macos_state_root():
+    return (
+        os.environ.get('FRP_MACOS_STATE_ROOT')
+        or '/Library/Application Support/frp-auto-deploy'
+    )
+
+
+def _macos_map(absolute):
+    """Mirror of frp_macos_map_path for the paths this module reads.
+
+    Only the state-root families are needed here; nothing in the lifecycle
+    module resolves a Homebrew-prefix path.
+    """
+    state = _macos_state_root()
+    text = str(absolute)
+    for prefix, replacement in (
+        ('/etc/frp/', state + '/'),
+        ('/etc/frp-auto-deploy/', state + '/'),
+        ('/var/lib/frp-auto-deploy/', state + '/state/'),
+        ('/usr/local/lib/frp-auto-deploy/', state + '/lib/'),
+    ):
+        if text.startswith(prefix):
+            return replacement + text[len(prefix):]
+    if text in ('/etc/frp', '/etc/frp-auto-deploy'):
+        return state
+    if text == '/usr/local/lib/frp-auto-deploy':
+        return state + '/lib'
+    if text == '/usr/local/bin/frpc':
+        return state + '/bin/frpc'
+    return text
+
+
 def _root():
     """Return test-root Path, or None when unset (production absolute paths)."""
     raw = os.environ.get('FRP_CLIENT_TEST_ROOT', '')
@@ -47,7 +89,10 @@ def _root():
 
 
 def _path(rel):
-    absolute = Path(rel if str(rel).startswith('/') else '/' + str(rel))
+    text = str(rel) if str(rel).startswith('/') else '/' + str(rel)
+    if _is_darwin():
+        text = _macos_map(text)
+    absolute = Path(text)
     root = _root()
     if root is None:
         return absolute
@@ -304,8 +349,26 @@ def _frpc_active():
             return 'PASS', 'running (test hook)'
         if hook == '0':
             return 'PASS', 'stopped (test hook)'
-        return 'SKIP', 'systemd checks skipped in test mode'
+        return 'SKIP', 'service checks skipped in test mode'
     try:
+        if _is_darwin():
+            # launchd has no `is-active`; a non-zero pid in `launchctl print`
+            # is the equivalent signal. /proc does not exist here.
+            proc = subprocess.run(
+                ['launchctl', 'print', 'system/' + MACOS_LAUNCHD_LABEL],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            text = proc.stdout or ''
+            match = re.search(r'^\s*pid\s*=\s*(\d+)', text, re.M)
+            if match and match.group(1) != '0':
+                return 'PASS', 'running'
+            if is_paused():
+                return 'PASS', 'stopped (paused)'
+            if proc.returncode != 0:
+                return 'WARN', 'not loaded'
+            return 'WARN', 'loaded but not running'
         proc = subprocess.run(
             ['systemctl', 'is-active', 'frpc'],
             capture_output=True,
@@ -588,6 +651,22 @@ def validate_log_lines(value):
     return num
 
 
+def _macos_log_paths():
+    log_dir = _path('/etc/frp') / 'logs'
+    return [log_dir / 'frpc.out.log', log_dir / 'frpc.err.log']
+
+
+def _macos_read_logs(lines):
+    """launchd writes plain files, so tail them instead of querying a journal."""
+    collected = []
+    for path in _macos_log_paths():
+        try:
+            collected.extend(path.read_text(encoding='utf-8', errors='replace').splitlines())
+        except OSError:
+            continue
+    return collected[-lines:]
+
+
 def fetch_logs(lines=100, follow=False):
     if follow:
         if os.environ.get('FRP_CLIENT_TEST_ROOT') or os.environ.get('FRP_SKIP_SYSTEMD') == '1':
@@ -595,6 +674,9 @@ def fetch_logs(lines=100, follow=False):
                 print(line)
                 sys.stdout.flush()
             return 0
+        if _is_darwin():
+            args = ['tail', '-n', '100', '-F'] + [str(p) for p in _macos_log_paths()]
+            os.execvp('tail', args)
         os.execvp('journalctl', ['journalctl', '-u', 'frpc', '-f', '--no-pager'])
     lines = validate_log_lines(lines)
     if os.environ.get('FRP_CLIENT_TEST_ROOT') or os.environ.get('FRP_SKIP_SYSTEMD') == '1':
@@ -604,6 +686,10 @@ def fetch_logs(lines=100, follow=False):
         else:
             text = '[test] no journal in test mode\n'
         for line in text.splitlines()[-lines:]:
+            print(redact_text(line))
+        return 0
+    if _is_darwin():
+        for line in _macos_read_logs(lines):
             print(redact_text(line))
         return 0
     proc = subprocess.run(
