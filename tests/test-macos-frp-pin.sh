@@ -80,12 +80,13 @@ fi
 grep -q 'is not the tested version' "$WORKDIR/ver.err" || fail "version refusal message"
 pass "checksum: untested FRP version refused on darwin"
 
-# Two-argument callers keep working: the OS defaults to the running host.
+# Two-argument callers keep working: the OS defaults to the (mocked) host.
 reset_env
 export FRP_TEST_UNAME_S=Darwin
 [[ "$(frp_checksum_for "$PINNED_FRP_VERSION" arm64)" == "$OFFICIAL_DARWIN_ARM64" ]] \
   || fail "implicit OS should follow the host on darwin"
 reset_env
+export FRP_TEST_UNAME_S=Linux
 [[ "$(frp_checksum_for "$PINNED_FRP_VERSION" amd64)" == "$OFFICIAL_LINUX_AMD64" ]] \
   || fail "implicit OS should follow the host on linux"
 pass "checksum: implicit OS follows the host"
@@ -108,6 +109,7 @@ pass "url: official darwin_arm64 asset"
   "https://github.com/fatedier/frp/releases/download/v${PINNED_FRP_VERSION}/frp_${PINNED_FRP_VERSION}_linux_arm64.tar.gz" ]] \
   || fail "linux arm64 URL regression"
 reset_env
+export FRP_TEST_UNAME_S=Linux
 [[ "$(frp_release_url "$PINNED_FRP_VERSION" amd64)" == \
   "https://github.com/fatedier/frp/releases/download/v${PINNED_FRP_VERSION}/frp_${PINNED_FRP_VERSION}_linux_amd64.tar.gz" ]] \
   || fail "implicit-OS linux URL regression"

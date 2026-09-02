@@ -32,22 +32,42 @@ reset_env() {
 # OS detection
 # ---------------------------------------------------------------------------
 
+# Native host: do not assume Linux. CI runs this suite on Apple Silicon too.
 reset_env
-[[ "$(frp_os)" == linux ]] || fail "default host should report linux"
-frp_is_darwin && fail "Linux host must not report darwin"
-pass "os: linux host"
+NATIVE_OS="$(frp_os)"
+case "$NATIVE_OS" in
+  linux)
+    frp_is_darwin && fail "Linux host must not report darwin"
+    [[ "$(frp_detect_os)" == linux ]] || fail "frp_detect_os on native Linux"
+    pass "os: native linux host"
+    ;;
+  darwin)
+    frp_is_darwin || fail "Darwin host must report darwin"
+    [[ "$(frp_detect_os)" == darwin ]] || fail "frp_detect_os on native Darwin"
+    frp_detect_arch || fail "native Darwin Apple Silicon detection must pass"
+    [[ "$FRP_ARCH" == arm64 ]] || fail "native Darwin must be arm64, got $FRP_ARCH"
+    [[ "$EXPECTED_SHA" == "$FRP_SHA256_DARWIN_ARM64" ]] \
+      || fail "native Darwin must pin the darwin_arm64 SHA"
+    pass "os: native darwin arm64 host"
+    ;;
+  *)
+    fail "unexpected native OS from frp_os: $NATIVE_OS"
+    ;;
+esac
 
 reset_env
 export FRP_TEST_UNAME_S=Darwin
 [[ "$(frp_os)" == darwin ]] || fail "FRP_TEST_UNAME_S=Darwin should report darwin"
 frp_is_darwin || fail "frp_is_darwin under Darwin"
 [[ "$(frp_detect_os)" == darwin ]] || fail "frp_detect_os under Darwin"
-pass "os: darwin detection"
+pass "os: darwin detection (mocked)"
 
 reset_env
 export FRP_TEST_UNAME_S=Linux
+[[ "$(frp_os)" == linux ]] || fail "FRP_TEST_UNAME_S=Linux should report linux"
+frp_is_darwin && fail "mocked Linux must not report darwin"
 [[ "$(frp_detect_os)" == linux ]] || fail "frp_detect_os under Linux"
-pass "os: linux detection"
+pass "os: linux detection (mocked)"
 
 reset_env
 export FRP_TEST_UNAME_S=FreeBSD
@@ -97,13 +117,13 @@ if frp_detect_arch 2>/dev/null; then
 fi
 pass "arch: unknown darwin arch rejected"
 
-# Linux must be completely unaffected.
+# Linux must be completely unaffected (explicit mock: do not rely on host OS).
 reset_env
-export FRP_TEST_UNAME_M=x86_64
+export FRP_TEST_UNAME_S=Linux FRP_TEST_UNAME_M=x86_64
 frp_detect_arch || fail "linux amd64 regression"
 [[ "$FRP_ARCH" == amd64 && "$EXPECTED_SHA" == "$FRP_SHA256_AMD64" ]] || fail "linux amd64 pin regression"
 reset_env
-export FRP_TEST_UNAME_M=aarch64
+export FRP_TEST_UNAME_S=Linux FRP_TEST_UNAME_M=aarch64
 frp_detect_arch || fail "linux arm64 regression"
 [[ "$FRP_ARCH" == arm64 && "$EXPECTED_SHA" == "$FRP_SHA256_ARM64" ]] || fail "linux arm64 pin regression"
 pass "arch: Linux detection unchanged"
@@ -132,6 +152,7 @@ pass "service manager: missing launchctl fails clearly"
 
 # Linux still requires systemd, with the original message.
 reset_env
+export FRP_TEST_UNAME_S=Linux
 export FRP_TEST_CMD_PATH="$WORKDIR/sysd-ok"
 export FRP_TEST_SYSTEMD_RUNTIME_DIR="$WORKDIR/run-systemd"
 mkdir -p "$FRP_TEST_SYSTEMD_RUNTIME_DIR"
@@ -225,8 +246,9 @@ export FRP_MACOS_PREFIX="$WORKDIR/brewish"
   || fail "project libs must stay under the root-owned state root"
 pass "paths: root-owned runtime vs Homebrew CLI split"
 
-# Linux mapping is an identity function.
+# Linux mapping is an identity function (explicit mock: do not rely on host OS).
 reset_env
+export FRP_TEST_UNAME_S=Linux
 for p in /etc/frp/frpc.toml /usr/local/bin/frpc /var/lib/frp-auto-deploy/update-pending.json \
   /etc/systemd/system/frpc.service /usr/local/lib/frp-auto-deploy/frp-common.sh; do
   [[ "$(frp_platform_map_path "$p")" == "$p" ]] || fail "Linux mapping must be identity for $p"

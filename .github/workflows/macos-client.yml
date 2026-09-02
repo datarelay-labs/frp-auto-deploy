@@ -154,8 +154,9 @@ jobs:
             echo "machine id is not stable across invocations" >&2
             exit 1
           fi
-          if [[ ! "$first" =~ ^[0-9a-f]{64}$ ]]; then
-            echo "machine id is not a 64-character hex digest: ${first}" >&2
+          # Same shape as Linux /etc/machine-id: first 32 hex of a domain-separated SHA-256.
+          if [[ ! "$first" =~ ^[0-9a-f]{32}$ ]]; then
+            echo "machine id is not a 32-character hex digest: ${first}" >&2
             exit 1
           fi
           uuid="$(ioreg -rd1 -c IOPlatformExpertDevice \
