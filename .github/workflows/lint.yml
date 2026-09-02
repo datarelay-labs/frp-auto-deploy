@@ -16,11 +16,15 @@ jobs:
         run: |
           FRP_VERSION=0.70.1
           FRP_ARCH=amd64
+          FRP_EXPECTED_SHA=333da23d1b9009d7c01638e9ba38cf4600f7d37d393f854e96ee1396adefa9a6
           curl -fsSL -o /tmp/frp.tgz \
             "https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/frp_${FRP_VERSION}_linux_${FRP_ARCH}.tar.gz"
+          echo "${FRP_EXPECTED_SHA}  /tmp/frp.tgz" | sha256sum -c -
           tar -xzf /tmp/frp.tgz -C /tmp
           sudo install -m 0755 "/tmp/frp_${FRP_VERSION}_linux_${FRP_ARCH}/frps" /usr/local/bin/frps
           test -x "/tmp/frp_${FRP_VERSION}_linux_${FRP_ARCH}/frpc"
+          echo "FRP_CI_VERSION=${FRP_VERSION}"
+          echo "FRP_CI_ARCHIVE_SHA256_VERIFIED=PASS"
       - name: Full local non-Docker suite
         run: ./tests/run-all.sh
       # Live distro containers cannot validate systemd unless PID 1 is systemd.
