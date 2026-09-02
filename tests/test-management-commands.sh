@@ -12,9 +12,34 @@ fail() { echo "FAIL $1" >&2; exit 1; }
 TREE="$WORKDIR/tree"
 mkdir -p "$TREE/etc/frp-auto-deploy" "$TREE/var/lib/frp-auto-deploy"
 
-python3 - "$TREE/etc/frp-auto-deploy/config.json" "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY'
-import json,sys
+python3 - "$TREE/etc/frp-auto-deploy/config.json" "$TREE/var/lib/frp-auto-deploy/registry.json" "$ROOT" <<'PY'
+import importlib.util
+import json
+import sys
+import tempfile
 from pathlib import Path
+
+root = Path(sys.argv[3])
+spec = importlib.util.spec_from_file_location('mgmt', root / 'lib' / 'frp_mgmt_auth.py')
+mgmt = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mgmt)
+
+
+def enrolled_fields(machine_id):
+    tmp = Path(tempfile.mkdtemp())
+    key = tmp / 'key.pem'
+    pub = tmp / 'pub.pem'
+    mgmt.generate_keypair(key, pub)
+    pem = pub.read_text(encoding='utf-8')
+    return {
+        'mgmt_status': 'enrolled',
+        'mgmt_pubkey': pem,
+        'mgmt_alg': mgmt.MGMT_ALG,
+        'mgmt_fingerprint': mgmt.pubkey_fingerprint(pem),
+        'mgmt_mac_key': mgmt.derive_mac_key('test-mgmt-secret', machine_id),
+    }
+
+
 cfg_path, reg_path = Path(sys.argv[1]), Path(sys.argv[2])
 cfg_path.write_text(json.dumps({
   "public_ip": "203.0.113.10",
@@ -32,10 +57,7 @@ reg_path.write_text(json.dumps({
       "hostname": "dev-dp-mirror",
       "created_at": "2026-08-26T00:00:00Z",
       "last_enrolled_at": "2026-08-26T01:00:00Z",
-      "mgmt_status": "enrolled",
-      "mgmt_pubkey": "pk-aabb",
-      "mgmt_fingerprint": "fp-aabb",
-      "mgmt_mac_key": "mac-aabb",
+      **enrolled_fields('aabbccdd'),
       "services": {
         "ssh": {
           "name": "SSH",
@@ -71,10 +93,7 @@ reg_path.write_text(json.dumps({
       "hostname": "client-b",
       "created_at": "2026-08-26T00:00:00Z",
       "last_enrolled_at": "2026-08-26T02:00:00Z",
-      "mgmt_status": "enrolled",
-      "mgmt_pubkey": "pk-eeff",
-      "mgmt_fingerprint": "fp-eeff",
-      "mgmt_mac_key": "mac-eeff",
+      **enrolled_fields('eeff0011'),
       "services": {
         "http": {
           "name": "HTTP",
@@ -147,9 +166,9 @@ assert 'eeff0011' in state['clients']
 client=state['clients']['eeff0011']
 assert client['services'] == {}
 assert client.get('mgmt_status')=='enrolled'
-assert client.get('mgmt_pubkey')=='pk-eeff'
-assert client.get('mgmt_fingerprint')=='fp-eeff'
-assert client.get('mgmt_mac_key')=='mac-eeff'
+assert client.get('mgmt_pubkey')
+assert client.get('mgmt_fingerprint')
+assert client.get('mgmt_mac_key')
 assert 'aabbccdd' in state['clients']
 assert state['clients']['aabbccdd']['services']['ssh']['remote_port']==6002
 assert state['clients']['aabbccdd']['services']['api']['remote_port']==6004
@@ -175,9 +194,9 @@ assert 'grafana' not in svc
 assert svc['ssh']['remote_port']==6002
 assert svc['api']['remote_port']==6004
 assert client.get('mgmt_status')=='enrolled'
-assert client.get('mgmt_pubkey')=='pk-aabb'
-assert client.get('mgmt_fingerprint')=='fp-aabb'
-assert client.get('mgmt_mac_key')=='mac-aabb'
+assert client.get('mgmt_pubkey')
+assert client.get('mgmt_fingerprint')
+assert client.get('mgmt_mac_key')
 PY
 grep -q 'service grafana' "$WORKDIR/svc-release.out" || fail "service release output"
 pass "frp-release-service preserves others"
@@ -193,9 +212,9 @@ assert 'aabbccdd' in state['clients']
 client=state['clients']['aabbccdd']
 assert client['services'] == {}
 assert client.get('mgmt_status')=='enrolled'
-assert client.get('mgmt_pubkey')=='pk-aabb'
-assert client.get('mgmt_fingerprint')=='fp-aabb'
-assert client.get('mgmt_mac_key')=='mac-aabb'
+assert client.get('mgmt_pubkey')
+assert client.get('mgmt_fingerprint')
+assert client.get('mgmt_mac_key')
 PY
 pass "frp-release-service last keeps identity"
 
@@ -220,8 +239,8 @@ state=json.loads(Path(sys.argv[1]).read_text())
 client=state['clients']['aabbccdd']
 assert client.get('mgmt_status')=='revoked'
 assert client.get('mgmt_mac_key') is None
-assert client.get('mgmt_pubkey')=='pk-aabb'
-assert client.get('mgmt_fingerprint')=='fp-aabb'
+assert client.get('mgmt_pubkey')
+assert client.get('mgmt_fingerprint')
 assert client['services']['ssh']['remote_port']==6002
 assert client['services']['api']['remote_port']==6004
 PY
@@ -241,23 +260,40 @@ assert 'aabbccdd' in state['clients']
 client=state['clients']['aabbccdd']
 assert client['services'] == {}
 assert client.get('mgmt_status')=='revoked'
-assert client.get('mgmt_pubkey')=='pk-aabb'
-assert client.get('mgmt_fingerprint')=='fp-aabb'
+assert client.get('mgmt_pubkey')
+assert client.get('mgmt_fingerprint')
 PY
 pass "admin release still works after revoke"
 
 # Restore clients for legacy / status coverage
-python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY'
-import json,sys
+python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" "$ROOT" <<'PY'
+import importlib.util
+import json
+import sys
+import tempfile
 from pathlib import Path
+
+root = Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location('mgmt', root / 'lib' / 'frp_mgmt_auth.py')
+mgmt = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mgmt)
+tmp = Path(tempfile.mkdtemp())
+key = tmp / 'key.pem'
+pub = tmp / 'pub.pem'
+mgmt.generate_keypair(key, pub)
+pem = pub.read_text(encoding='utf-8')
+fields = {
+  'mgmt_status': 'enrolled',
+  'mgmt_pubkey': pem,
+  'mgmt_alg': mgmt.MGMT_ALG,
+  'mgmt_fingerprint': mgmt.pubkey_fingerprint(pem),
+  'mgmt_mac_key': mgmt.derive_mac_key('test-mgmt-secret', 'aabbccdd'),
+}
 p=Path(sys.argv[1])
 state=json.loads(p.read_text())
 state['clients']['aabbccdd']={
   'hostname':'dev-dp-mirror',
-  'mgmt_status':'enrolled',
-  'mgmt_pubkey':'pk-aabb',
-  'mgmt_fingerprint':'fp-aabb',
-  'mgmt_mac_key':'mac-aabb',
+  **fields,
   'services':{
     'ssh':{'name':'SSH','protocol':'tcp','local_ip':'127.0.0.1','local_port':22,'remote_port':6002,'preset':'ssh','ssh_user':'aella','enabled':True},
     'api':{'name':'API','protocol':'tcp','local_ip':'127.0.0.1','local_port':8080,'remote_port':6004,'preset':'custom','enabled':False},

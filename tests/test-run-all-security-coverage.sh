@@ -13,10 +13,12 @@ MANDATORY=(
   tests/test-audit-followup-p1.py
   tests/test-frp-data-plane-auth.py
   tests/test-pre-e2e-remediation-five.py
+  tests/test-pre-e2e-consolidated-hardening.py
   tests/test-frp-release-data-plane-auth.py
   tests/test-server-bundle-manifest-parity.py
   tests/test-allocator-runtime-restart.sh
   tests/test-server-snapshot-restore-validation.py
+  tests/test-zero-touch-recovery-journal.sh
   tests/test-run-all-security-coverage.sh
 )
 

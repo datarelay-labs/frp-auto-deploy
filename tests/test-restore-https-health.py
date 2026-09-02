@@ -136,6 +136,7 @@ def write_allocator_cfg(tmp: Path, listen_port: int, pki: dict, public_host: str
         "tls_ca_cert": pki["ca_crt"],
         "tls_server_cert": pki["server_crt"],
         "tls_server_key": pki["server_key"],
+        "data_plane_auth_strict": False,
     }
     cfg_path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
     return cfg_path

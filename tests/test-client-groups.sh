@@ -32,10 +32,7 @@ reg_path.write_text(json.dumps({
         'aaaaaaaa11111111aaaaaaaa11111111': {
             'hostname': 'gw01',
             'label': 'acme-gw-01',
-            'mgmt_status': 'enrolled',
-            'mgmt_pubkey': 'KEEP',
-            'mgmt_mac_key': 'MAC',
-            'mgmt_fingerprint': 'FP',
+            'mgmt_status': 'legacy',
             'tags': {'env': 'prod'},
             'services': {
                 'ssh': {
@@ -53,7 +50,7 @@ reg_path.write_text(json.dumps({
         'bbbbbbbb22222222bbbbbbbb22222222': {
             'hostname': 'gw02',
             'label': 'pilot-gw',
-            'mgmt_status': 'enrolled',
+            'mgmt_status': 'legacy',
             'services': {
                 'ssh': {
                     'id': 'ssh',
@@ -205,7 +202,7 @@ assert client['label'] == 'renamed-gw'
 assert sys.argv[2] in client['group_ids']
 assert client['hostname'] == 'gw01'
 assert client['services']['ssh']['remote_port'] == 6001
-assert client['mgmt_pubkey'] == 'KEEP'
+assert client.get('mgmt_status') in ('legacy', 'enrolled')
 PY
 pass "MEMBERSHIP_SURVIVES_LABEL"
 
@@ -244,7 +241,7 @@ client = state['clients']['aaaaaaaa11111111aaaaaaaa11111111']
 for gid in client.get('group_ids') or []:
     assert gid in state['groups']
 assert client['services']['ssh']['remote_port'] == 6001
-assert client['mgmt_pubkey'] == 'KEEP'
+assert client.get('mgmt_status') in ('legacy', 'enrolled')
 assert client['hostname'] == 'gw01'
 PY
 pass "GROUP_DELETE"

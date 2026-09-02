@@ -54,8 +54,8 @@ def start_allocator(cfg_path):
     env = os.environ.copy()
     proc = subprocess.Popen(
         [sys.executable, str(ROOT / 'server' / 'frp-port-allocator.py'), '--config', str(cfg_path)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
         env=env,
     )
     return proc
@@ -96,6 +96,7 @@ def write_env(tmp, listen_port, public_host='127.0.0.1', extra_hosts=None, publi
         'registry_file': str(Path(tmp) / 'registry.json'),
         'enrollments_dir': str(Path(tmp) / 'enrollments'),
         'token_file': str(Path(tmp) / 'server_token'),
+        'data_plane_auth_strict': False,
     }
     Path(cfg['enrollments_dir']).mkdir(parents=True, exist_ok=True)
     Path(cfg['token_file']).write_text('test-frp-token-do-not-use\n')
@@ -224,14 +225,22 @@ def test_refuse_plain_start():
         data.pop('tls_server_cert', None)
         data.pop('tls_server_key', None)
         Path(cfg).write_text(json.dumps(data) + '\n')
-        proc = start_allocator(cfg)
+        proc = subprocess.Popen(
+            [sys.executable, str(ROOT / 'server' / 'frp-port-allocator.py'), '--config', str(cfg)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=os.environ.copy(),
+        )
         try:
             rc = proc.wait(timeout=5)
             if rc == 0:
                 fail('allocator should fail closed without TLS')
-            out = proc.stdout.read().decode() if proc.stdout else ''
-            if 'plain HTTP' not in out and 'TLS' not in out:
-                fail('missing TLS error', out)
+            out = (proc.stdout.read() if proc.stdout else b'') + (
+                proc.stderr.read() if proc.stderr else b''
+            )
+            text = out.decode(errors='replace')
+            if 'plain HTTP' not in text and 'TLS' not in text:
+                fail('missing TLS error', text)
             pass_('allocator fails closed without TLS')
         finally:
             if proc.poll() is None:

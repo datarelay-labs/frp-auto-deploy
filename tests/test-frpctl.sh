@@ -71,7 +71,7 @@ reg.write_text(json.dumps({
         "aabbccdd0011": {
             "hostname": "dp-os-upgrade",
             "label": "oci-e2e-renamed",
-            "mgmt_status": "enrolled",
+            "mgmt_status": "legacy",
             "services": {
                 "ssh": {
                     "id": "ssh",
@@ -613,8 +613,7 @@ data = json.loads(p.read_text())
 data["clients"]["24cd7856aabbccdd0011223344556677"] = {
     "hostname": "dp-os-upgrade-2",
     "label": "aaa",
-    "mgmt_status": "enrolled",
-    "mgmt_mac_key": "SECRET_MAC_SELECTOR_AAA",
+    "mgmt_status": "legacy",
     "tags": {"env": "oci", "stage": "acceptance"},
     "note": "acceptance box",
     "services": {
@@ -627,8 +626,7 @@ data["clients"]["24cd7856aabbccdd0011223344556677"] = {
 }
 data["clients"]["0303cedf99999999aabbccdd00112233"] = {
     "hostname": "aella",
-    "mgmt_status": "enrolled",
-    "mgmt_mac_key": "SECRET_MAC_SELECTOR_AELLA",
+    "mgmt_status": "legacy",
     "services": {
         "ssh": {
             "id": "ssh", "remote_port": 6005, "enabled": True,
@@ -638,11 +636,11 @@ data["clients"]["0303cedf99999999aabbccdd00112233"] = {
     },
 }
 data["clients"]["abcdabcd111122223333444455556666"] = {
-    "hostname": "amb-one", "label": "amb-one", "mgmt_status": "enrolled",
+    "hostname": "amb-one", "label": "amb-one", "mgmt_status": "legacy",
     "services": {},
 }
 data["clients"]["abcdabcd999988887777666655554444"] = {
-    "hostname": "amb-two", "label": "amb-two", "mgmt_status": "enrolled",
+    "hostname": "amb-two", "label": "amb-two", "mgmt_status": "legacy",
     "services": {},
 }
 p.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
@@ -655,7 +653,7 @@ grep -qE '^#[[:space:]]+CLIENT ID[[:space:]]+LABEL' "$WORKDIR/sel-list.out" || f
 grep -q '24cd7856' "$WORKDIR/sel-list.out" || fail "list short id"
 grep -q 'aaa' "$WORKDIR/sel-list.out" || fail "list label"
 grep -q 'Use CLIENT ID for set/unset/revoke/release.' "$WORKDIR/sel-list.out" || fail "CLIENT ID footer"
-if grep -q 'SECRET_MAC_SELECTOR' "$WORKDIR/sel-list.out"; then
+if grep -q 'acceptance box' "$WORKDIR/sel-list.out" && grep -q 'SECRET_MAC_SELECTOR' "$WORKDIR/sel-list.out"; then
   fail "selector list leaked secret"
 fi
 pass "CLIENT_ID_CANONICAL_SELECTOR"

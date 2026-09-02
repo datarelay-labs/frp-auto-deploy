@@ -72,11 +72,15 @@ def make_client(tmp, mid='aabbccdd00112233445566778899aabb'):
     key = tmp / ('%s.key' % mid)
     pub = tmp / ('%s.pub' % mid)
     MGMT.generate_keypair(key, pub)
+    pem = pub.read_text(encoding='utf-8')
     return {
         'hostname': 'edge-1',
         'label': 'edge-1',
         'mgmt_status': 'enrolled',
-        'mgmt_pubkey': pub.read_text(encoding='utf-8'),
+        'mgmt_pubkey': pem,
+        'mgmt_alg': MGMT.MGMT_ALG,
+        'mgmt_fingerprint': MGMT.pubkey_fingerprint(pem),
+        'mgmt_mac_key': MGMT.derive_mac_key('audit-followup-secret', mid),
         'services': {
             'ssh': {
                 'id': 'ssh',

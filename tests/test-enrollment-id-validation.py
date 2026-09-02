@@ -92,6 +92,7 @@ def write_env(tmp, listen_port):
         'registry_file': str(registry),
         'enrollments_dir': str(enrollments),
         'token_file': str(token),
+        'data_plane_auth_strict': False,
     }
     cfg_path = Path(tmp) / 'config.json'
     cfg_path.write_text(json.dumps(cfg, indent=2) + '\n')
@@ -170,8 +171,8 @@ def test_public_endpoints():
         proc = subprocess.Popen(
             [sys.executable, str(ROOT / 'server' / 'frp-port-allocator.py'),
              '--config', str(cfg_path)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
         try:
             wait_https(f'https://127.0.0.1:{port}/healthz', pki['ca_crt'])

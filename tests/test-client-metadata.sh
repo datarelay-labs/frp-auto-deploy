@@ -11,9 +11,30 @@ fail() { echo "FAIL $1" >&2; exit 1; }
 
 TREE="$WORKDIR/tree"
 mkdir -p "$TREE/etc/frp-auto-deploy" "$TREE/var/lib/frp-auto-deploy"
-python3 - "$TREE/etc/frp-auto-deploy/config.json" "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY'
-import json, sys
+python3 - "$TREE/etc/frp-auto-deploy/config.json" "$TREE/var/lib/frp-auto-deploy/registry.json" "$ROOT" <<'PY'
+import importlib.util
+import json
+import sys
+import tempfile
 from pathlib import Path
+
+root = Path(sys.argv[3])
+spec = importlib.util.spec_from_file_location('mgmt', root / 'lib' / 'frp_mgmt_auth.py')
+mgmt = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mgmt)
+mid = 'aabbccdd00112233445566778899aa'
+tmp = Path(tempfile.mkdtemp())
+key = tmp / 'key.pem'
+pub = tmp / 'pub.pem'
+mgmt.generate_keypair(key, pub)
+pem = pub.read_text(encoding='utf-8')
+enrolled = {
+  'mgmt_status': 'enrolled',
+  'mgmt_pubkey': pem,
+  'mgmt_alg': mgmt.MGMT_ALG,
+  'mgmt_fingerprint': mgmt.pubkey_fingerprint(pem),
+  'mgmt_mac_key': mgmt.derive_mac_key('test-mgmt-secret', mid),
+}
 cfg_path, reg_path = Path(sys.argv[1]), Path(sys.argv[2])
 cfg_path.write_text(json.dumps({
   "public_ip": "203.0.113.10",
@@ -32,10 +53,7 @@ reg_path.write_text(json.dumps({
       "hostname": "ubuntu",
       "created_at": "2026-08-26T00:00:00Z",
       "last_enrolled_at": "2026-08-26T01:00:00Z",
-      "mgmt_status": "enrolled",
-      "mgmt_pubkey": "KEEP",
-      "mgmt_mac_key": "KEEP-MAC",
-      "mgmt_fingerprint": "abcd",
+      **enrolled,
       "tags": {
         "customer": "lotte",
         "site": "seoul"
@@ -57,7 +75,7 @@ reg_path.write_text(json.dumps({
       "hostname": "ubuntu",
       "label": "busan-backup",
       "note": "Busan backup",
-      "mgmt_status": "enrolled",
+      "mgmt_status": "legacy",
       "services": {
         "ssh": {
           "name": "SSH",
@@ -115,8 +133,8 @@ assert c['note']=='Seoul office groupware server'
 assert c['hostname']=='ubuntu'
 assert c['services']['ssh']['remote_port']==6002
 assert c['mgmt_status']=='enrolled'
-assert c['mgmt_pubkey']=='KEEP'
-assert c['mgmt_mac_key']=='KEEP-MAC'
+assert c['mgmt_pubkey']
+assert c['mgmt_mac_key']
 assert c['tags']=={'customer': 'lotte', 'site': 'seoul'}
 PY
 python3 "$ROOT/tools/frp-client-info" seoul-groupware >"$WORKDIR/after-set.out"

@@ -510,6 +510,7 @@ pki = root / 'pki'
     'enrollments_dir': str(root / 'enrollments'),
     'bootstrap_dir': str(root / 'bootstrap'),
     'token_file': str(root / 'server_token'),
+    'data_plane_auth_strict': False,
     'client_installer_url': 'https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/main/dist/bootstrap-client.sh',
     'allocator_public_url': 'https://127.0.0.1:%s/enroll' % port,
 }, indent=2) + '\n')

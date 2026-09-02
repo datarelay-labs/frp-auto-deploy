@@ -35,7 +35,7 @@ reg_path.write_text(json.dumps({
         'aaaaaaaa11111111aaaaaaaa11111111': {
             'hostname': 'gw01',
             'label': 'acme-gw-01',
-            'mgmt_status': 'enrolled',
+            'mgmt_status': 'legacy',
             'tags': {'env': 'prod', 'site': 'seoul', 'customer': 'acme'},
             'services': {
                 'ssh': {

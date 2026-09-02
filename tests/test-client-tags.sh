@@ -26,8 +26,7 @@ reg_path.write_text(json.dumps({
     'clients': {
         'aaaaaaaa11111111': {
             'hostname': 'seoul-dp',
-            'mgmt_status': 'enrolled',
-            'mgmt_pubkey': 'KEEP',
+            'mgmt_status': 'legacy',
             'services': {
                 'ssh': {
                     'id': 'ssh',
@@ -85,7 +84,7 @@ assert client['tags'] == {
 }
 assert client['hostname'] == 'seoul-dp'
 assert client['services']['ssh']['remote_port'] == 6001
-assert client['mgmt_pubkey'] == 'KEEP'
+assert 'mgmt_pubkey' not in client or client.get('mgmt_pubkey') in (None, '')
 PY
 pass "SET_GENERIC_TAGS"
 

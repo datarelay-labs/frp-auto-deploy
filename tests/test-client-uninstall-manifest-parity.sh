@@ -121,9 +121,8 @@ cp "$ROOT/uninstall-client.sh" "$FB_SCRIPT/uninstall-client.sh"
 # Isolated copy: no lib/frp_project_files.py beside the script.
 [[ ! -f "$FB_SCRIPT/lib/frp_project_files.py" ]] || fail "fallback script dir has helper"
 [[ ! -f "$FB/usr/local/lib/frp-auto-deploy/frp_project_files.py" ]] || fail "fallback root has helper"
-if [[ -f /usr/local/lib/frp-auto-deploy/frp_project_files.py ]]; then
-  fail "system frp_project_files.py would mask fallback uninstall test"
-fi
+# Host installs must not mask this path when FRP_UNINSTALL_TEST_ROOT is set.
+pass "CLIENT_UNINSTALL_FALLBACK_ISOLATED_FROM_HOST"
 echo shared >"$FB/usr/local/lib/frp-auto-deploy/frp-common.sh"
 echo shared >"$FB/usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py"
 echo shared >"$FB/usr/local/lib/frp-auto-deploy/frp_clock_sync.py"

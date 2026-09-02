@@ -30,7 +30,7 @@ state = {
         "aabbccdd00112233445566778899aabb": {
             "hostname": "edge-1",
             "label": "edge-1",
-            "mgmt_status": "enrolled",
+            "mgmt_status": "legacy",
             "services": {
                 "ssh": {
                     "id": "ssh",

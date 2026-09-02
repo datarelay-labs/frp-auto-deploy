@@ -29,17 +29,19 @@ printf '%s\n' "${PY_INVENTORY[@]}" | grep -qx 'lib/frp_server_config.py' \
 printf '%s\n' "${PY_INVENTORY[@]}" | grep -qx 'tools/frp-enrollment-purge' \
   || { echo "FAIL missing tools/frp-enrollment-purge in compile inventory" >&2; exit 1; }
 python3 -m py_compile "${PY_INVENTORY[@]}"
-python3 -m py_compile tests/test-allocator.py tests/test-enrollment-security.py tests/test-enrollment-id-validation.py tests/test-mgmt-identity.py tests/test-pki-https.py tests/test-bootstrap-ticket.py tests/test-frontend-proxy.py tests/test-client-registry.py tests/test-clock-skew-auth.py tests/test-deployment-mode-fail-closed.py tests/test-audit-log.py tests/test-audit-query.py tests/test-server-config-validation.py tests/test-canonical-registry-validation.py tests/test-pki-key-cert-pairs.py tests/test-config-setter-control-lock.py tests/test-restore-https-health.py tests/test-mgmt-nonce-ordering.py tests/test-enroll-bind-ordering.py tests/test-audit-followup-p1.py tests/test-frp-data-plane-auth.py tests/test-pre-e2e-remediation-five.py tests/test-frp-release-data-plane-auth.py tests/test-server-bundle-manifest-parity.py tests/test-server-snapshot-restore-validation.py
+python3 -m py_compile tests/test-allocator.py tests/test-enrollment-security.py tests/test-enrollment-id-validation.py tests/test-mgmt-identity.py tests/test-pki-https.py tests/test-bootstrap-ticket.py tests/test-frontend-proxy.py tests/test-client-registry.py tests/test-clock-skew-auth.py tests/test-deployment-mode-fail-closed.py tests/test-audit-log.py tests/test-audit-query.py tests/test-server-config-validation.py tests/test-canonical-registry-validation.py tests/test-pki-key-cert-pairs.py tests/test-config-setter-control-lock.py tests/test-restore-https-health.py tests/test-mgmt-nonce-ordering.py tests/test-enroll-bind-ordering.py tests/test-audit-followup-p1.py tests/test-frp-data-plane-auth.py tests/test-pre-e2e-remediation-five.py tests/test-pre-e2e-consolidated-hardening.py tests/test-frp-release-data-plane-auth.py tests/test-server-bundle-manifest-parity.py tests/test-server-snapshot-restore-validation.py
 
 # Mandatory security/remediation regression inventory (must stay in === tests ===).
 MANDATORY_SECURITY_TESTS=(
   tests/test-audit-followup-p1.py
   tests/test-frp-data-plane-auth.py
   tests/test-pre-e2e-remediation-five.py
+  tests/test-pre-e2e-consolidated-hardening.py
   tests/test-frp-release-data-plane-auth.py
   tests/test-server-bundle-manifest-parity.py
   tests/test-allocator-runtime-restart.sh
   tests/test-server-snapshot-restore-validation.py
+  tests/test-zero-touch-recovery-journal.sh
   tests/test-run-all-security-coverage.sh
 )
 for _sec in "${MANDATORY_SECURITY_TESTS[@]}"; do
@@ -63,6 +65,7 @@ python3 tests/test-mgmt-identity.py
 ./tests/test-allocator-ready.sh
 ./tests/test-create-client.sh
 ./tests/test-zero-touch-bootstrap.sh
+./tests/test-zero-touch-recovery-journal.sh
 ./tests/test-sourced-client-errexit.sh
 ./tests/test-ssh-explicit-user.sh
 ./tests/test-passive-online.sh
@@ -138,6 +141,7 @@ python3 tests/test-restore-https-health.py
 python3 tests/test-audit-followup-p1.py
 python3 tests/test-frp-data-plane-auth.py
 python3 tests/test-pre-e2e-remediation-five.py
+python3 tests/test-pre-e2e-consolidated-hardening.py
 python3 tests/test-frp-release-data-plane-auth.py
 python3 tests/test-server-bundle-manifest-parity.py
 ./tests/test-allocator-runtime-restart.sh

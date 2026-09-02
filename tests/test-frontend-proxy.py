@@ -285,6 +285,7 @@ def write_allocator_cfg(tmp, listen_port, pki, public_host='203.0.113.10'):
         'registry_file': str(Path(tmp) / 'registry.json'),
         'enrollments_dir': str(Path(tmp) / 'enrollments'),
         'token_file': str(Path(tmp) / 'server_token'),
+        'data_plane_auth_strict': False,
     }
     Path(cfg['enrollments_dir']).mkdir(parents=True, exist_ok=True)
     Path(cfg['token_file']).write_text('test-frp-token-do-not-use\n')

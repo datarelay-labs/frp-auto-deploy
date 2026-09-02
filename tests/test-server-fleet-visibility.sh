@@ -179,6 +179,47 @@ cat >"$SERVER/var/lib/frp-auto-deploy/registry.json" <<'EOF'
   "reserved": []
 }
 EOF
+python3 - "$SERVER/var/lib/frp-auto-deploy/registry.json" "$ROOT" <<'PY'
+import importlib.util
+import json
+import sys
+import tempfile
+from pathlib import Path
+
+root = Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location('mgmt', root / 'lib' / 'frp_mgmt_auth.py')
+mgmt = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mgmt)
+path = Path(sys.argv[1])
+state = json.loads(path.read_text())
+
+
+def enrolled_fields(machine_id):
+    tmp = Path(tempfile.mkdtemp())
+    key = tmp / 'key.pem'
+    pub = tmp / 'pub.pem'
+    mgmt.generate_keypair(key, pub)
+    pem = pub.read_text(encoding='utf-8')
+    return {
+        'mgmt_pubkey': pem,
+        'mgmt_alg': mgmt.MGMT_ALG,
+        'mgmt_fingerprint': mgmt.pubkey_fingerprint(pem),
+        'mgmt_mac_key': mgmt.derive_mac_key('fleet-test-secret', machine_id),
+    }
+
+
+for mid, client in state.get('clients', {}).items():
+    status = client.get('mgmt_status')
+    if status == 'enrolled':
+        client.update(enrolled_fields(mid))
+    elif status == 'revoked':
+        fields = enrolled_fields(mid)
+        client['mgmt_pubkey'] = fields['mgmt_pubkey']
+        client['mgmt_alg'] = fields['mgmt_alg']
+        client['mgmt_fingerprint'] = fields['mgmt_fingerprint']
+        client['mgmt_mac_key'] = None
+path.write_text(json.dumps(state, indent=2, sort_keys=True) + '\n')
+PY
 chmod 600 "$SERVER/var/lib/frp-auto-deploy/registry.json"
 echo 'token-fixture-not-real' >"$SERVER/etc/frp/server_token"
 
