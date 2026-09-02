@@ -336,16 +336,21 @@ function Invoke-FrpClientProjectUpdate {
                         Copy-Item -LiteralPath $mockBundle -Destination $bundlePath -Force
                     } elseif (Get-Command curl.exe -ErrorAction SilentlyContinue) {
                         $p1 = Start-Process -FilePath 'curl.exe' -ArgumentList @(
-                            '--fail', '--silent', '--show-error', '--location', '--proto', '=https',
+                            '--fail', '--silent', '--show-error', '--location',
+                            '--proto', '=https', '--proto-redir', '=https',
                             '-o', $sumsPath, $metaUrl
                         ) -Wait -PassThru -NoNewWindow
                         if ($p1.ExitCode -ne 0) { throw 'ERROR: failed to download project update integrity metadata' }
                         $p2 = Start-Process -FilePath 'curl.exe' -ArgumentList @(
-                            '--fail', '--silent', '--show-error', '--location', '--proto', '=https',
+                            '--fail', '--silent', '--show-error', '--location',
+                            '--proto', '=https', '--proto-redir', '=https',
                             '-o', $bundlePath, $url
                         ) -Wait -PassThru -NoNewWindow
                         if ($p2.ExitCode -ne 0) { throw 'ERROR: failed to download the project update bundle' }
                     } else {
+                        if ($metaUrl -notmatch '^https://' -or $url -notmatch '^https://') {
+                            throw 'ERROR: project update requires curl.exe for HTTPS-only redirect policy'
+                        }
                         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
                         $wc = New-Object System.Net.WebClient
                         try {

@@ -88,7 +88,7 @@ for url in "$sums_url" "$bundle_url"; do
 done
 
 echo "Downloading release checksum metadata..."
-curl -fL --retry 3 --connect-timeout 10 --max-time 120 -o "$sums" "$sums_url" || {
+frp_curl_https_fetch --retry 3 --connect-timeout 10 --max-time 120 -o "$sums" "$sums_url" || {
   echo "ERROR: failed to download SHA256SUMS" >&2
   exit 1
 }
@@ -99,7 +99,7 @@ if [[ -z "$expected" ]]; then
 fi
 
 echo "Downloading server project update bundle..."
-curl -fL --retry 3 --connect-timeout 10 --max-time 120 -o "$bundle" "$bundle_url" || {
+frp_curl_https_fetch --retry 3 --connect-timeout 10 --max-time 120 -o "$bundle" "$bundle_url" || {
   echo "ERROR: failed to download the server project update bundle" >&2
   exit 1
 }

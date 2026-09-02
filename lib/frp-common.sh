@@ -538,6 +538,11 @@ frp_path() {
   fi
 }
 
+# Project update/release downloads: HTTPS only, including redirect targets.
+frp_curl_https_fetch() {
+  curl -fL --proto '=https' --proto-redir '=https' "$@"
+}
+
 frp_detect_arch() {
   local machine
   machine="${FRP_TEST_UNAME_M:-$(uname -m)}"

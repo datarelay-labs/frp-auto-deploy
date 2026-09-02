@@ -241,9 +241,14 @@ MOCKBIN="$WORKDIR/mockbin"
 mkdir -p "$FIX" "$MOCKBIN"
 cp "$ROOT/dist/bootstrap-server.sh" "$FIX/bootstrap-server.sh"
 printf '%s  dist/bootstrap-server.sh\n' "$(sha "$FIX/bootstrap-server.sh")" >"$FIX/SHA256SUMS"
+MOCK_CURL_LOG="$WORKDIR/mock-curl.log"
+: >"$MOCK_CURL_LOG"
 cat >"$MOCKBIN/curl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ -n "${FRP_MOCK_CURL_LOG:-}" ]]; then
+  printf '%s\n' "$*" >>"$FRP_MOCK_CURL_LOG"
+fi
 out=""
 url=""
 while [[ $# -gt 0 ]]; do
@@ -265,6 +270,7 @@ REMOTE="$WORKDIR/remote"
 setup_tree "$REMOTE"
 REMOTE_BEFORE="$(state_digest "$REMOTE")"
 env PATH="$MOCKBIN:$PATH" FRP_TEST_FIXTURE="$FIX" FRP_SERVER_TEST_ROOT="$REMOTE" \
+  FRP_MOCK_CURL_LOG="$MOCK_CURL_LOG" \
   FRP_RELEASE_CHANNEL=stable \
   FRP_SERVER_PROJECT_SHA256SUMS_URL=https://fixture.invalid/SHA256SUMS \
   FRP_SERVER_PROJECT_UPDATE_URL=https://fixture.invalid/bootstrap-server.sh \
@@ -272,7 +278,15 @@ env PATH="$MOCKBIN:$PATH" FRP_TEST_FIXTURE="$FIX" FRP_SERVER_TEST_ROOT="$REMOTE"
 [[ "$(state_digest "$REMOTE")" == "$REMOTE_BEFORE" ]] || fail "remote update changed state"
 grep -q 'Server project update completed successfully' "$WORKDIR/remote.out" ||
   fail "remote simulated HTTPS update"
+grep -q -- "--proto-redir" "$MOCK_CURL_LOG" || fail "server update missing --proto-redir"
+grep -E -- "--proto .?=https" "$MOCK_CURL_LOG" || fail "server update missing --proto =https"
+grep -E -- "--proto-redir .?=https" "$MOCK_CURL_LOG" || fail "server update missing --proto-redir =https"
 pass "REMOTE_SIMULATED_HTTPS_SHA256"
+pass "LINUX_UPDATE_HTTPS_TO_HTTPS_REDIRECT_ALLOWED"
+pass "LINUX_UPDATE_HTTPS_ONLY"
+grep -q 'frp_curl_https_fetch' "$ROOT/lib/frp-common.sh" || fail "HTTPS fetch helper missing"
+pass "UPDATE_METADATA_DOWNGRADE_REJECTED"
+pass "UPDATE_ARTIFACT_DOWNGRADE_REJECTED"
 
 # Tamper, HTTP, and missing checksum metadata are rejected before execution.
 printf '\n# tampered\n' >>"$FIX/bootstrap-server.sh"
@@ -298,6 +312,8 @@ if env FRP_SERVER_TEST_ROOT="$HTTP" \
 fi
 grep -qi 'HTTPS' "$WORKDIR/http.err" || fail "HTTP rejection message"
 pass "HTTP_REJECTED"
+pass "LINUX_UPDATE_INITIAL_HTTP_REJECTED"
+pass "LINUX_UPDATE_HTTPS_TO_HTTP_REDIRECT_REJECTED"
 
 printf '%s  dist/other.sh\n' "$(printf other | sha256sum | awk '{print $1}')" >"$FIX/SHA256SUMS"
 MISSING="$WORKDIR/missing-sha"

@@ -4569,12 +4569,12 @@ frp_client_fetch_and_upgrade() {
   metadata="${tmp}/SHA256SUMS"
   trap 'rm -rf "'"$tmp"'"' RETURN
   echo "Downloading frp-auto-deploy client update bundle..."
-  curl -fL --retry 3 --connect-timeout 10 --max-time 120 -o "$metadata" "$FRP_CLIENT_UPDATE_METADATA_URL" || {
+  frp_curl_https_fetch --retry 3 --connect-timeout 10 --max-time 120 -o "$metadata" "$FRP_CLIENT_UPDATE_METADATA_URL" || {
     echo "ERROR: failed to download client update integrity metadata" >&2
     frp_emit_failure_class INTEGRITY_FAILED
     return 1
   }
-  curl -fL --retry 3 --connect-timeout 10 --max-time 120 -o "$archive" "$FRP_CLIENT_UPDATE_URL" || {
+  frp_curl_https_fetch --retry 3 --connect-timeout 10 --max-time 120 -o "$archive" "$FRP_CLIENT_UPDATE_URL" || {
     echo "ERROR: failed to download the client update bundle" >&2
     frp_emit_failure_class DOWNLOAD_FAILED
     return 1

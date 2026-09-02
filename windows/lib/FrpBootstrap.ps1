@@ -88,7 +88,8 @@ function Install-FrpWindowsBinary {
         Write-Host 'Downloading FRP Windows amd64 package...'
         if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
             $p = Start-Process -FilePath 'curl.exe' -ArgumentList @(
-                '--fail', '--silent', '--show-error', '--location', '--proto', '=https',
+                '--fail', '--silent', '--show-error', '--location',
+                '--proto', '=https', '--proto-redir', '=https',
                 '-o', $tmpZip, $DownloadUrl
             ) -Wait -PassThru -NoNewWindow
             if ($p.ExitCode -ne 0) { throw 'ERROR: FRP download failed' }
