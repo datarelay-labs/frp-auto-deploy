@@ -1155,7 +1155,7 @@ EOF2
 write_frontend_config() {
   local dest="$1" pki run_dir log_dir temp_root
   pki="$(frp_pki_dir)"
-  run_dir="$(frp_server_fs /run/frp-auto-deploy)"
+  run_dir="$(frp_server_fs /run/frp-auto-deploy-frontend)"
   log_dir="$(frp_server_fs /var/log/frp-auto-deploy)"
   temp_root="$(frp_server_fs /var/lib/frp-auto-deploy/nginx)"
   mkdir -p "$run_dir" "$log_dir" "$temp_root/body" "$temp_root/proxy" \

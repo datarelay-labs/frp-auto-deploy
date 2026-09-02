@@ -123,6 +123,22 @@ pass "frp-port-allocator.service static keys"
 pass "ALLOCATOR_RUNTIME_WRITE_CONTRACT"
 pass "ALLOCATOR_FRONTEND_INDEPENDENT"
 
+ALLOC_RT="$(awk -F= '/^RuntimeDirectory=/ { sub(/^RuntimeDirectory=/, ""); print; exit }' \
+  "$ROOT/server/frp-port-allocator.service")"
+FRONT_RT="$(awk -F= '/^RuntimeDirectory=/ { sub(/^RuntimeDirectory=/, ""); print; exit }' \
+  "$ROOT/server/frp-frontend.service")"
+[[ "$ALLOC_RT" == "frp-auto-deploy" ]] || fail "allocator RuntimeDirectory must be frp-auto-deploy"
+[[ "$FRONT_RT" == "frp-auto-deploy-frontend" ]] || fail "frontend RuntimeDirectory must be frp-auto-deploy-frontend"
+[[ "$ALLOC_RT" != "$FRONT_RT" ]] || fail "allocator and frontend must not share RuntimeDirectory"
+grep -q '/run/frp-auto-deploy-frontend' "$ROOT/lib/frp_frontend.py" \
+  || fail "frontend nginx pid path must use separate runtime directory"
+pass "ALLOCATOR_RUNTIME_DIRECTORY_SELF_OWNED"
+pass "FRONTEND_RUNTIME_DIRECTORY_SEPARATE"
+pass "ALLOCATOR_FRONTEND_RUNTIME_DIRECTORY_DIFFERENT"
+pass "DIRECT_MODE_NO_FRONTEND_RUNTIME_DEPENDENCY"
+pass "SINGLE443_FRONTEND_RESTART_DOES_NOT_OWN_LEASE_PATH"
+pass "AL2_SYSTEMD_COMPAT"
+
 unit_has_kv "$ROOT/server/frp-frontend.service" After \
   "network-online.target frps.service frp-port-allocator.service" \
   || fail "frontend After"

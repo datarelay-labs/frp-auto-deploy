@@ -68,15 +68,28 @@ _frp_u_project_files_py() {
     return 0
   fi
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  for candidate in \
-    "${here}/lib/frp_project_files.py" \
-    "$(frp_u_path /usr/local/lib/frp-auto-deploy/frp_project_files.py)" \
-    /usr/local/lib/frp-auto-deploy/frp_project_files.py; do
-    if [[ -f "$candidate" ]]; then
-      printf '%s' "$candidate"
-      return 0
-    fi
-  done
+  # Under FRP_UNINSTALL_TEST_ROOT, never consult the real host install path —
+  # only the mapped test-root path — so fallback coverage stays isolated.
+  if [[ -n "${FRP_UNINSTALL_TEST_ROOT:-}" ]]; then
+    for candidate in \
+      "${here}/lib/frp_project_files.py" \
+      "$(frp_u_path /usr/local/lib/frp-auto-deploy/frp_project_files.py)"; do
+      if [[ -f "$candidate" ]]; then
+        printf '%s' "$candidate"
+        return 0
+      fi
+    done
+  else
+    for candidate in \
+      "${here}/lib/frp_project_files.py" \
+      "$(frp_u_path /usr/local/lib/frp-auto-deploy/frp_project_files.py)" \
+      /usr/local/lib/frp-auto-deploy/frp_project_files.py; do
+      if [[ -f "$candidate" ]]; then
+        printf '%s' "$candidate"
+        return 0
+      fi
+    done
+  fi
   # uninstall-client.sh is often installed under the libdir itself.
   if [[ -f "${here}/frp_project_files.py" ]]; then
     printf '%s' "${here}/frp_project_files.py"

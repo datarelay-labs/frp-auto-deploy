@@ -132,7 +132,7 @@ frp_write_compatible_systemd_unit \
 if grep -q '^ProtectSystem=' "$WORKDIR/frontend-219.service"; then
   fail "old systemd frontend unit still has ProtectSystem"
 fi
-grep -q '^RuntimeDirectory=frp-auto-deploy' "$WORKDIR/frontend-219.service" \
+grep -q '^RuntimeDirectory=frp-auto-deploy-frontend' "$WORKDIR/frontend-219.service" \
   || fail "frontend unit lost RuntimeDirectory on old systemd"
 export FRP_TEST_SYSTEMD_VERSION=219
 frp_write_compatible_systemd_unit \

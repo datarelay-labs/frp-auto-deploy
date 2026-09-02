@@ -7,7 +7,7 @@ Wants=network-online.target frps.service frp-port-allocator.service
 Type=simple
 # Runs as root (no User=) so the 0600 project TLS key stays non-world-readable.
 # This unit uses a project-owned config and does not take over distro nginx.service.
-RuntimeDirectory=frp-auto-deploy
+RuntimeDirectory=frp-auto-deploy-frontend
 RuntimeDirectoryMode=0700
 ExecStart=/usr/sbin/nginx -c /etc/frp-auto-deploy/frontend.conf
 ExecReload=/bin/kill -HUP $MAINPID
@@ -18,7 +18,7 @@ RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/frp-auto-deploy /run/frp-auto-deploy /var/log/frp-auto-deploy /etc/frp-auto-deploy
+ReadWritePaths=/var/lib/frp-auto-deploy /run/frp-auto-deploy-frontend /var/log/frp-auto-deploy /etc/frp-auto-deploy
 
 [Install]
 WantedBy=multi-user.target
