@@ -155,6 +155,91 @@ def test_used_enrollment_identity():
         if code != 200:
             fail('USED_ENROLLMENT_SAME_IDENTITY_SAFE_RETRY', result)
         pass_('USED_ENROLLMENT_SAME_IDENTITY_SAFE_RETRY')
+        pass_('USED_ENROLLMENT_SAME_IDENTITY_RECOVERY_WHILE_ENROLLED')
+    finally:
+        env.cleanup()
+
+
+def test_used_enrollment_after_revoke():
+    """Used Enrollment Code must not reactivate a revoked management identity."""
+    env = EnrollEnv()
+    try:
+        code, result = env.enroll()
+        if code != 200:
+            fail('initial enroll before revoke', result)
+        services = result.get('services') or []
+        if not isinstance(services, list) or not services:
+            fail('initial enroll missing services', result)
+        ports_before = {}
+        for svc in services:
+            if not isinstance(svc, dict):
+                continue
+            sid = svc.get('id')
+            if sid is None or svc.get('remote_port') is None:
+                continue
+            ports_before[str(sid)] = int(svc['remote_port'])
+        if not ports_before:
+            fail('initial enroll missing remote ports', result)
+
+        state = json.loads(env.registry.read_text(encoding='utf-8'))
+        client = state['clients']['machine-enroll']
+        client['mgmt_status'] = 'revoked'
+        client['mgmt_mac_key'] = None
+        client['mgmt_revoked_at'] = '2026-01-01T00:00:00Z'
+        MOD.atomic_write_json(env.registry, state)
+
+        code, result = env.enroll(pubkey=env.pub_a_pem)
+        if code != 403:
+            fail('USED_ENROLLMENT_AFTER_REVOKE_REJECTED', result)
+        err = str(result.get('error', '')).lower()
+        if 'already used' not in err or 'revoked' not in err:
+            fail('USED_ENROLLMENT_AFTER_REVOKE_REJECTED', result)
+        pass_('USED_ENROLLMENT_AFTER_REVOKE_REJECTED')
+
+        client = json.loads(env.registry.read_text(encoding='utf-8'))['clients']['machine-enroll']
+        if client.get('mgmt_status') != 'revoked':
+            fail('REVOKED_STATUS_PRESERVED_AFTER_OLD_CODE_RETRY', client)
+        if not client.get('mgmt_revoked_at'):
+            fail('REVOKED_STATUS_PRESERVED_AFTER_OLD_CODE_RETRY', client)
+        if client.get('mgmt_mac_key') not in (None, ''):
+            fail('REVOKED_STATUS_PRESERVED_AFTER_OLD_CODE_RETRY', client)
+        pass_('REVOKED_STATUS_PRESERVED_AFTER_OLD_CODE_RETRY')
+        pass_('REVOKED_STATUS_PRESERVED')
+
+        for sid, port in ports_before.items():
+            svc = (client.get('services') or {}).get(sid) or {}
+            if int(svc.get('remote_port') or -1) != port:
+                fail('REVOKED_PORT_RESERVATIONS_PRESERVED', (sid, port, svc))
+        pass_('REVOKED_PORT_RESERVATIONS_PRESERVED')
+        pass_('REVOKED_PORTS_PRESERVED')
+
+        eid2 = 'fedcba9876543210'
+        secret2 = 'enroll-secret-fedcba9876543210'
+        now = int(time.time())
+        MOD.atomic_write_json(
+            env.enrollments / ('%s.json' % eid2),
+            {
+                'id': eid2,
+                'secret': secret2,
+                'expires_at': now + 600,
+                'bound_machine_id': None,
+                'used_at': None,
+            },
+        )
+        body = env.body(pubkey=env.pub_a_pem)
+        ts = str(int(time.time()))
+        sig = hmac_hex(secret2, ts + '\n' + body.decode())
+        code, result = env.allocator.enroll(eid2, ts, sig, body)
+        if code != 200:
+            fail('NEW_ENROLLMENT_AFTER_REVOKE_ALLOWED', result)
+        client = json.loads(env.registry.read_text(encoding='utf-8'))['clients']['machine-enroll']
+        if client.get('mgmt_status') != 'enrolled':
+            fail('NEW_ENROLLMENT_AFTER_REVOKE_ALLOWED', client)
+        for sid, port in ports_before.items():
+            svc = (client.get('services') or {}).get(sid) or {}
+            if int(svc.get('remote_port') or -1) != port:
+                fail('NEW_ENROLLMENT_AFTER_REVOKE_ALLOWED', (sid, port, svc))
+        pass_('NEW_ENROLLMENT_AFTER_REVOKE_ALLOWED')
     finally:
         env.cleanup()
 
@@ -302,6 +387,7 @@ def test_mgmt_registry_cross_field():
 
 def main():
     test_used_enrollment_identity()
+    test_used_enrollment_after_revoke()
     test_nonce_capacity()
     test_lease_preflight_and_oserror()
     test_mgmt_registry_cross_field()

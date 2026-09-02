@@ -324,8 +324,8 @@ function Invoke-FrpClientProjectUpdate {
                     $sumsPath = Join-Path $tmpDir 'SHA256SUMS'
                     $bundlePath = Join-Path $tmpDir 'bootstrap-client.ps1'
                     Write-Host 'Downloading Windows project update artifact...'
-                    if ($env:FRP_WINDOWS_PROJECT_UPDATE_MOCK_DIR -and
-                        (Test-Path -LiteralPath $env:FRP_WINDOWS_PROJECT_UPDATE_MOCK_DIR)) {
+                    $downloadMode = Get-FrpWindowsProjectUpdateRemoteDownloadMode
+                    if ($downloadMode -eq 'mock') {
                         $mockDir = $env:FRP_WINDOWS_PROJECT_UPDATE_MOCK_DIR.Trim()
                         $mockSums = Join-Path $mockDir 'SHA256SUMS'
                         $mockBundle = Join-Path $mockDir 'bootstrap-client.ps1'
@@ -334,7 +334,7 @@ function Invoke-FrpClientProjectUpdate {
                         }
                         Copy-Item -LiteralPath $mockSums -Destination $sumsPath -Force
                         Copy-Item -LiteralPath $mockBundle -Destination $bundlePath -Force
-                    } elseif (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+                    } elseif ($downloadMode -eq 'curl') {
                         $p1 = Start-Process -FilePath 'curl.exe' -ArgumentList @(
                             '--fail', '--silent', '--show-error', '--location',
                             '--proto', '=https', '--proto-redir', '=https',
@@ -348,15 +348,7 @@ function Invoke-FrpClientProjectUpdate {
                         ) -Wait -PassThru -NoNewWindow
                         if ($p2.ExitCode -ne 0) { throw 'ERROR: failed to download the project update bundle' }
                     } else {
-                        if ($metaUrl -notmatch '^https://' -or $url -notmatch '^https://') {
-                            throw 'ERROR: project update requires curl.exe for HTTPS-only redirect policy'
-                        }
-                        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-                        $wc = New-Object System.Net.WebClient
-                        try {
-                            $wc.DownloadFile($metaUrl, $sumsPath)
-                            $wc.DownloadFile($url, $bundlePath)
-                        } finally { $wc.Dispose() }
+                        throw 'ERROR: remote project update requires curl.exe for HTTPS-only redirect policy'
                     }
                     $fromSums = Get-FrpSha256SumsEntry -SumsPath $sumsPath -ArtifactName 'dist/bootstrap-client.ps1'
                     if ($verifiedSha -and ($verifiedSha.ToLowerInvariant() -ne $fromSums)) {

@@ -295,6 +295,37 @@ function Test-FrpUrlHasSourceRef {
     return ($parts -contains $Ref)
 }
 
+function Get-FrpWindowsProjectUpdateRemoteDownloadMode {
+    <#
+    .SYNOPSIS
+      Decide how remote Windows project-update artifacts may be fetched.
+      Returns 'mock' or 'curl'. Refuses WebClient fallback (HTTPS redirect policy).
+    .PARAMETER CurlAvailable
+      Optional override for tests: $true / $false. When omitted, detects curl.exe.
+    #>
+    param(
+        [object]$CurlAvailable = $null
+    )
+    if ($env:FRP_WINDOWS_PROJECT_UPDATE_MOCK_DIR -and
+        (Test-Path -LiteralPath $env:FRP_WINDOWS_PROJECT_UPDATE_MOCK_DIR)) {
+        return 'mock'
+    }
+    if ($env:FRP_WINDOWS_PROJECT_UPDATE_FORCE_NO_CURL -eq '1') {
+        $hasCurl = $false
+    } elseif ($null -ne $CurlAvailable) {
+        $hasCurl = [bool]$CurlAvailable
+    } else {
+        $hasCurl = [bool](Get-Command curl.exe -ErrorAction SilentlyContinue)
+    }
+    if ($hasCurl) {
+        return 'curl'
+    }
+    throw (
+        'ERROR: remote project update requires curl.exe for HTTPS-only redirect policy. ' +
+        'Install curl.exe, or use a local source directory (-SourceDir / FRP_WINDOWS_PROJECT_SOURCE).'
+    )
+}
+
 function Resolve-FrpWindowsProjectUpdateIdentity {
     <#
     .SYNOPSIS

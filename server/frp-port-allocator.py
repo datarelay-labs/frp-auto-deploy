@@ -1328,6 +1328,16 @@ class Allocator:
                     client = clients.get(machine_id)
 
                     if record is not None and not identity_auth and enrollment_already_used:
+                        existing = clients.get(machine_id)
+                        # Used-code same-identity recovery is only for still-active
+                        # enrollments (lost-response). Explicit revoke must require a
+                        # NEW Enrollment Code; never clear mgmt_revoked_at via E1 retry.
+                        if isinstance(existing, dict) and self.mgmt_status(existing) == 'revoked':
+                            return 403, api_error(
+                                'enrollment code was already used; this client management '
+                                'identity has been revoked and a new Enrollment Code is required',
+                                'AUTH_FAILED',
+                            )
                         if payload.get('mgmt_pubkey'):
                             try:
                                 presented_fp = MGMT.pubkey_fingerprint(
@@ -1344,7 +1354,6 @@ class Allocator:
                                     'is required to rotate management identity',
                                     'AUTH_FAILED',
                                 )
-                            existing = clients.get(machine_id)
                             if isinstance(existing, dict) and existing.get('mgmt_pubkey'):
                                 try:
                                     stored_fp = MGMT.pubkey_fingerprint(

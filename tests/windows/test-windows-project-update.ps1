@@ -214,6 +214,51 @@ try {
     Write-FrpTestPass 'WINDOWS_PROJECT_UPDATE_TAMPER_REJECTED'
     Remove-Item Env:FRP_WINDOWS_PROJECT_UPDATE_MOCK_DIR -ErrorAction SilentlyContinue
 
+    # --- HTTPS-only curl policy + no-curl fail-closed (decision path exercised) ---
+    Assert-FrpTrue ($clientText -match "--proto',\s*'=https'") `
+        'project update curl uses --proto =https'
+    Assert-FrpTrue ($clientText -match "--proto-redir',\s*'=https'") `
+        'project update curl uses --proto-redir =https'
+    Assert-FrpTrue ($clientText -notmatch 'System\.Net\.WebClient') `
+        'project update must not use WebClient fallback'
+    Assert-FrpTrue ($clientText -match 'Get-FrpWindowsProjectUpdateRemoteDownloadMode') `
+        'project update uses isolated download-mode decision'
+    Write-FrpTestPass 'WINDOWS_PROJECT_UPDATE_CURL_PROTO_HTTPS'
+    Write-FrpTestPass 'WINDOWS_PROJECT_UPDATE_CURL_PROTO_REDIR_HTTPS'
+
+    $curlMode = Get-FrpWindowsProjectUpdateRemoteDownloadMode -CurlAvailable $true
+    Assert-FrpEqual 'curl' $curlMode 'curl-available decision returns curl'
+    $refuseThrew = $false
+    $refuseMsg = ''
+    try {
+        $null = Get-FrpWindowsProjectUpdateRemoteDownloadMode -CurlAvailable $false
+    } catch {
+        $refuseThrew = $true
+        $refuseMsg = [string]$_.Exception.Message
+    }
+    Assert-FrpTrue $refuseThrew 'no-curl decision throws'
+    Assert-FrpTrue ($refuseMsg -match 'curl\.exe' -and $refuseMsg -match 'HTTPS-only') `
+        'no-curl decision error is actionable'
+
+    Install-FrpWindowsProjectTree -SourceWindowsRoot $seedOld | Out-Null
+    $beforeNoCurl = Get-Content -LiteralPath $libDest -Raw
+    $env:FRP_RELEASE_CHANNEL = 'dev'
+    $env:FRP_WINDOWS_PROJECT_UPDATE_FORCE_NO_CURL = '1'
+    Remove-Item Env:FRP_WINDOWS_PROJECT_UPDATE_MOCK_DIR -ErrorAction SilentlyContinue
+    $rcNoCurl = Invoke-FrpClientProjectUpdate -ArtifactUrl $remoteUrl -SumsUrl $sumsUrl
+    Assert-FrpEqual 1 $rcNoCurl 'remote project update fails closed without curl'
+    Assert-FrpEqual $beforeNoCurl (Get-Content -LiteralPath $libDest -Raw) `
+        'no mutation when remote update refuses without curl'
+    Write-FrpTestPass 'WINDOWS_PROJECT_UPDATE_NO_CURL_FAILS_CLOSED'
+
+    $rcLocalNoCurl = Invoke-FrpClientProjectUpdate -SourceWindowsRoot $fixtureRoot `
+        -ExpectedBundleSha256 $bundleSha
+    Assert-FrpEqual 0 $rcLocalNoCurl 'local source project update works without curl'
+    Assert-FrpTrue ((Get-Content -LiteralPath $libDest -Raw) -match 'NEW_MODULE_MARKER') `
+        'local source update applied without curl'
+    Write-FrpTestPass 'WINDOWS_PROJECT_UPDATE_LOCAL_SOURCE_NO_CURL_STILL_ALLOWED'
+    Remove-Item Env:FRP_WINDOWS_PROJECT_UPDATE_FORCE_NO_CURL -ErrorAction SilentlyContinue
+
     # Command model: update (frp) vs update project documented in help text
     Assert-FrpTrue ($clientText -match "Update target: FRP binary" -or $clientText -match 'update frp') 'frp update documented'
     Write-FrpTestPass 'UPDATE_COMMAND_MODEL_SPLIT'
@@ -229,6 +274,7 @@ try {
 } finally {
     Remove-Item Env:FRP_WINDOWS_FAIL_AFTER_PROJECT_REPLACE -ErrorAction SilentlyContinue
     Remove-Item Env:FRP_WINDOWS_PROJECT_UPDATE_MOCK_DIR -ErrorAction SilentlyContinue
+    Remove-Item Env:FRP_WINDOWS_PROJECT_UPDATE_FORCE_NO_CURL -ErrorAction SilentlyContinue
     Remove-Item Env:FRP_RELEASE_CHANNEL -ErrorAction SilentlyContinue
     Remove-Item Env:FRP_SOURCE_REF -ErrorAction SilentlyContinue
     Remove-Item Env:FRP_BUNDLE_SHA256 -ErrorAction SilentlyContinue
