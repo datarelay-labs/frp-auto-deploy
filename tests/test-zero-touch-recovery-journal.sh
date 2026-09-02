@@ -113,16 +113,18 @@ PY
 }
 
 ALLOC_PORT="$(pick_port)"
+PLUGIN_PORT="$(pick_port)"
 LISTEN_PORT="$(pick_port)"
 ALLOC_ROOT="$WORKDIR/allocator"
 mkdir -p "$ALLOC_ROOT/enrollments" "$ALLOC_ROOT/bootstrap"
 python3 "$ROOT/lib/frp_pki.py" ensure --pki-dir "$ALLOC_ROOT/pki" --public-host 127.0.0.1 >/dev/null
 LIVE_CA_FP="$(python3 "$ROOT/lib/frp_pki.py" fingerprint --cert "$ALLOC_ROOT/pki/ca.crt")"
-python3 - "$ALLOC_ROOT" "$ALLOC_PORT" <<'PY'
+python3 - "$ALLOC_ROOT" "$ALLOC_PORT" "$PLUGIN_PORT" <<'PY'
 import json, sys
 from pathlib import Path
 root = Path(sys.argv[1])
 port = int(sys.argv[2])
+plugin_port = int(sys.argv[3])
 pki = root / 'pki'
 (root / 'server_token').write_text('test-enroll-token-do-not-use\n')
 (root / 'server_token').chmod(0o600)
@@ -140,6 +142,8 @@ pki = root / 'pki'
     'listen_port': port,
     'allocator_listen_port': port,
     'allocator_public_port': port,
+    'frp_plugin_listen_host': '127.0.0.1',
+    'frp_plugin_listen_port': plugin_port,
     'tls_ca_cert': str(pki / 'ca.crt'),
     'tls_server_cert': str(pki / 'server.crt'),
     'tls_server_key': str(pki / 'server.key'),
@@ -317,5 +321,50 @@ if grep -q bootstrap_redeem "$WORKDIR/corrupt.out.hook"; then
   fail "corrupt journal must not fall through to redeem"
 fi
 pass "CORRUPT_JOURNAL_FAIL_CLOSED"
+
+# --- HEALTH_CHECK_FAILED: enroll ok, proxy health fails, journal retained ---
+CLIENT3="$WORKDIR/client3"
+MACHINE3='ddeeff00112233445566778899aabbcc'
+FRP_DEPLOY_TEST_ROOT="$LIVE_TREE" python3 "$CREATE" --one-line --ssh --ssh-user "$SSH_USER" \
+  --ssh-port "$LISTEN_PORT" --note recover-health >"$WORKDIR/create3.out"
+TICKET3="$(extract_ticket "$WORKDIR/create3.out")"
+export FRP_CLIENT_HOOK_HEALTH_CHECK_FAIL=1
+if run_zero_touch "$CLIENT3" "$TICKET3" "$MACHINE3" "$WORKDIR/healthfail.out"; then
+  fail "HEALTH_CHECK_FAIL should abort before client-state commit"
+fi
+unset FRP_CLIENT_HOOK_HEALTH_CHECK_FAIL
+grep -q 'HEALTH_CHECK_FAILED' "$WORKDIR/healthfail.err" || fail "health failure class"
+grep -q 'simulated HEALTH_CHECK_FAIL failure' "$WORKDIR/healthfail.err" || fail "health hook message"
+grep -q bootstrap_redeem "$WORKDIR/healthfail.out.hook" || fail "health-fail attempt should redeem"
+grep -q enroll "$WORKDIR/healthfail.out.hook" || fail "health-fail attempt should enroll"
+[[ ! -f "$CLIENT3/etc/frp/client-state.json" ]] || fail "client-state must not exist after HEALTH_CHECK_FAILED"
+J3="$CLIENT3/var/lib/frp-auto-deploy/client-enroll-recovery.json"
+[[ -f "$J3" ]] || fail "recovery journal missing after HEALTH_CHECK_FAILED"
+ID3_BEFORE="$(sha256sum "$CLIENT3/etc/frp/client-identity.key" | awk '{print $1}')"
+if ! run_zero_touch "$CLIENT3" "$TICKET3" "$MACHINE3" "$WORKDIR/healthresume.out"; then
+  cat "$WORKDIR/healthresume.out" "$WORKDIR/healthresume.err" >&2
+  fail "resume after HEALTH_CHECK_FAILED"
+fi
+grep -q 'Resuming incomplete zero-touch' "$WORKDIR/healthresume.out" || fail "health resume messaging"
+if grep -q bootstrap_redeem "$WORKDIR/healthresume.out.hook"; then
+  fail "health resume must not redeem bootstrap ticket"
+fi
+[[ -f "$CLIENT3/etc/frp/client-state.json" ]] || fail "client-state missing after health resume"
+[[ ! -f "$J3" ]] || fail "recovery journal should be deleted after health resume success"
+ID3_AFTER="$(sha256sum "$CLIENT3/etc/frp/client-identity.key" | awk '{print $1}')"
+[[ "$ID3_BEFORE" == "$ID3_AFTER" ]] || fail "management identity changed after health resume"
+HEALTH_PORT="$(python3 - "$CLIENT3/etc/frp/client-state.json" "$MACHINE3" <<'PY' || fail "health resume state"
+import json, sys
+from pathlib import Path
+state = json.loads(Path(sys.argv[1]).read_text())
+assert state['machine_id'] == sys.argv[2]
+port = state['services']['ssh']['remote_port']
+assert isinstance(port, int) and 18400 <= port <= 18430
+print(port)
+PY
+)"
+PORT_LINE="$(grep -E 'ssh -p ' "$WORKDIR/healthresume.out" || true)"
+echo "$PORT_LINE" | grep -q "ssh -p ${HEALTH_PORT} " || fail "same public port after health resume"
+pass "HEALTH_CHECK_FAILED_RECOVERY_JOURNAL"
 
 echo "ALL PASS test-zero-touch-recovery-journal"

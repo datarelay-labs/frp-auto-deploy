@@ -10,12 +10,15 @@ Restart=always
 RestartSec=5
 User=root
 Group=root
+# Own runtime lease store without depending on frp-frontend (Direct mode).
+RuntimeDirectory=frp-auto-deploy
+RuntimeDirectoryMode=0700
 # Hardening below requires systemd 232+. The installer strips these lines on
 # older systemd (Amazon Linux 2 is 219) rather than failing unit load.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/frp-auto-deploy /etc/frp-auto-deploy /etc/frp
+ReadWritePaths=/var/lib/frp-auto-deploy /run/frp-auto-deploy /var/log/frp-auto-deploy /etc/frp-auto-deploy /etc/frp
 
 [Install]
 WantedBy=multi-user.target

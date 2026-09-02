@@ -60,7 +60,68 @@ grep -q '^Type=notify' "$ROOT/server/frp-port-allocator.service" || fail "alloca
 unit_has_kv "$ROOT/server/frp-port-allocator.service" ExecStart \
   "/usr/bin/python3 /usr/local/lib/frp-auto-deploy/frp-port-allocator.py --config /etc/frp-auto-deploy/config.json" \
   || fail "allocator ExecStart"
+
+# Modern hardened allocator must declare every production runtime write path.
+# ProtectSystem=strict without these paths reproduces real OCI EROFS on leases/audit.
+grep -q '^ProtectSystem=strict' "$ROOT/server/frp-port-allocator.service" \
+  || fail "allocator ProtectSystem=strict"
+grep -q '^RuntimeDirectory=frp-auto-deploy' "$ROOT/server/frp-port-allocator.service" \
+  || fail "allocator RuntimeDirectory (frontend-independent lease store)"
+grep -q '^RuntimeDirectoryMode=0700' "$ROOT/server/frp-port-allocator.service" \
+  || fail "allocator RuntimeDirectoryMode"
+allocator_rw="$(
+  awk -F= '/^ReadWritePaths=/ { sub(/^ReadWritePaths=/, ""); print; exit }' \
+    "$ROOT/server/frp-port-allocator.service"
+)"
+[[ -n "$allocator_rw" ]] || fail "allocator ReadWritePaths missing"
+for required_rw in \
+  /var/lib/frp-auto-deploy \
+  /run/frp-auto-deploy \
+  /var/log/frp-auto-deploy \
+  /etc/frp-auto-deploy \
+  /etc/frp; do
+  [[ " $allocator_rw " == *" $required_rw "* ]] || fail "allocator ReadWritePaths missing $required_rw"
+done
+if grep -q '^After=.*frp-frontend.service' "$ROOT/server/frp-port-allocator.service"; then
+  fail "allocator must not After=frp-frontend (Direct mode has no frontend)"
+fi
+if grep -q '^Wants=.*frp-frontend.service' "$ROOT/server/frp-port-allocator.service"; then
+  fail "allocator must not Wants=frp-frontend"
+fi
+
+# shellcheck source=../lib/frp-common.sh
+. "$ROOT/lib/frp-common.sh"
+export FRP_TEST_SYSTEMD_VERSION=252
+frp_write_compatible_systemd_unit \
+  "$ROOT/server/frp-port-allocator.service" \
+  "$ROOT/tests/.systemd-units-modern-allocator.service"
+grep -q '^ProtectSystem=strict' "$ROOT/tests/.systemd-units-modern-allocator.service" \
+  || fail "modern compatible allocator lost ProtectSystem=strict"
+grep -q '^RuntimeDirectory=frp-auto-deploy' "$ROOT/tests/.systemd-units-modern-allocator.service" \
+  || fail "modern compatible allocator lost RuntimeDirectory"
+modern_rw="$(
+  awk -F= '/^ReadWritePaths=/ { sub(/^ReadWritePaths=/, ""); print; exit }' \
+    "$ROOT/tests/.systemd-units-modern-allocator.service"
+)"
+for required_rw in /run/frp-auto-deploy /var/log/frp-auto-deploy; do
+  [[ " $modern_rw " == *" $required_rw "* ]] || fail "modern compatible allocator missing $required_rw"
+done
+export FRP_TEST_SYSTEMD_VERSION=219
+frp_write_compatible_systemd_unit \
+  "$ROOT/server/frp-port-allocator.service" \
+  "$ROOT/tests/.systemd-units-al2-allocator.service"
+if grep -q '^ProtectSystem=' "$ROOT/tests/.systemd-units-al2-allocator.service"; then
+  fail "AL2 compatible allocator must not retain ProtectSystem"
+fi
+grep -q '^RuntimeDirectory=frp-auto-deploy' "$ROOT/tests/.systemd-units-al2-allocator.service" \
+  || fail "AL2 compatible allocator lost RuntimeDirectory"
+unset FRP_TEST_SYSTEMD_VERSION
+rm -f "$ROOT/tests/.systemd-units-modern-allocator.service" \
+  "$ROOT/tests/.systemd-units-al2-allocator.service"
+
 pass "frp-port-allocator.service static keys"
+pass "ALLOCATOR_RUNTIME_WRITE_CONTRACT"
+pass "ALLOCATOR_FRONTEND_INDEPENDENT"
 
 unit_has_kv "$ROOT/server/frp-frontend.service" After \
   "network-online.target frps.service frp-port-allocator.service" \

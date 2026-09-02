@@ -106,6 +106,8 @@ if grep -q '^NoNewPrivileges=' "$WORKDIR/allocator-219.service"; then
   fail "old systemd unit still has NoNewPrivileges"
 fi
 grep -q '^PrivateTmp=' "$WORKDIR/allocator-219.service" || fail "PrivateTmp should remain"
+grep -q '^RuntimeDirectory=frp-auto-deploy' "$WORKDIR/allocator-219.service" \
+  || fail "allocator unit lost RuntimeDirectory on old systemd"
 grep -q 'ExecStart=/usr/bin/python3' "$WORKDIR/allocator-219.service" || fail "allocator exec"
 unset FRP_TEST_SYSTEMD_VERSION
 export FRP_TEST_SYSTEMD_VERSION=252
@@ -114,6 +116,11 @@ frp_write_compatible_systemd_unit \
   "$ROOT/server/frp-port-allocator.service" \
   "$WORKDIR/allocator-252.service"
 grep -q '^ProtectSystem=strict' "$WORKDIR/allocator-252.service" || fail "modern unit lost strict"
+modern_alloc_rw="$(awk -F= '/^ReadWritePaths=/ { sub(/^ReadWritePaths=/, ""); print; exit }' "$WORKDIR/allocator-252.service")"
+[[ " $modern_alloc_rw " == *" /run/frp-auto-deploy "* ]] || fail "modern allocator missing /run/frp-auto-deploy"
+[[ " $modern_alloc_rw " == *" /var/log/frp-auto-deploy "* ]] || fail "modern allocator missing /var/log/frp-auto-deploy"
+grep -q '^RuntimeDirectory=frp-auto-deploy' "$WORKDIR/allocator-252.service" \
+  || fail "modern allocator lost RuntimeDirectory"
 frp_write_compatible_systemd_unit \
   "$ROOT/server/frp-frontend.service" \
   "$WORKDIR/frontend-252.service"

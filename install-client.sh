@@ -661,6 +661,13 @@ EOF2
     fi
   fi
 
+  # Simulate proxy health verification failure in isolated tests (post-enroll,
+  # before durable client-state commit — matches HEALTH_CHECK_FAILED class).
+  if ! frp_client_test_hook HEALTH_CHECK_FAIL; then
+    frp_emit_failure_class HEALTH_CHECK_FAILED
+    frp_client_fail 1 || return 1
+  fi
+
   render_access_info "$ACCESS_INFO" "$FRP_SERVER" "$SERVICES_FILE"
   frp_write_client_state "$(frp_client_state_path)" "$ALLOCATOR_URL" "$FRP_SERVER" \
     "$FRP_SERVER_PORT" "$HOSTNAME_VALUE" "$MACHINE_ID" "$HOST_ID" "$SERVICES_FILE" \

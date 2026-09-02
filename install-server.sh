@@ -1862,8 +1862,9 @@ frp_server_main() {
   fi
 
   mkdir -p "$etc_frp" "$etc_proj" "${var_lib}/enrollments" "${var_lib}/bootstrap" "$backups_dir" "$lib_dir" "$sbin_dir" \
-    "$(dirname "$unit_frps")"
-  chmod 700 "$etc_frp" "$etc_proj" "$var_lib" "${var_lib}/enrollments" "${var_lib}/bootstrap" "$backups_dir"
+    "$(dirname "$unit_frps")" "$(frp_server_fs /var/log/frp-auto-deploy)"
+  chmod 700 "$etc_frp" "$etc_proj" "$var_lib" "${var_lib}/enrollments" "${var_lib}/bootstrap" "$backups_dir" \
+    "$(frp_server_fs /var/log/frp-auto-deploy)"
   if [[ ${EUID} -eq 0 ]]; then
     chown root:root "$etc_frp" "$etc_proj" "$var_lib" 2>/dev/null || true
   fi
