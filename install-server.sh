@@ -54,11 +54,18 @@ done
 # shellcheck source=lib/frp-server-upgrade.sh
 . "$BASE_DIR/lib/frp-server-upgrade.sh"
 
-DEFAULT_CLIENT_INSTALLER_URL="$(frp_default_client_installer_url)"
-DEFAULT_WINDOWS_CLIENT_INSTALLER_URL="$(frp_default_windows_client_installer_url)"
+DEFAULT_CLIENT_INSTALLER_URL=""
+DEFAULT_WINDOWS_CLIENT_INSTALLER_URL=""
 
 frp_legacy_client_installer_url() {
   frp_legacy_project_client_installer_url
+}
+
+frp_refresh_default_client_installer_urls() {
+  # Resolve after release identity is known (env or persisted version file).
+  # candidate → exact SHA; stable → vX.Y.Z; dev → main.
+  DEFAULT_CLIENT_INSTALLER_URL="$(frp_default_client_installer_url)" || return 1
+  DEFAULT_WINDOWS_CLIENT_INSTALLER_URL="$(frp_default_windows_client_installer_url)" || return 1
 }
 
 frp_migrate_legacy_client_installer_url() {
@@ -742,6 +749,10 @@ resolve_server_settings() {
   FRP_INTERNAL_IP="${FRP_INTERNAL_IP:-}"
   FRP_PORT_START="${FRP_PORT_START:-${EXISTING_PORT_START:-}}"
   FRP_PORT_END="${FRP_PORT_END:-${EXISTING_PORT_END:-}}"
+  if ! frp_refresh_default_client_installer_urls; then
+    echo "ERROR: cannot resolve default client installer URLs for the current release identity" >&2
+    exit 1
+  fi
   CLIENT_INSTALLER_URL="${FRP_CLIENT_INSTALLER_URL:-${EXISTING_CLIENT_INSTALLER_URL:-$DEFAULT_CLIENT_INSTALLER_URL}}"
   frp_migrate_legacy_client_installer_url
   WINDOWS_CLIENT_INSTALLER_URL="${FRP_WINDOWS_CLIENT_INSTALLER_URL:-${EXISTING_WINDOWS_CLIENT_INSTALLER_URL:-$DEFAULT_WINDOWS_CLIENT_INSTALLER_URL}}"

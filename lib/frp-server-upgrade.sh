@@ -410,11 +410,23 @@ frp_server_migrate_managed_client_installer_url() {
   # managed installer URLs to the candidate release-line canonical default.
   # Explicit FRP_CLIENT_INSTALLER_URL wins. Custom URLs are never rewritten.
   # Does not run for --check or "update not needed".
+  # Release identity for URL rewriting:
+  #   candidate → exact 40-char SOURCE_REF (target_ref)
+  #   stable    → vX.Y.Z
+  #   dev       → main
   local config current canonical next
   local target_version="${1:-}"
   local target_channel="${2:-}"
+  local target_ref="${3:-}"
+  local migrate_channel migrate_ref
   config="$(frp_server_fs /etc/frp-auto-deploy/config.json)"
   [[ -f "$config" ]] || return 1
+
+  migrate_channel="${target_channel:-$(frp_release_channel)}" || return 1
+  migrate_ref="$target_ref"
+  if [[ -z "$migrate_ref" && "$migrate_channel" == "candidate" ]]; then
+    migrate_ref="$(frp_resolve_candidate_source_ref)" || return 1
+  fi
 
   if [[ -n "${FRP_CLIENT_INSTALLER_URL:-}" ]]; then
     next="${FRP_CLIENT_INSTALLER_URL}"
@@ -432,14 +444,16 @@ PY
     )" || return 1
     canonical="$(
       PROJECT_VERSION="${target_version:-$PROJECT_VERSION}" \
-      FRP_RELEASE_CHANNEL="${target_channel:-$(frp_release_channel)}" \
+      FRP_RELEASE_CHANNEL="$migrate_channel" \
+      FRP_SOURCE_REF="$migrate_ref" \
       frp_default_client_installer_url
-    )"
+    )" || return 1
     next="$(
       PROJECT_VERSION="${target_version:-$PROJECT_VERSION}" \
-      FRP_RELEASE_CHANNEL="${target_channel:-$(frp_release_channel)}" \
+      FRP_RELEASE_CHANNEL="$migrate_channel" \
+      FRP_SOURCE_REF="$migrate_ref" \
       frp_canonicalize_managed_client_installer_url "$current"
-    )"
+    )" || return 1
     # When current was empty, still fill the channel canonical default.
     if [[ -z "$current" ]]; then
       next="$canonical"
@@ -510,9 +524,10 @@ PY
   else
     win_next="$(
       PROJECT_VERSION="${target_version:-$PROJECT_VERSION}" \
-      FRP_RELEASE_CHANNEL="${target_channel:-$(frp_release_channel)}" \
+      FRP_RELEASE_CHANNEL="$migrate_channel" \
+      FRP_SOURCE_REF="$migrate_ref" \
       frp_canonicalize_managed_windows_client_installer_url "$win_current"
-    )"
+    )" || return 1
   fi
   python3 - "$config" "$win_next" <<'PY'
 import json
@@ -755,13 +770,14 @@ frp_server_apply_project_upgrade() {
   # Intentional release-line rewrite of official managed installer URLs only.
   # Runs after preserved-state verification so accidental config mutation during
   # file install is still rejected; rollback restores the pre-upgrade URL.
-  if ! frp_server_migrate_managed_client_installer_url "$target" "$target_channel"; then
+  if ! frp_server_migrate_managed_client_installer_url "$target" "$resolved_channel" "$resolved_ref"; then
     frp_server_upgrade_rollback "$snapshot"
     frp_emit_failure_class FILE_COMMIT_FAILED
     return 1
   fi
 
   if ! FRP_RELEASE_CHANNEL="$resolved_channel" \
+      FRP_SOURCE_REF="$resolved_ref" \
       FRP_BUNDLE_SHA256="$target_bundle" \
       FRP_VERSION_REQUIRE_VERIFIED_BUNDLE=1 \
       PROJECT_VERSION="$target" \
@@ -776,8 +792,8 @@ frp_server_apply_project_upgrade() {
   frp_audit_emit project_update.completed
   echo "Server project update completed successfully."
   echo "Project version : ${previous} -> ${target}"
-  echo "Release channel : ${target_channel}"
-  echo "Source ref      : ${target_ref}"
+  echo "Release channel : ${resolved_channel}"
+  echo "Source ref      : ${resolved_ref}"
   echo "Bundle SHA256   : ${target_bundle}"
   if [[ "$previous" == "$target" ]]; then
     echo "Same-version update : refreshed management files"

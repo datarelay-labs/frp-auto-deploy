@@ -469,17 +469,21 @@ if git_ref != expected_git_ref:
     raise SystemExit(1)
 # Candidate delivers an exact commit of a tree that still declares stable/dev
 # identity in release-manifest.json. Do not require manifest git_ref == SHA.
+# When the delivery line is candidate, report the installed/expected release
+# identity (candidate + exact SHA), not the tree's pre-tag stable identity —
+# otherwise installer URL migration rewrites to a nonexistent vX.Y.Z tag.
 if expected_channel == "candidate":
     if not re.fullmatch(r"[0-9a-f]{40}", expected_ref or ""):
         sys.stderr.write("ERROR: candidate expected source ref must be an exact commit SHA\n")
         raise SystemExit(1)
-else:
-    if expected_ref and git_ref != expected_ref:
-        sys.stderr.write("ERROR: release metadata source ref mismatch\n")
-        raise SystemExit(1)
-    if expected_channel and channel != expected_channel:
-        sys.stderr.write("ERROR: release metadata channel mismatch\n")
-        raise SystemExit(1)
+    sys.stdout.write("%s\tcandidate\t%s\n" % (project, expected_ref))
+    raise SystemExit(0)
+if expected_ref and git_ref != expected_ref:
+    sys.stderr.write("ERROR: release metadata source ref mismatch\n")
+    raise SystemExit(1)
+if expected_channel and channel != expected_channel:
+    sys.stderr.write("ERROR: release metadata channel mismatch\n")
+    raise SystemExit(1)
 sys.stdout.write("%s\t%s\t%s\n" % (project, channel, git_ref))
 PY
 }
