@@ -10,17 +10,18 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-function Import-FrpCtlModules {
-    $libDir = Join-Path $PSScriptRoot '..\lib'
-    foreach ($mod in @(
-            'FrpPaths.ps1', 'FrpCrypto.ps1', 'FrpTls.ps1', 'FrpClockSync.ps1', 'FrpState.ps1',
-            'FrpConfig.ps1', 'FrpProcess.ps1', 'FrpBootstrap.ps1', 'FrpLifecycle.ps1'
-        )) {
-        . (Join-Path $libDir $mod)
-    }
+function Get-FrpCtlLibDir {
+    return (Join-Path $PSScriptRoot '..\lib')
 }
 
-Import-FrpCtlModules
+# Dot-source at script scope so loaded functions remain visible to this script.
+$script:FrpCtlLibDir = Get-FrpCtlLibDir
+foreach ($mod in @(
+        'FrpPaths.ps1', 'FrpCrypto.ps1', 'FrpTls.ps1', 'FrpClockSync.ps1', 'FrpState.ps1',
+        'FrpConfig.ps1', 'FrpProcess.ps1', 'FrpBootstrap.ps1', 'FrpLifecycle.ps1'
+    )) {
+    . (Join-Path $script:FrpCtlLibDir $mod)
+}
 
 $cmd = if ($Args.Count -gt 0) { $Args[0].ToLowerInvariant() } else { 'help' }
 $rest = @()

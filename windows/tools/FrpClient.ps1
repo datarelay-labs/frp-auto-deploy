@@ -28,7 +28,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-function Import-FrpWindowsModules {
+function Get-FrpWindowsLibDir {
     $roots = New-Object System.Collections.ArrayList
     [void]$roots.Add((Join-Path $PSScriptRoot '..\lib'))
     if ($env:FRP_WINDOWS_ROOT) {
@@ -38,26 +38,23 @@ function Import-FrpWindowsModules {
     # When running from repo
     [void]$roots.Add((Join-Path $PSScriptRoot '..\lib'))
 
-    $libDir = $null
     foreach ($r in $roots) {
         $full = [System.IO.Path]::GetFullPath($r)
         if (Test-Path -LiteralPath (Join-Path $full 'FrpPaths.ps1')) {
-            $libDir = $full
-            break
+            return $full
         }
     }
-    if (-not $libDir) {
-        throw 'ERROR: cannot locate windows/lib modules'
-    }
-    foreach ($mod in @(
-            'FrpPaths.ps1', 'FrpCrypto.ps1', 'FrpTls.ps1', 'FrpClockSync.ps1', 'FrpState.ps1',
-            'FrpConfig.ps1', 'FrpProcess.ps1', 'FrpBootstrap.ps1', 'FrpLifecycle.ps1'
-        )) {
-        . (Join-Path $libDir $mod)
-    }
+    throw 'ERROR: cannot locate windows/lib modules'
 }
 
-Import-FrpWindowsModules
+# Dot-source at script scope so loaded functions remain visible to this script.
+$script:FrpWindowsLibDir = Get-FrpWindowsLibDir
+foreach ($mod in @(
+        'FrpPaths.ps1', 'FrpCrypto.ps1', 'FrpTls.ps1', 'FrpClockSync.ps1', 'FrpState.ps1',
+        'FrpConfig.ps1', 'FrpProcess.ps1', 'FrpBootstrap.ps1', 'FrpLifecycle.ps1'
+    )) {
+    . (Join-Path $script:FrpWindowsLibDir $mod)
+}
 try { Add-Type -AssemblyName System.Security -ErrorAction SilentlyContinue | Out-Null } catch { }
 
 function Show-FrpClientHelp {
