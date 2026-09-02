@@ -286,7 +286,7 @@ def parse_args(argv=None):
     )
     p.add_argument(
         '--platform',
-        choices=('linux', 'windows'),
+        choices=('linux', 'windows', 'macos'),
         default='linux',
         help='Client platform for zero-touch one-line command (default: linux)',
     )
@@ -447,15 +447,16 @@ def resolve_release_identity(installer_url):
     return '', ''
 
 
-def encode_windows_join_descriptor(allocator, ca_fp, ticket, channel, source_ref, platform='windows'):
+def encode_join_descriptor(allocator, ca_fp, ticket, channel, source_ref):
     """Compact opaque join credential (not command obfuscation).
 
     Wire format: frpj1.<urlsafe-b64(pipe-separated fields)>
     Fields: allocator|ca|ticket|channel|source_ref
-    Platform is implied windows for this launcher.
+
+    Shared by windows-join.ps1 and `sudo frpctl join` on macOS. The platform is
+    implied by the launcher that consumes it, so it is not part of the payload.
     """
     import base64
-    _ = platform  # reserved; windows-join.ps1 is Windows-only
     fields = [
         str(allocator),
         str(ca_fp).lower(),
@@ -469,6 +470,11 @@ def encode_windows_join_descriptor(allocator, ca_fp, ticket, channel, source_ref
     raw = '|'.join(fields).encode('utf-8')
     b64 = base64.urlsafe_b64encode(raw).decode('ascii').rstrip('=')
     return 'frpj1.' + b64
+
+
+def encode_windows_join_descriptor(allocator, ca_fp, ticket, channel, source_ref, platform='windows'):
+    _ = platform  # retained for call-site compatibility
+    return encode_join_descriptor(allocator, ca_fp, ticket, channel, source_ref)
 
 
 def load_services_file(path):
@@ -782,6 +788,96 @@ def print_one_line_windows(ticket, ttl, note, public_host, control_public, alloc
     print()
 
 
+def print_one_line_macos(ticket, ttl, note, public_host, control_public, allocator, ca_fp, installer, ssh_user, ssh_port, client_name='', management_only=False, ticket_id='', release_channel='', source_ref=''):
+    """Apple Silicon macOS zero-touch command.
+
+    Uses the same Darwin-aware dist/bootstrap-client.sh as Linux, so there is no
+    second installer artifact to keep in sync. FRP_PLATFORM=macos is an explicit
+    operator assertion: the installer still detects Darwin/arm64 itself and
+    refuses to continue if the host disagrees.
+    """
+    channel = str(release_channel or '').strip().lower()
+    source_ref = str(source_ref or '').strip()
+    if not channel or (channel == 'candidate' and not re.fullmatch(r'[0-9a-f]{40}', source_ref)):
+        channel, source_ref = resolve_release_identity(installer)
+    env_parts = [
+        'FRP_ALLOCATOR_URL=%s' % shell_quote(allocator),
+        'FRP_ALLOCATOR_CA_SHA256=%s' % shell_quote(ca_fp),
+        'FRP_BOOTSTRAP_TICKET=%s' % shell_quote(ticket),
+        'FRP_ZERO_TOUCH=1',
+        'FRP_PLATFORM=macos',
+    ]
+    if channel:
+        env_parts.append('FRP_RELEASE_CHANNEL=%s' % shell_quote(channel))
+    if source_ref:
+        env_parts.append('FRP_SOURCE_REF=%s' % shell_quote(source_ref))
+    if ssh_user:
+        env_parts.append('FRP_SSH_USER=%s' % shell_quote(ssh_user))
+    if ssh_port and int(ssh_port) != 22:
+        env_parts.append('FRP_SSH_PORT=%s' % shell_quote(str(int(ssh_port))))
+    if management_only:
+        env_parts.append('FRP_MANAGEMENT_ONLY=1')
+    command = 'curl -fsSL %s | sudo env %s bash' % (
+        shell_quote(installer),
+        ' '.join(env_parts),
+    )
+    descriptor = encode_join_descriptor(allocator, ca_fp, ticket, channel, source_ref)
+    tracking_id = str(ticket_id or '').strip()
+    if not tracking_id and ticket:
+        parts = str(ticket).split('.')
+        if len(parts) >= 2:
+            tracking_id = parts[1]
+    print()
+    print('Zero-touch macOS client command')
+    print()
+    print('This command contains a short-lived one-time bootstrap ticket.')
+    print('Treat the command as sensitive until it expires or is used.')
+    print()
+    print('Run in Terminal on an Apple Silicon Mac (M1 or newer, macOS 11+).')
+    print('Intel Macs are not supported and the installer will refuse to run.')
+    print()
+    if tracking_id:
+        print('Enrollment ID: %s' % tracking_id)
+        print()
+    if channel:
+        print('Release channel: %s' % channel)
+        if source_ref:
+            print('Source ref: %s' % source_ref)
+        print()
+    print(command)
+    print()
+    print('If frp-auto-deploy is already installed from Homebrew, this is equivalent:')
+    print()
+    print('  sudo frpctl join %s' % shell_quote(descriptor))
+    print()
+    print('Expires: %s (%s seconds)' % (iso(int(time.time()) + ttl), ttl))
+    if client_name:
+        print('Client name: %s' % client_name)
+    if note:
+        print('Note: %s' % note)
+    if public_host and control_public:
+        print('FRP Server: %s:%s' % (public_host, control_public))
+    print()
+    print('Send that single line to the remote user. They paste it and press Enter.')
+    print('No Enrollment Code prompt or FRP configuration is required.')
+    if management_only:
+        print('This enrolls management identity only; no service or public port is created.')
+    print()
+    print('The installer does not enable Remote Login, change the firewall,')
+    print('or create or modify any macOS user account.')
+    print()
+    print('The ticket is not the FRP token. It cannot manage the client after enrollment.')
+    print('It cannot be reused by another machine once bound.')
+    print('Status:')
+    print('  sudo frpctl status')
+    if tracking_id:
+        print()
+        print('Track or revoke with the Enrollment ID (not the ticket secret):')
+        print('  show enrollments')
+        print('  revoke enrollment %s' % tracking_id)
+    print()
+
+
 def print_one_line(ticket, ttl, note, public_host, control_public, allocator, ca_fp, installer, ssh_user, ssh_port, client_name='', management_only=False, ticket_id='', release_channel='', source_ref=''):
     env_parts = [
         'FRP_ALLOCATOR_URL=%s' % shell_quote(allocator),
@@ -873,8 +969,10 @@ def main(argv=None):
     if (a.ssh or a.rdp or a.services_file) and not a.one_line:
         fail('--ssh, --rdp, and --services-file require --one-line')
     platform = str(a.platform or 'linux').strip().lower()
-    if platform not in ('linux', 'windows'):
-        fail('--platform must be linux or windows')
+    if platform not in ('linux', 'windows', 'macos'):
+        fail('--platform must be linux, windows, or macos')
+    if a.rdp and platform == 'macos':
+        fail('RDP is not offered on macOS; use --ssh or --services-file')
 
     ssh_port = 22
     port_explicit = a.ssh_port is not None
@@ -907,6 +1005,13 @@ def main(argv=None):
     if platform == 'windows':
         installer = str(cfg.get('windows_client_installer_url', '') or '').strip()
         installer_label = 'Windows client installer URL'
+    elif platform == 'macos':
+        # macOS shares the Darwin-aware POSIX bootstrap with Linux. An explicit
+        # macos_client_installer_url overrides it only if an operator set one.
+        installer = str(cfg.get('macos_client_installer_url', '') or '').strip()
+        if not installer:
+            installer = str(cfg.get('client_installer_url', '') or '').strip()
+        installer_label = 'macOS client installer URL'
     else:
         installer = str(cfg.get('client_installer_url', '') or '').strip()
         installer_label = 'client installer URL'
@@ -952,6 +1057,11 @@ def main(argv=None):
                 'Windows client installer URL is not configured; '
                 'set windows_client_installer_url in server config '
                 '(or re-run the server installer) before --one-line --platform windows'
+            )
+        if platform == 'macos':
+            fail(
+                'macOS client installer URL is not configured; '
+                'run sudo frp-set-client-installer-url before --one-line --platform macos'
             )
         fail(
             'client installer URL is not configured; '
@@ -1029,6 +1139,24 @@ def main(argv=None):
             ca_fp,
             installer,
             rdp_port=rdp_local,
+            client_name=client_name,
+            management_only=not services,
+            ticket_id=ticket_id,
+            release_channel=release_channel,
+            source_ref=source_ref,
+        )
+    elif platform == 'macos':
+        print_one_line_macos(
+            ticket,
+            ttl,
+            note,
+            public_host,
+            control_public,
+            allocator,
+            ca_fp,
+            installer,
+            ssh_user,
+            ssh_pre_port,
             client_name=client_name,
             management_only=not services,
             ticket_id=ticket_id,

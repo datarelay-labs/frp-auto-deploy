@@ -1016,7 +1016,16 @@ frpctl_zt_run_services() {
     echo "Configure services"
     echo "=================="
     echo
-    if [[ "$menu_mode" == "windows" ]]; then
+    if [[ "$menu_mode" == "macos" ]]; then
+      # No RDP preset on macOS: Screen Sharing is a different protocol and this
+      # installer never enables a remote-access service on the client.
+      echo "1) Add SSH"
+      echo "2) Add HTTP"
+      echo "3) Add HTTPS"
+      echo "4) Add Custom TCP"
+      echo "5) Finish"
+      echo "6) Cancel"
+    elif [[ "$menu_mode" == "windows" ]]; then
       echo "1) Add RDP"
       echo "2) Add SSH"
       echo "3) Add HTTP"
@@ -1035,7 +1044,44 @@ frpctl_zt_run_services() {
     fi
     echo
     choice="$(frpctl_read "Select: " "")" || return 1
-    if [[ "$menu_mode" == "windows" ]]; then
+    if [[ "$menu_mode" == "macos" ]]; then
+      case "$choice" in
+        1)
+          frpctl_zt_prompt_service_fields ssh ssh SSH 127.0.0.1 22 || continue
+          svc_jsons+=("$_FRP_ZT_SVC_JSON")
+          echo "Added SSH service."
+          ;;
+        2)
+          frpctl_zt_prompt_service_fields http http HTTP 127.0.0.1 80 || continue
+          svc_jsons+=("$_FRP_ZT_SVC_JSON")
+          echo "Added HTTP service."
+          ;;
+        3)
+          frpctl_zt_prompt_service_fields https https HTTPS 127.0.0.1 443 || continue
+          svc_jsons+=("$_FRP_ZT_SVC_JSON")
+          echo "Added HTTPS service."
+          ;;
+        4)
+          frpctl_zt_prompt_service_fields custom "" "Custom TCP" 127.0.0.1 "" || continue
+          svc_jsons+=("$_FRP_ZT_SVC_JSON")
+          echo "Added Custom TCP service."
+          ;;
+        5)
+          if [[ ${#svc_jsons[@]} -eq 0 ]]; then
+            echo "ERROR: add at least one service, or choose Cancel." >&2
+            continue
+          fi
+          break
+          ;;
+        6|"")
+          echo "Cancelled."
+          return 0
+          ;;
+        *)
+          echo "ERROR: select 1-6" >&2
+          ;;
+      esac
+    elif [[ "$menu_mode" == "windows" ]]; then
       case "$choice" in
         1)
           frpctl_zt_prompt_service_fields rdp rdp RDP 127.0.0.1 3389 || continue
@@ -1186,6 +1232,32 @@ frpctl_guided_zero_touch_windows() {
   esac
 }
 
+frpctl_guided_zero_touch_macos() {
+  local choice
+  echo
+  echo "macOS Zero-touch enrollment"
+  echo "==========================="
+  echo
+  echo "Apple Silicon only (M1 or newer). Intel Macs are not supported."
+  echo "The installer does not enable Remote Login or change the firewall;"
+  echo "SSH must already be working on the Mac for the SSH preset."
+  echo
+  echo "1) SSH only"
+  echo "2) Configure services"
+  echo "3) Back"
+  echo
+  choice="$(frpctl_read "Select: " "")" || return 1
+  case "$choice" in
+    1) _FRP_ZT_PLATFORM=macos; frpctl_zt_run_ssh ;;
+    2) _FRP_ZT_PLATFORM=macos; frpctl_zt_run_services macos ;;
+    3|"") return 0 ;;
+    *)
+      echo "ERROR: select 1-3" >&2
+      return 1
+      ;;
+  esac
+}
+
 frpctl_guided_zero_touch() {
   local choice
   echo
@@ -1196,15 +1268,17 @@ frpctl_guided_zero_touch() {
   echo
   echo "1) Linux"
   echo "2) Windows"
-  echo "3) Back"
+  echo "3) macOS (Apple Silicon)"
+  echo "4) Back"
   echo
   choice="$(frpctl_read "Select: " "")" || return 1
   case "$choice" in
     1) frpctl_guided_zero_touch_linux ;;
     2) frpctl_guided_zero_touch_windows ;;
-    3|"") return 0 ;;
+    3) frpctl_guided_zero_touch_macos ;;
+    4|"") return 0 ;;
     *)
-      echo "ERROR: select 1-3" >&2
+      echo "ERROR: select 1-4" >&2
       return 1
       ;;
   esac
@@ -1951,7 +2025,12 @@ frpctl_readline_complete() {
   if [[ "$point" != "${#line}" ]]; then
     return 0
   fi
-  mapfile -t cands < <(frpctl_completion_candidates "$line" || true)
+  # Read loop rather than mapfile: frpctl also runs under bash 3.2 on macOS.
+  local cand_line
+  while IFS= read -r cand_line; do
+    [[ -n "$cand_line" ]] || continue
+    cands+=("$cand_line")
+  done < <(frpctl_completion_candidates "$line" || true)
   if [[ ${#cands[@]} -eq 0 ]]; then
     return 0
   fi
@@ -2426,6 +2505,76 @@ raise SystemExit(subprocess.call(args))
 PY
 }
 
+# Locate the installer that ships alongside this frpctl (Homebrew libexec tree
+# or a development checkout). Never a downloaded or /home/... path.
+frpctl_local_install_client() {
+  local cand
+  for cand in \
+    "${_FRPCTL_DIR}/../install-client.sh" \
+    "${_FRPCTL_DIR}/../libexec/install-client.sh"; do
+    if [[ -f "$cand" ]]; then
+      printf '%s' "$cand"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# `sudo frpctl join '<descriptor>'` — compact macOS enrollment.
+#
+# The descriptor is the same frpj1 credential the Windows launcher consumes. It
+# is decoded and validated locally, then handed to the installer through the
+# environment rather than argv so the one-time ticket never appears in `ps`.
+frpctl_join() {
+  local descriptor="${1:-}" decoded installer line key value
+  if [[ -z "$descriptor" || "$descriptor" == "-h" || "$descriptor" == "--help" ]]; then
+    echo "Usage: sudo frpctl join '<descriptor>'"
+    echo
+    echo "Enrolls this Mac using the compact join credential printed by"
+    echo "'create zero-touch' on the FRP server (macOS platform)."
+    return 2
+  fi
+  if [[ $# -gt 1 ]]; then
+    echo "ERROR: join takes exactly one descriptor argument." >&2
+    echo "Quote it: sudo frpctl join '<descriptor>'" >&2
+    return 2
+  fi
+  if ! declare -F frp_macos_decode_join_descriptor >/dev/null 2>&1; then
+    echo "ERROR: macOS support module is not installed on this host." >&2
+    return 1
+  fi
+  if ! frp_is_darwin; then
+    echo "ERROR: 'frpctl join' is available on macOS only." >&2
+    echo "On Linux, use the curl one-line command from the server." >&2
+    return 1
+  fi
+  if [[ ${EUID} -ne 0 && -z "${FRP_CTL_TEST_ROOT:-}" ]]; then
+    echo "ERROR: run with sudo: sudo frpctl join '<descriptor>'" >&2
+    return 1
+  fi
+  if frpctl_is_client; then
+    echo "ERROR: this Mac already has an FRP client installed." >&2
+    echo "A software update does not need a join descriptor: sudo frpctl update" >&2
+    return 1
+  fi
+  decoded="$(frp_macos_decode_join_descriptor "$descriptor")" || return 1
+  if ! installer="$(frpctl_local_install_client)"; then
+    echo "ERROR: install-client.sh was not found next to this frpctl." >&2
+    echo "Use the curl one-line command from the server instead." >&2
+    return 1
+  fi
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    key="${line%%=*}"
+    value="${line#*=}"
+    [[ -n "$value" ]] || continue
+    export "${key}=${value}"
+  done <<<"$decoded"
+  export FRP_ZERO_TOUCH=1
+  export FRP_PLATFORM=macos
+  bash "$installer"
+}
+
 frpctl_dispatch() {
   local cmd="${1:-}"
   _FRP_CTL_RC=0
@@ -2450,6 +2599,9 @@ frpctl_dispatch() {
       ;;
     menu)
       frpctl_interactive
+      ;;
+    join)
+      frpctl_join "$@"
       ;;
     status)
       frpctl_status "$@"
@@ -2641,7 +2793,12 @@ frpctl_tokenize() {
   [[ -n "$line" ]] || return 0
   py="$(frpctl_grammar_py)" || return 1
   json="$(python3 "$py" tokenize "$line")" || return 2
-  mapfile -t _FRP_CTL_TOKENS < <(python3 -c 'import json,sys; [print(t) for t in json.loads(sys.argv[1])]' "$json")
+  # Read loop rather than mapfile: frpctl also runs under bash 3.2 on macOS.
+  # Empty tokens are preserved; the user may have typed a quoted empty argument.
+  local token_line
+  while IFS= read -r token_line; do
+    _FRP_CTL_TOKENS+=("$token_line")
+  done < <(python3 -c 'import json,sys; [print(t) for t in json.loads(sys.argv[1])]' "$json")
 }
 
 frpctl_history_maybe_record() {
