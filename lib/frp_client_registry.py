@@ -1286,6 +1286,69 @@ def validate_client_tags(tags):
     return tags
 
 
+def _load_mgmt_auth():
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent / 'frp_mgmt_auth.py'
+    spec = importlib.util.spec_from_file_location('frp_mgmt_auth', str(path))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+MAC_KEY_HEX_LEN = 64
+FINGERPRINT_HEX_LEN = 64
+
+
+def validate_management_identity(client):
+    """Cross-field management identity invariants for canonical registry state."""
+    if not isinstance(client, dict):
+        return
+    status = client.get('mgmt_status')
+    if status == 'legacy' or status is None:
+        return
+    if status == 'revoked':
+        mac = client.get('mgmt_mac_key')
+        if mac not in (None, '') and isinstance(mac, str) and mac.strip():
+            raise ValueError('revoked client must not retain an active management MAC key')
+        return
+    if status != 'enrolled':
+        return
+
+    mgmt = _load_mgmt_auth()
+    pubkey = client.get('mgmt_pubkey')
+    if not pubkey or not isinstance(pubkey, str) or not str(pubkey).strip():
+        raise ValueError('enrolled client is missing management public key')
+    alg = client.get('mgmt_alg')
+    if not alg or not isinstance(alg, str):
+        raise ValueError('enrolled client is missing management algorithm')
+    if str(alg).strip().lower() != mgmt.MGMT_ALG:
+        raise ValueError('enrolled client has unsupported management algorithm')
+    fingerprint = client.get('mgmt_fingerprint')
+    if not fingerprint or not isinstance(fingerprint, str):
+        raise ValueError('enrolled client is missing management fingerprint')
+    fp_text = str(fingerprint).strip().lower()
+    if len(fp_text) != FINGERPRINT_HEX_LEN or not all(ch in '0123456789abcdef' for ch in fp_text):
+        raise ValueError('enrolled client has invalid management fingerprint format')
+    mac_key = client.get('mgmt_mac_key')
+    if not mac_key or not isinstance(mac_key, str):
+        raise ValueError('enrolled client is missing management MAC key')
+    mac_text = str(mac_key).strip().lower()
+    if len(mac_text) != MAC_KEY_HEX_LEN or not all(ch in '0123456789abcdef' for ch in mac_text):
+        raise ValueError('enrolled client has invalid management MAC key format')
+    revoked_at = client.get('mgmt_revoked_at')
+    if revoked_at not in (None, '') and str(revoked_at).strip():
+        raise ValueError('enrolled client has active revocation timestamp')
+    try:
+        canon_pem = mgmt.canonicalize_pubkey_pem(pubkey)
+        expected_fp = mgmt.pubkey_fingerprint(canon_pem)
+    except Exception as exc:
+        raise ValueError('enrolled client has invalid management public key') from exc
+    if fp_text != expected_fp:
+        raise ValueError('enrolled client management fingerprint does not match public key')
+
+
 def validate_client_record(machine_id, client, *, groups=None):
     """Validate one persisted client record. Never repairs."""
     mid = require_canonical_machine_id(machine_id)
@@ -1317,6 +1380,8 @@ def validate_client_record(machine_id, client, *, groups=None):
             raise ValueError('noncanonical client note')
 
     validate_client_tags(client.get('tags'))
+
+    validate_management_identity(client)
 
     status = client.get('mgmt_status')
     if status is not None and status not in ('enrolled', 'legacy', 'revoked'):

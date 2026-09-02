@@ -11,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'lib'))
 import frp_client_registry as creg  # noqa: E402
+import frp_mgmt_auth as mgmt  # noqa: E402
 
 MID = 'aabbccdd00112233445566778899aabb'
 CFG = {
@@ -47,6 +48,21 @@ def base_service(**overrides):
     return svc
 
 
+def enrolled_identity_fields():
+    tmp = Path(tempfile.mkdtemp())
+    key = tmp / 'test.key'
+    pub = tmp / 'test.pub'
+    mgmt.generate_keypair(key, pub)
+    pem = pub.read_text(encoding='utf-8')
+    return {
+        'mgmt_status': 'enrolled',
+        'mgmt_pubkey': pem,
+        'mgmt_alg': mgmt.MGMT_ALG,
+        'mgmt_fingerprint': mgmt.pubkey_fingerprint(pem),
+        'mgmt_mac_key': mgmt.derive_mac_key('test-enroll-secret', MID),
+    }
+
+
 def base_state(**overrides):
     state = {
         'schema_version': 2,
@@ -66,8 +82,8 @@ def base_state(**overrides):
                 'note': 'lab',
                 'tags': {'env': 'prod'},
                 'group_ids': ['grp_abcd1234'],
-                'mgmt_status': 'enrolled',
                 'services': {'ssh': base_service()},
+                **enrolled_identity_fields(),
             }
         },
     }
