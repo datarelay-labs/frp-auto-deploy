@@ -19,6 +19,8 @@ MANDATORY=(
   tests/test-allocator-runtime-restart.sh
   tests/test-server-snapshot-restore-validation.py
   tests/test-zero-touch-recovery-journal.sh
+  tests/test-macos-frp-pin.sh
+  tests/test-macos-zero-touch-command.sh
   tests/test-run-all-security-coverage.sh
 )
 

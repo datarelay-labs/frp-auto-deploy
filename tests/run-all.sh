@@ -42,6 +42,8 @@ MANDATORY_SECURITY_TESTS=(
   tests/test-allocator-runtime-restart.sh
   tests/test-server-snapshot-restore-validation.py
   tests/test-zero-touch-recovery-journal.sh
+  tests/test-macos-frp-pin.sh
+  tests/test-macos-zero-touch-command.sh
   tests/test-run-all-security-coverage.sh
 )
 for _sec in "${MANDATORY_SECURITY_TESTS[@]}"; do
@@ -148,6 +150,14 @@ python3 tests/test-frp-release-data-plane-auth.py
 python3 tests/test-server-bundle-manifest-parity.py
 ./tests/test-allocator-runtime-restart.sh
 python3 tests/test-server-snapshot-restore-validation.py
+
+# macOS (Apple Silicon) client. Portable: these fake uname/ioreg so the Darwin
+# paths stay covered on the Linux CI host.
+./tests/test-macos-detection.sh
+./tests/test-macos-frp-pin.sh
+./tests/test-macos-launchd-plist.sh
+./tests/test-macos-zero-touch-command.sh
+
 ./tests/test-run-all-security-coverage.sh
 
 # Inventory guard: refuse silent omission of mandatory security regressions.

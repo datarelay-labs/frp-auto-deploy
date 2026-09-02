@@ -1,0 +1,174 @@
+name: macos-client
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  macos-arm64:
+    name: macOS ${{ matrix.runner }} (Apple Silicon)
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both labels are arm64 GitHub-hosted macOS images. macos-14 is the
+        # oldest supported Apple Silicon image and is the floor this client
+        # targets; macos-15 catches regressions on the newer OS.
+        runner:
+          - macos-14
+          - macos-15
+    steps:
+      # actions/checkout@v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Confirm the runner is Apple Silicon
+        run: |
+          set -euo pipefail
+          arch="$(uname -m)"
+          echo "MACOS_RUNNER_ARCH=${arch}"
+          echo "MACOS_PRODUCT_VERSION=$(sw_vers -productVersion)"
+          if [[ "$arch" != "arm64" ]]; then
+            echo "This job must run on an Apple Silicon runner; got ${arch}" >&2
+            exit 1
+          fi
+          # Rosetta 2 would report arm64 from a translated shell, which is
+          # exactly the case the installer must refuse.
+          if [[ "$(sysctl -in sysctl.proc_translated 2>/dev/null || echo 0)" == "1" ]]; then
+            echo "Runner shell is running under Rosetta 2 translation" >&2
+            exit 1
+          fi
+          echo "MACOS_APPLE_SILICON=PASS"
+
+      - name: Report the host toolchain
+        run: |
+          set -euo pipefail
+          echo "SYSTEM_BASH=$(/bin/bash --version | head -n1)"
+          echo "PATH_BASH=$(command -v bash) $(bash --version | head -n1)"
+          echo "PYTHON3=$(command -v python3) $(python3 --version)"
+          echo "OPENSSL=$(command -v openssl) $(openssl version)"
+          echo "BREW_PREFIX=$(brew --prefix 2>/dev/null || echo '(none)')"
+
+      # A stock Mac has no Homebrew bash, so the zero-touch one-liner is piped
+      # into /bin/bash 3.2. Running the suite there is the only way to catch a
+      # bash 4-only construct before a user does.
+      - name: macOS client suite under system bash 3.2
+        run: |
+          set -euo pipefail
+          # The runner has a Homebrew bash 5 ahead of /bin/bash on PATH, which
+          # would hide bash 4 syntax from every `#!/usr/bin/env bash` child
+          # process. Shim PATH so subprocesses resolve to the system bash too.
+          shim="${RUNNER_TEMP}/bash32"
+          mkdir -p "$shim"
+          ln -sf /bin/bash "${shim}/bash"
+          export PATH="${shim}:${PATH}"
+          bash --version | head -n1
+          for t in tests/test-macos-detection.sh \
+                   tests/test-macos-frp-pin.sh \
+                   tests/test-macos-launchd-plist.sh \
+                   tests/test-macos-zero-touch-command.sh; do
+            echo "=== system bash: ${t} ==="
+            bash "$t"
+          done
+          echo "MACOS_SYSTEM_BASH_SUITE=PASS"
+
+      - name: Client entry points parse under system bash 3.2
+        run: |
+          set -euo pipefail
+          for f in install-client.sh uninstall-client.sh \
+                   tools/frpctl tools/frp-client \
+                   lib/frp-common.sh lib/frp-macos.sh \
+                   lib/frp-client-common.sh lib/frp-client-lifecycle.sh \
+                   dist/bootstrap-client.sh; do
+            /bin/bash -n "$f"
+          done
+          echo "MACOS_SYSTEM_BASH_PARSE=PASS"
+
+      # BSD base64 has no -d on older macOS, so the bundle carries a fallback.
+      - name: Bootstrap base64 decoder works with the macOS base64
+        run: |
+          set -euo pipefail
+          awk '/^_frp_b64d >/{exit} {print}' dist/bootstrap-client.sh >"${RUNNER_TEMP}/b64-prelude.sh"
+          out="$(/bin/bash -c ". '${RUNNER_TEMP}/b64-prelude.sh'; printf 'aGVsbG8=' | _frp_b64d")"
+          if [[ "$out" != "hello" ]]; then
+            echo "bootstrap base64 helper decoded to '${out}'" >&2
+            exit 1
+          fi
+          echo "MACOS_BOOTSTRAP_BASE64=PASS"
+
+      - name: Pinned darwin_arm64 FRP release downloads and runs
+        run: |
+          set -euo pipefail
+          eval "$(grep -E '^FRP_VERSION=|^FRP_SHA256_DARWIN_ARM64=' lib/frp-common.sh)"
+          echo "FRP_CI_VERSION=${FRP_VERSION}"
+          tarball="frp_${FRP_VERSION}_darwin_arm64.tar.gz"
+          curl -fsSL -o "${RUNNER_TEMP}/${tarball}" \
+            "https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/${tarball}"
+          echo "${FRP_SHA256_DARWIN_ARM64}  ${RUNNER_TEMP}/${tarball}" | shasum -a 256 -c -
+          tar -xzf "${RUNNER_TEMP}/${tarball}" -C "${RUNNER_TEMP}"
+          frpc="${RUNNER_TEMP}/frp_${FRP_VERSION}_darwin_arm64/frpc"
+          test -x "$frpc"
+          # A Gatekeeper quarantine flag would make the launchd daemon fail to
+          # start, which is why the installer clears it after extraction.
+          xattr -d com.apple.quarantine "$frpc" 2>/dev/null || true
+          reported="$("$frpc" -v)"
+          echo "FRPC_REPORTED_VERSION=${reported}"
+          case "$reported" in
+            *"${FRP_VERSION}"*) ;;
+            *)
+              echo "frpc reports '${reported}', expected ${FRP_VERSION}" >&2
+              exit 1
+              ;;
+          esac
+          file "$frpc" | grep -q 'arm64' || { echo "frpc is not an arm64 binary" >&2; exit 1; }
+          echo "FRP_DARWIN_ARM64_PIN=PASS"
+
+      # plutil is the same parser launchd uses, so this is stronger than the
+      # plistlib check the portable test can do on Linux.
+      - name: Rendered LaunchDaemon plist passes plutil
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/plist-root"
+          mkdir -p "$root"
+          out="${RUNNER_TEMP}/rendered.plist"
+          FRP_CLIENT_TEST_ROOT="$root" /bin/bash -c \
+            ". lib/frp-common.sh && frp_macos_render_plist '${out}'"
+          plutil -lint "$out"
+          plutil -extract Label raw "$out"
+          plutil -extract ProgramArguments raw "$out"
+          plutil -extract KeepAlive raw "$out" >/dev/null
+          plutil -extract RunAtLoad raw "$out" >/dev/null
+          if grep -q '@[A-Z_]\{1,\}@' "$out"; then
+            echo "rendered plist still contains a placeholder" >&2
+            exit 1
+          fi
+          echo "MACOS_LAUNCHD_PLIST_PLUTIL=PASS"
+
+      - name: Machine identity is stable and reveals no hardware UUID
+        run: |
+          set -euo pipefail
+          first="$(/bin/bash -c '. lib/frp-common.sh && frp_macos_machine_id')"
+          second="$(/bin/bash -c '. lib/frp-common.sh && frp_macos_machine_id')"
+          if [[ "$first" != "$second" ]]; then
+            echo "machine id is not stable across invocations" >&2
+            exit 1
+          fi
+          if [[ ! "$first" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "machine id is not a 64-character hex digest: ${first}" >&2
+            exit 1
+          fi
+          uuid="$(ioreg -rd1 -c IOPlatformExpertDevice \
+            | awk -F'"' '/IOPlatformUUID/{print $4}')"
+          if [[ -n "$uuid" && "$first" == *"$uuid"* ]]; then
+            echo "machine id leaks the raw IOPlatformUUID" >&2
+            exit 1
+          fi
+          echo "MACOS_MACHINE_ID_STABLE=PASS"
+
+      - name: Bundles rebuild identically on macOS
+        run: |
+          set -euo pipefail
+          python3 scripts/build-bundles.py
+          git diff --exit-code dist/
+          echo "MACOS_BUNDLE_PARITY=PASS"

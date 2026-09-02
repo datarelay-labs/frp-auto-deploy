@@ -176,8 +176,10 @@ import base64, re, sys
 from pathlib import Path
 bundle, rel, dest = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
 text = bundle.read_text()
+# The client bundle decodes through _frp_b64d so it works with the BSD base64
+# on macOS; the server bundle still calls base64 -d directly.
 pat = re.compile(
-    r"base64 -d >\"\$TMP/" + re.escape(rel) + r"\" <<'B64'\n(.*?)\nB64",
+    r"(?:base64 -d|_frp_b64d) >\"\$TMP/" + re.escape(rel) + r"\" <<'B64'\n(.*?)\nB64",
     re.S,
 )
 match = pat.search(text)
