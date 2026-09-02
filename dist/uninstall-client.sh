@@ -6,9 +6,39 @@ if [[ ${EUID} -ne 0 && -z "${FRP_UNINSTALL_TEST_ROOT:-}" && -z "${FRP_CLIENT_TES
   exit 1
 fi
 
+# macOS support module. Uninstall is deliberately standalone (it must still
+# work after the rest of the software is gone), so a missing module degrades to
+# Linux-only behavior rather than failing.
+_frp_u_here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for _frp_u_macos in \
+  "${_frp_u_here}/lib/frp-macos.sh" \
+  "${_frp_u_here}/frp-macos.sh" \
+  /usr/local/lib/frp-auto-deploy/frp-macos.sh; do
+  if [[ -f "$_frp_u_macos" ]]; then
+    frp_is_darwin() {
+      local raw="${FRP_TEST_UNAME_S:-$(uname -s 2>/dev/null || printf 'Linux')}"
+      [[ "$raw" == Darwin || "$raw" == darwin ]]
+    }
+    frp_command_exists() { command -v "$1" >/dev/null 2>&1; }
+    frp_invoke() { local c="$1"; shift; command "$c" "$@"; }
+    # shellcheck disable=SC1090
+    . "$_frp_u_macos"
+    break
+  fi
+done
+unset _frp_u_macos
+
+frp_u_is_darwin() {
+  declare -F frp_is_darwin >/dev/null 2>&1 || return 1
+  frp_is_darwin
+}
+
 frp_u_path() {
   local p="$1"
   local root="${FRP_UNINSTALL_TEST_ROOT:-${FRP_CLIENT_TEST_ROOT:-}}"
+  if frp_u_is_darwin && declare -F frp_macos_map_path >/dev/null 2>&1; then
+    p="$(frp_macos_map_path "$p")"
+  fi
   if [[ -n "$root" ]]; then
     printf '%s' "${root}${p}"
   else
@@ -116,6 +146,11 @@ frp_u_project_frpc_pids() {
   local cfg bin pid cmdline exe
   cfg="$(frp_u_path /etc/frp/frpc.toml)"
   bin="$(frp_u_path /usr/local/bin/frpc)"
+  if frp_u_is_darwin; then
+    # No /proc on macOS; ps(1) provides the command line for ownership checks.
+    frp_macos_project_frpc_pids
+    return 0
+  fi
   for pid in $(pgrep -x frpc 2>/dev/null || true); do
     [[ -r "/proc/${pid}/cmdline" ]] || continue
     cmdline="$(tr '\0' ' ' <"/proc/${pid}/cmdline" 2>/dev/null || true)"
@@ -144,9 +179,16 @@ frp_u_kill_project_frpc() {
   done < <(frp_u_project_frpc_pids)
 }
 
-if [[ "$SKIP_SYSTEMD" != "1" ]] && command -v systemctl >/dev/null 2>&1; then
-  systemctl stop frpc 2>/dev/null || true
-  systemctl disable frpc 2>/dev/null || true
+if [[ "$SKIP_SYSTEMD" != "1" ]]; then
+  if frp_u_is_darwin; then
+    # Local teardown only: bootout + disable, then the plist itself is removed
+    # with the rest of the managed manifest paths below.
+    frp_macos_launchd_set_enabled disable
+    frp_macos_launchd_bootout
+  elif command -v systemctl >/dev/null 2>&1; then
+    systemctl stop frpc 2>/dev/null || true
+    systemctl disable frpc 2>/dev/null || true
+  fi
 fi
 # Prefer unit stop; never pkill -x frpc globally (unrelated frpc must survive).
 if [[ "$SKIP_SYSTEMD" != "1" ]]; then
@@ -164,11 +206,19 @@ if frp_u_server_present; then
   KEEP_SHARED=1
 fi
 
-declare -A FRP_U_KEEP_LIBS=()
+# Newline-delimited set rather than an associative array: macOS ships bash 3.2,
+# which has no `declare -A`, and this uninstaller runs there too.
+FRP_U_KEEP_LIBS=""
+frp_u_lib_is_kept() {
+  case "${FRP_U_KEEP_LIBS}"$'\n' in
+    *$'\n'"$1"$'\n'*) return 0 ;;
+  esac
+  return 1
+}
 if [[ "$KEEP_SHARED" == "1" && "$CLIENT_MANIFEST_OK" == "1" ]]; then
   while IFS= read -r base; do
     [[ -n "$base" ]] || continue
-    FRP_U_KEEP_LIBS["$base"]=1
+    FRP_U_KEEP_LIBS="${FRP_U_KEEP_LIBS}"$'\n'"${base}"
   done < <(python3 "$PROJECT_FILES_PY" dual-role-shared-libs)
 fi
 
@@ -178,7 +228,7 @@ if [[ "$CLIENT_MANIFEST_OK" == "1" ]]; then
     case "$rel" in
       usr/local/lib/frp-auto-deploy/*)
         base="${rel##*/}"
-        if [[ "$KEEP_SHARED" == "1" && -n "${FRP_U_KEEP_LIBS[$base]:-}" ]]; then
+        if [[ "$KEEP_SHARED" == "1" ]] && frp_u_lib_is_kept "$base"; then
           continue
         fi
         ;;
@@ -294,7 +344,7 @@ if [[ ! -f "$(frp_u_path /etc/frp-auto-deploy/config.json)" ]]; then
   rmdir "$(frp_u_path /etc/frp-auto-deploy)" 2>/dev/null || true
 fi
 
-if [[ "$SKIP_SYSTEMD" != "1" ]] && command -v systemctl >/dev/null 2>&1; then
+if [[ "$SKIP_SYSTEMD" != "1" ]] && ! frp_u_is_darwin && command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload
   systemctl reset-failed 2>/dev/null || true
 fi
