@@ -86,11 +86,34 @@ def _acquire_lock(lease_dir):
     path = Path(lease_dir)
     if path.exists() and path.is_symlink():
         raise LeaseStoreInvalid('LEASE_STORE_INVALID: lease directory is a symlink')
-    path.mkdir(parents=True, exist_ok=True)
-    os.chmod(str(path), 0o700)
-    fd = os.open(_lock_path(lease_dir), os.O_CREAT | os.O_RDWR, LEASE_FILE_MODE)
-    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        os.chmod(str(path), 0o700)
+        fd = os.open(_lock_path(lease_dir), os.O_CREAT | os.O_RDWR, LEASE_FILE_MODE)
+    except OSError as exc:
+        raise LeaseStoreInvalid('LEASE_STORE_INVALID: cannot open lease store lock: %s' % exc) from exc
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except OSError as exc:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise LeaseStoreInvalid('LEASE_STORE_INVALID: cannot acquire lease store lock: %s' % exc) from exc
     return fd
+
+
+def operational_preflight(lease_dir):
+    """Non-destructive lease store readiness check. Does not create lease records."""
+    base = Path(lease_dir)
+    if base.exists() and base.is_symlink():
+        raise LeaseStoreInvalid('LEASE_STORE_INVALID: lease directory is a symlink')
+    fd = None
+    try:
+        fd = _acquire_lock(lease_dir)
+    finally:
+        _release_lock(fd)
+    return True
 
 
 def _release_lock(fd):

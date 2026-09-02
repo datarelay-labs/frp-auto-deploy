@@ -3,9 +3,9 @@
 
 Management request signatures (op=enroll, body-bound) and data-plane proofs
 (purpose=frp-data-plane, client-id-bound) are intentionally separate domains.
-A revoked management identity remains able to prove data-plane authorization
-for existing registry reservations; revoke invalidates management API access
-only, not port reservations or the stored public key used here.
+Revoke invalidates future management API access and future/reconnected NewProxy
+authorization. Existing connected proxies are not force-disconnected; port
+reservations, service records, and audit history remain until explicit release.
 """
 from __future__ import annotations
 
@@ -389,6 +389,9 @@ def authorize_new_proxy(content, registry_state, cfg=None, lease_mod=None):
     client = clients.get(client_id)
     if not isinstance(client, dict):
         return False, 'unknown client'
+
+    if _creg().mgmt_status(client) == 'revoked':
+        return False, 'client management identity is revoked'
 
     pub = client.get('mgmt_pubkey')
     if not pub:

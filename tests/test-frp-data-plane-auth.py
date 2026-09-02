@@ -188,12 +188,23 @@ class Env:
 
     def client_record(self, client_id, services, mgmt_status="enrolled"):
         _key, pub = self.keypair(client_id)
-        return {
+        pem = pub.read_text(encoding="utf-8")
+        rec = {
             "hostname": client_id,
-            "mgmt_pubkey": pub.read_text(encoding="utf-8"),
+            "mgmt_pubkey": pem,
             "mgmt_status": mgmt_status,
             "services": services,
         }
+        if mgmt_status == "enrolled":
+            rec["mgmt_alg"] = MGMT.MGMT_ALG
+            rec["mgmt_fingerprint"] = MGMT.pubkey_fingerprint(pem)
+            rec["mgmt_mac_key"] = MGMT.derive_mac_key("test-enroll-secret", client_id)
+        elif mgmt_status == "revoked":
+            rec["mgmt_mac_key"] = None
+            rec["mgmt_revoked_at"] = "2026-01-01T00:00:00Z"
+            rec["mgmt_alg"] = MGMT.MGMT_ALG
+            rec["mgmt_fingerprint"] = MGMT.pubkey_fingerprint(pem)
+        return rec
 
     def _write_registry(self, state):
         write(self.registry_path, json.dumps(state, indent=2) + "\n")
@@ -450,16 +461,14 @@ def run_unit_tests(env):
     pass_("UNIT_VALID_CLIENT_SERVICE_PORT_ALLOWED")
     env.clear_leases()
 
-    # Revoked management status must not block data-plane proof verification.
-    # Management revoke invalidates enroll/API access only; existing registry
-    # reservations and the stored public key remain authoritative here.
+    # Revoked management identity must block future/reconnected NewProxy authorization.
     revoked_reg = deepcopy(env.load_registry())
     revoked_reg["clients"][client_a]["mgmt_status"] = "revoked"
     LEASES.expire_stale(LEASES.lease_dir_from_cfg(env.cfg))
     allowed, reason = env.authorize(valid, registry_state=revoked_reg)
-    if not allowed:
-        fail("unit_revoked_mgmt_still_allows_proof", reason)
-    pass_("UNIT_REVOKED_MGMT_ALLOWS_DATA_PLANE_PROOF")
+    if allowed or "revoked" not in (reason or "").lower():
+        fail("unit_revoked_mgmt_newproxy", reason)
+    pass_("REVOKED_CLIENT_NEWPROXY_REJECTED")
     env.clear_leases()
 
 
@@ -503,6 +512,17 @@ def run_plugin_http_tests(env):
     if body.get("reject"):
         fail("plugin_server_allow", body)
     pass_("PLUGIN_SERVER_HTTP_ROUNDTRIP")
+
+    revoked_reg = deepcopy(env.load_registry())
+    revoked_reg["clients"][client_a]["mgmt_status"] = "revoked"
+    env.set_registry(revoked_reg)
+    code, payload = env.handle_plugin(content)
+    if code != 200 or not payload.get("reject"):
+        fail("plugin_revoked_client", payload)
+    if "revoked" not in str(payload.get("reject_reason") or "").lower():
+        fail("plugin_revoked_reason", payload)
+    pass_("PLUGIN_REVOKED_NEWPROXY_REJECTED")
+
     env.stop_plugin()
 
 

@@ -28,6 +28,7 @@ LOCK = threading.Lock()
 MAX_CLOCK_SKEW = 300
 MGMT_NONCE_TTL = 900
 MAX_NONCES_PER_CLIENT = 256
+_SERVICE_READY = False
 REGISTRY_SCHEMA_VERSION = 2
 SERVICE_ID_RE = re.compile(r'^[a-z0-9][a-z0-9._-]{0,31}$')
 MAX_SERVICES = 32
@@ -226,6 +227,8 @@ def classify_auth_error(error):
         return 'REVOKED'
     if 'replay' in text:
         return 'REPLAY_REJECTED'
+    if 'nonce capacity' in text:
+        return 'NONCE_CAPACITY_EXCEEDED'
     return 'AUTH_FAILED'
 
 
@@ -1098,13 +1101,9 @@ class Allocator:
         if key in nonces:
             return 'replayed request'
         prefix = machine_id + ':'
-        owned = sorted(
-            ((k, nonces[k]) for k in list(nonces) if k.startswith(prefix)),
-            key=lambda item: item[1],
-        )
-        while len(owned) >= MAX_NONCES_PER_CLIENT:
-            old_key, _exp = owned.pop(0)
-            nonces.pop(old_key, None)
+        owned = [k for k in list(nonces) if k.startswith(prefix)]
+        if len(owned) >= MAX_NONCES_PER_CLIENT:
+            return 'nonce capacity exhausted; retry after earlier nonces expire'
         if os.environ.get('FRP_ALLOCATOR_HOOK_NONCE_PERSIST_FAIL') == '1':
             raise OSError('simulated nonce persist failure')
         nonces[key] = now + MGMT_NONCE_TTL
@@ -1301,10 +1300,12 @@ class Allocator:
             with LOCK:
                 with self.registry_lock():
                     now_iso = utc_now_iso()
+                    enrollment_already_used = False
                     if not identity_auth:
                         record, enroll_path = self.load_enrollment(enrollment_id)
                         if not record:
                             return 403, api_error('unknown enrollment id', 'AUTH_FAILED')
+                        enrollment_already_used = bool(record.get('used_at'))
                         bound_machine_id = record.get('bound_machine_id')
                         if bound_machine_id and bound_machine_id != machine_id:
                             return 403, api_error(
@@ -1325,6 +1326,40 @@ class Allocator:
                     state = self.load_registry()
                     clients = state.setdefault('clients', {})
                     client = clients.get(machine_id)
+
+                    if record is not None and not identity_auth and enrollment_already_used:
+                        if payload.get('mgmt_pubkey'):
+                            try:
+                                presented_fp = MGMT.pubkey_fingerprint(
+                                    MGMT.canonicalize_pubkey_pem(payload.get('mgmt_pubkey'))
+                                )
+                            except Exception:
+                                return 403, api_error(
+                                    'invalid management public key', 'AUTH_FAILED'
+                                )
+                            bound_fp = str(record.get('bound_mgmt_fingerprint') or '').strip().lower()
+                            if bound_fp and presented_fp != bound_fp:
+                                return 403, api_error(
+                                    'enrollment code was already used; a new Enrollment Code '
+                                    'is required to rotate management identity',
+                                    'AUTH_FAILED',
+                                )
+                            existing = clients.get(machine_id)
+                            if isinstance(existing, dict) and existing.get('mgmt_pubkey'):
+                                try:
+                                    stored_fp = MGMT.pubkey_fingerprint(
+                                        MGMT.canonicalize_pubkey_pem(existing.get('mgmt_pubkey'))
+                                    )
+                                except Exception:
+                                    return 403, api_error(
+                                        'invalid management public key', 'AUTH_FAILED'
+                                    )
+                                if presented_fp != stored_fp:
+                                    return 403, api_error(
+                                        'enrollment code was already used; a new Enrollment Code '
+                                        'is required to rotate management identity',
+                                        'AUTH_FAILED',
+                                    )
 
                     if identity_auth:
                         error, _now, _nonce = self.verify_mgmt_against_client(
@@ -1423,6 +1458,11 @@ class Allocator:
                         )
                         if ident_error:
                             return 400, api_error(ident_error, 'AUTH_FAILED')
+                        if record is not None and enroll_path is not None:
+                            fp = str(client.get('mgmt_fingerprint') or '').strip().lower()
+                            if fp and record.get('bound_mgmt_fingerprint') != fp:
+                                record['bound_mgmt_fingerprint'] = fp
+                                self.save_enrollment(enroll_path, record)
 
                     existing_services = dict(client.get('services') or {})
                     used = self.used_ports(state)
@@ -1565,6 +1605,9 @@ def make_handler(allocator):
             def _handle():
                 path = self._request_path()
                 if path == '/healthz':
+                    if not _SERVICE_READY:
+                        self.send_json(503, {'status': 'starting'})
+                        return
                     self.send_json(200, {'status': 'ok'})
                     return
                 if path == '/time':
@@ -1705,7 +1748,21 @@ def allocator_ssl_context(cfg):
     return context
 
 
+def _infer_test_root_from_cfg(cfg):
+    """Map canonical /run lease paths under temp registry trees in tests."""
+    if os.environ.get('FRP_DEPLOY_TEST_ROOT') or os.environ.get('FRP_SERVER_TEST_ROOT'):
+        return
+    reg = str((cfg or {}).get('registry_file') or '').strip()
+    if not reg:
+        return
+    path = Path(reg).resolve()
+    text = path.as_posix()
+    if '/tmp/' in text or text.startswith('/tmp/') or '/Temp/' in text:
+        os.environ.setdefault('FRP_SERVER_TEST_ROOT', str(path.parent))
+
+
 def main():
+    global _SERVICE_READY
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
     args = parser.parse_args()
@@ -1713,6 +1770,7 @@ def main():
     allocator = Allocator(args.config)
     if SCFG is None:
         raise SystemExit('ERROR: frp_server_config.py is unavailable; refusing to start with unvalidated config')
+    _infer_test_root_from_cfg(allocator.cfg)
     try:
         SCFG.validate_server_config(allocator.cfg)
     except ValueError as exc:
@@ -1745,6 +1803,14 @@ def main():
             if strict:
                 raise SystemExit('ERROR: failed to start data-plane authorizer: %s' % exc) from exc
             print('WARNING: data-plane authorizer not started: %s' % exc, flush=True)
+    lease_mod = _load_lib_module('frp_proxy_leases', 'frp_proxy_leases.py')
+    if lease_mod is None:
+        raise SystemExit('ERROR: frp_proxy_leases.py is unavailable; refusing to start')
+    try:
+        lease_dir = lease_mod.lease_dir_from_cfg(allocator.cfg)
+        lease_mod.operational_preflight(lease_dir)
+    except Exception as exc:
+        raise SystemExit('ERROR: proxy lease store preflight failed: %s' % exc) from exc
     host = allocator.cfg.get('listen_host', '0.0.0.0')
     port = cfg_allocator_listen_port(allocator.cfg)
     if port is None:
@@ -1757,6 +1823,7 @@ def main():
     server = ThreadingHTTPServer((host, port), make_handler(allocator))
     server.socket = context.wrap_socket(server.socket, server_side=True)
     print(f'FRP allocator listening on https://{host}:{port}', flush=True)
+    _SERVICE_READY = True
     if plugin_mod is not None and hasattr(plugin_mod, 'systemd_notify_ready'):
         plugin_mod.systemd_notify_ready()
     server.serve_forever()
