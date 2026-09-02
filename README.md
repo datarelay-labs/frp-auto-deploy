@@ -21,19 +21,23 @@ It solves the operational work around FRP:
 
 | Item | Current |
 | --- | --- |
-| Stable project release | **v2.1.1** |
+| Stable project release | **v2.1.0** |
+| Candidate release | **v2.1.1** (pending independent review / real OCI E2E / release) |
 | Pinned / tested FRP | **v0.70.1** |
 | Default deployment mode | **Direct** |
 | Optional enterprise mode | **single-443** |
-| Stable install source | immutable `v2.1.1` tag |
-| `main` branch | development channel; may contain post-v2.1.1 changes |
+| Stable install source | immutable **v2.1.0** tag |
+| Candidate install source | exact commit SHA only (not a published tag yet) |
+| `main` branch | development channel; may contain post-v2.1.0 changes |
 
-Current project version: **2.1.1**
+Current project version: **2.1.1** (candidate)
 Current pinned FRP version: **v0.70.1**
 
-v2.1.1 is the **current stable release**. Stable installs use the immutable tag.
-Following mutable `main` is explicit opt-in only, for example
-`FRP_RELEASE_CHANNEL=dev`.
+**v2.1.0** is the current stable release on GitHub. **v2.1.1** is a pre-release
+candidate in this tree; it is not tagged or published as stable until independent
+review and real OCI E2E complete. Stable installs use the immutable **v2.1.0** tag.
+Candidate builds require an exact verified commit SHA. Following mutable `main` is
+explicit opt-in only, for example `FRP_RELEASE_CHANNEL=dev`.
 
 On development builds, use release channel, source ref, and verified
 bundle SHA256 to identify the exact build.
@@ -204,13 +208,16 @@ More detail: [docs/DEPLOYMENT_MODES.md](docs/DEPLOYMENT_MODES.md)
 
 # 3. Install the server
 
-For a stable installation, use the immutable v2.1.1 bundle:
+For a stable installation, use the immutable **v2.1.0** bundle:
 
 ```bash
 curl -fsSL \
-  https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.1/dist/bootstrap-server.sh \
+  https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/bootstrap-server.sh \
   | sudo bash
 ```
+
+**v2.1.1 candidate** builds are not published as a GitHub tag yet. Use the
+candidate release channel with an exact verified commit SHA, not a mutable branch.
 
 A fresh interactive install asks for the values in this order:
 
@@ -751,7 +758,7 @@ or free public ports.
 
 ```bash
 curl -fsSL \
-  https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.1/dist/uninstall-client.sh \
+  https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/uninstall-client.sh \
   | sudo bash
 ```
 
@@ -762,7 +769,7 @@ Server uninstall preserves token, CA, configuration, registry, and reservations:
 
 ```bash
 curl -fsSL \
-  https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.1/dist/uninstall-server.sh \
+  https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/uninstall-server.sh \
   | sudo bash
 ```
 
@@ -770,7 +777,7 @@ Destructive purge is for test/decommission scenarios only:
 
 ```bash
 curl -fsSL \
-  https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.1/dist/uninstall-server.sh \
+  https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/uninstall-server.sh \
   | sudo bash -s -- --purge --yes
 ```
 
