@@ -435,6 +435,7 @@ function Invoke-FrpHttpsExchange {
             '--silent', '--show-error',
             '--max-time', ([string]$TimeoutSec),
             '--cacert', $CaPath,
+            '--ssl-no-revoke',
             '-X', $Method.ToUpperInvariant(),
             '-H', 'Content-Type: application/json',
             '-w', '%{http_code}'

@@ -610,7 +610,7 @@ def print_one_line_windows(ticket, ttl, note, public_host, control_public, alloc
         "$env:FRP_BOOTSTRAP_TICKET=__TICKET__;"
         "$env:FRP_ZERO_TOUCH='1';"
         "$env:FRP_PLATFORM='windows';"
-        "& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script;"
+        "& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -ZeroTouch;"
         "$rc=$LASTEXITCODE;"
         "Remove-Item Env:FRP_BOOTSTRAP_TICKET -ErrorAction SilentlyContinue;"
         "if($rc -ne 0){ exit $rc }"
