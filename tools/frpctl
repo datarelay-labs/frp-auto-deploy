@@ -1785,7 +1785,7 @@ frpctl_dispatch_canonical() {
     revoke_enrollment) frpctl_require_server || return 1; frpctl_invoke frp-enrollment-revoke "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("id",""))' "$result")" ;;
     release_client) frpctl_require_server || return 1; frpctl_invoke frp-release-client "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("client",""))' "$result")" $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
     release_service) frpctl_require_server || return 1; frpctl_invoke frp-release-service "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("client",""))' "$result")" "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("service",""))' "$result")" $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
-    update_default) frpctl_update ;;
+    update_default) frpctl_update $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
     update_project)
       extra_args="$(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result")"
       if frpctl_is_client; then
