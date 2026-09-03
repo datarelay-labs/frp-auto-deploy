@@ -113,7 +113,13 @@ frp_systemd_supports_service_hardening || fail "252 should keep hardening"
 frp_write_compatible_systemd_unit \
   "$ROOT/server/frp-port-allocator.service" \
   "$WORKDIR/allocator-252.service"
+grep -q '^RuntimeDirectory=frp-auto-deploy$' "$WORKDIR/allocator-252.service" \
+  || fail "allocator runtime directory missing"
+grep -q '^RuntimeDirectoryMode=0700$' "$WORKDIR/allocator-252.service" \
+  || fail "allocator runtime directory mode missing"
 grep -q '^ProtectSystem=strict' "$WORKDIR/allocator-252.service" || fail "modern unit lost strict"
+grep -q '^ReadWritePaths=/var/lib/frp-auto-deploy /var/log/frp-auto-deploy /run/frp-auto-deploy /etc/frp-auto-deploy /etc/frp$' \
+  "$WORKDIR/allocator-252.service" || fail "allocator writable paths incomplete"
 frp_write_compatible_systemd_unit \
   "$ROOT/server/frp-frontend.service" \
   "$WORKDIR/frontend-252.service"
