@@ -808,4 +808,129 @@ grep -q 'client' "$WORKDIR/miss-set.out" || fail "set missing lists client"
 grep -q 'type: set ?' "$WORKDIR/miss-set.out" || fail "set missing tip"
 pass "SET_CLIENT_MISSING_TARGET_HELP"
 
+# --- Canonical passthrough argv identity (spaces / quotes / wildcards / dashes)
+# Mock tools record exact argv as JSON so space-joined dry-run output cannot mask splits.
+ARGV_BIN="$WORKDIR/argv-bin"
+mkdir -p "$ARGV_BIN"
+write_argv_recorder() {
+  local name="$1"
+  cat >"$ARGV_BIN/$name" <<'EOF'
+#!/usr/bin/env bash
+python3 -c 'import json,sys; print(json.dumps(sys.argv[1:], ensure_ascii=False))' -- "$@"
+EOF
+  chmod +x "$ARGV_BIN/$name"
+}
+write_argv_recorder frp-create-client
+write_argv_recorder frp-project-update
+write_argv_recorder frp-update
+write_argv_recorder frp-clients
+write_argv_recorder frp-enroll-bulk
+write_argv_recorder frp-backup
+write_argv_recorder frp-revoke-client
+write_argv_recorder frp-release-client
+write_argv_recorder frp-release-service
+write_argv_recorder frp-upstream
+write_argv_recorder frp-client
+
+assert_argv_json() {
+  local got="$1" expected="$2" label="$3"
+  python3 - "$got" "$expected" "$label" <<'PY'
+import json, sys
+got = json.loads(sys.argv[1])
+# recorder uses python -c ... -- "$@" so drop the leading "--" sentinel if present
+if got and got[0] == "--":
+    got = got[1:]
+want = json.loads(sys.argv[2])
+label = sys.argv[3]
+if got != want:
+    raise SystemExit("FAIL %s: got %r want %r" % (label, got, want))
+print("PASS", label)
+PY
+}
+
+unset FRP_CTL_DRY_RUN
+unset FRP_CLIENT_TEST_ROOT
+export FRP_CTL_TEST_ROOT="$SERVER"
+export FRP_CTL_BIN_DIR="$ARGV_BIN"
+export FRP_CTL_REPL=1
+
+# Matching files must not be absorbed via unquoted expansion of joined passthrough.
+touch "$WORKDIR/customer-alpha" "$WORKDIR/customer-beta" "$WORKDIR/star-match-a" "$WORKDIR/star-match-b"
+(
+  cd "$WORKDIR"
+  touch customer-alpha customer-beta 'customer-*' star-match-a
+  # Space-preserving label must remain one argv element.
+  out="$("$CTL" create enrollment --label "Customer Seoul Lab")"
+  assert_argv_json "$out" '["--label","Customer Seoul Lab"]' "ARGV_LABEL_SPACES"
+
+  # Literal wildcards must not expand even when cwd has matches.
+  out="$("$CTL" create enrollment --label '*')"
+  assert_argv_json "$out" '["--label","*"]' "ARGV_LITERAL_STAR"
+  out="$("$CTL" create enrollment --label 'customer-*')"
+  assert_argv_json "$out" '["--label","customer-*"]' "ARGV_LITERAL_GLOB"
+
+  # Quotes as literal content, leading dash value, and mixed flags.
+  out="$("$CTL" create enrollment --label "O'Reilly \"Lab\"" --note '--leading-dash')"
+  python3 - "$out" <<'PY'
+import json, sys
+got = json.loads(sys.argv[1])
+if got and got[0] == "--":
+    got = got[1:]
+want = ["--label", "O'Reilly \"Lab\"", "--note", "--leading-dash"]
+if got != want:
+    raise SystemExit("FAIL ARGV_QUOTES_AND_LEADING_DASH: got %r want %r" % (got, want))
+print("PASS ARGV_QUOTES_AND_LEADING_DASH")
+PY
+
+  # update / doctor-adjacent update paths preserve flag identity.
+  out="$("$CTL" update project --check)"
+  assert_argv_json "$out" '["--check"]' "ARGV_UPDATE_PROJECT"
+  out="$("$CTL" update frp --check)"
+  assert_argv_json "$out" '["--check"]' "ARGV_UPDATE_FRP"
+
+  # create enrollment still works with typical multi-flag argv.
+  out="$("$CTL" create enrollment --ssh --ssh-user aella --label dp01)"
+  assert_argv_json "$out" \
+    '["--ssh","--ssh-user","aella","--label","dp01"]' \
+    "ARGV_CREATE_ENROLLMENT_TYPICAL"
+)
+
+# REPL path: quoted label with spaces must preserve identity through tokenize → dispatch.
+export FRP_CTL_DRY_RUN=
+run_repl "$SERVER" "$WORKDIR/argv-repl.out" \
+  'create enrollment --label "Customer Seoul Lab"' \
+  exit || fail "argv repl create enrollment"
+grep -q 'Customer Seoul Lab' "$WORKDIR/argv-repl.out" || fail "argv repl missing label"
+python3 - "$WORKDIR/argv-repl.out" <<'PY'
+import json, re, sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+# Find JSON argv line from the mock recorder.
+m = re.search(r"(\[[^\n]*Customer Seoul Lab[^\n]*\])", text)
+if not m:
+    raise SystemExit("FAIL ARGV_REPL_LABEL_SPACES: no JSON argv in output")
+got = json.loads(m.group(1))
+if got and got[0] == "--":
+    got = got[1:]
+want = ["--label", "Customer Seoul Lab"]
+if got != want:
+    raise SystemExit("FAIL ARGV_REPL_LABEL_SPACES: got %r want %r" % (got, want))
+print("PASS ARGV_REPL_LABEL_SPACES")
+PY
+
+# Shell-expression rejection must remain unchanged (unquoted meta still rejected).
+run_repl "$SERVER" "$WORKDIR/argv-glob-reject.out" 'show clients *' exit || fail "argv glob reject repl"
+grep -qi 'metacharacter\|could not parse' "$WORKDIR/argv-glob-reject.out" \
+  || fail "argv glob rejection weakened"
+run_repl "$SERVER" "$WORKDIR/argv-sub-reject.out" 'show clients $(whoami)' exit || fail "argv subst reject"
+grep -qi 'metacharacter\|could not parse' "$WORKDIR/argv-sub-reject.out" \
+  || fail "argv substitution rejection weakened"
+pass "FRPCTL_ARGV_PRESERVATION"
+pass "FRPCTL_ARGV_NO_GLOB_EXPANSION"
+pass "FRPCTL_ARGV_SHELL_REJECTION_UNCHANGED"
+
+# Restore default bin dir for any follow-on (none); keep suite exit clean.
+export FRP_CTL_BIN_DIR="$ROOT/tools"
+unset FRP_CTL_REPL
+
 echo "FRPCTL_TESTS=PASS"
