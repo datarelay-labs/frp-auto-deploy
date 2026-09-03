@@ -2075,6 +2075,7 @@ frpctl_print_grammar_help() {
 # Load canonical grammar "passthrough" into _FRP_CTL_ARGS as a true argv array.
 # NUL-delimited Python → Bash transport preserves spaces, quotes, wildcards,
 # leading dashes, and empty arguments. Bash 3.2 compatible (no mapfile/nameref).
+# Bash <4.4 + set -u treats "${empty[@]}" as unbound; use ${arr[@]+"${arr[@]}"}.
 _FRP_CTL_ARGS=()
 frpctl_load_passthrough_args() {
   local json="$1"
@@ -2133,19 +2134,19 @@ frpctl_dispatch_canonical() {
   case "$action" in
     show_status)
       frpctl_load_passthrough_args "$result"
-      frpctl_status "${_FRP_CTL_ARGS[@]}"
+      frpctl_status ${_FRP_CTL_ARGS[@]+"${_FRP_CTL_ARGS[@]}"}
       ;;
     show_version) echo; frpctl_print_version; echo ;;
     show_clients)
       frpctl_require_server || return 1
       frpctl_load_passthrough_args "$result"
-      frpctl_invoke frp-clients "${_FRP_CTL_ARGS[@]}"
+      frpctl_invoke frp-clients ${_FRP_CTL_ARGS[@]+"${_FRP_CTL_ARGS[@]}"}
       ;;
     show_fleet) frpctl_require_server || return 1; frpctl_show_fleet ;;
     show_ports)
       frpctl_require_server || return 1
       frpctl_load_passthrough_args "$result"
-      frpctl_show_ports "${_FRP_CTL_ARGS[@]}"
+      frpctl_show_ports ${_FRP_CTL_ARGS[@]+"${_FRP_CTL_ARGS[@]}"}
       ;;
     show_client)
       frpctl_require_server || return 1
@@ -2178,7 +2179,7 @@ frpctl_dispatch_canonical() {
     show_upstream)
       frpctl_require_server || return 1
       frpctl_load_passthrough_args "$result"
-      frpctl_run frp-upstream "${_FRP_CTL_ARGS[@]}"
+      frpctl_run frp-upstream ${_FRP_CTL_ARGS[@]+"${_FRP_CTL_ARGS[@]}"}
       ;;
     show_services) frpctl_require_client || return 1; frpctl_invoke frp-client list ;;
     show_info) frpctl_require_client || return 1; frpctl_invoke frp-client info ;;
@@ -2216,7 +2217,7 @@ frpctl_dispatch_canonical() {
     add_service)
       frpctl_require_client || return 1
       frpctl_load_passthrough_args "$result"
-      frpctl_invoke frp-client add-service "${_FRP_CTL_ARGS[@]}"
+      frpctl_invoke frp-client add-service ${_FRP_CTL_ARGS[@]+"${_FRP_CTL_ARGS[@]}"}
       ;;
     add_client_group)
       frpctl_require_server || return 1
@@ -2249,17 +2250,17 @@ frpctl_dispatch_canonical() {
     create_zero_touch_cli)
       frpctl_require_server || return 1
       frpctl_load_passthrough_args "$result"
-      frpctl_invoke frp-create-client --one-line "${_FRP_CTL_ARGS[@]}"
+      frpctl_invoke frp-create-client --one-line ${_FRP_CTL_ARGS[@]+"${_FRP_CTL_ARGS[@]}"}
       ;;
     create_enrollment)
       frpctl_require_server || return 1
       frpctl_load_passthrough_args "$result"
-      frpctl_invoke frp-create-client "${_FRP_CTL_ARGS[@]}"
+      frpctl_invoke frp-create-client ${_FRP_CTL_ARGS[@]+"${_FRP_CTL_ARGS[@]}"}
       ;;
     create_enrollments)
       frpctl_require_server || return 1
       frpctl_load_passthrough_args "$result"
-      frpctl_invoke frp-enroll-bulk "${_FRP_CTL_ARGS[@]}"
+      frpctl_invoke frp-enroll-bulk ${_FRP_CTL_ARGS[@]+"${_FRP_CTL_ARGS[@]}"}
       ;;
     create_group)
       frpctl_require_server || return 1
@@ -2268,14 +2269,14 @@ frpctl_dispatch_canonical() {
     create_backup)
       frpctl_require_server || return 1
       frpctl_load_passthrough_args "$result"
-      frpctl_run frp-backup "${_FRP_CTL_ARGS[@]}"
+      frpctl_run frp-backup ${_FRP_CTL_ARGS[@]+"${_FRP_CTL_ARGS[@]}"}
       ;;
     revoke_client)
       frpctl_require_server || return 1
       frpctl_load_passthrough_args "$result"
       frpctl_invoke frp-revoke-client \
         "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("client",""))' "$result")" \
-        "${_FRP_CTL_ARGS[@]}"
+        ${_FRP_CTL_ARGS[@]+"${_FRP_CTL_ARGS[@]}"}
       ;;
     revoke_enrollment) frpctl_require_server || return 1; frpctl_invoke frp-enrollment-revoke "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("id",""))' "$result")" ;;
     purge_enrollment) frpctl_require_server || return 1; frpctl_invoke frp-enrollment-purge enrollment "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("id",""))' "$result")" ;;
@@ -2285,7 +2286,7 @@ frpctl_dispatch_canonical() {
       frpctl_load_passthrough_args "$result"
       frpctl_invoke frp-release-client \
         "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("client",""))' "$result")" \
-        "${_FRP_CTL_ARGS[@]}"
+        ${_FRP_CTL_ARGS[@]+"${_FRP_CTL_ARGS[@]}"}
       ;;
     release_service)
       frpctl_require_server || return 1
@@ -2293,20 +2294,20 @@ frpctl_dispatch_canonical() {
       frpctl_invoke frp-release-service \
         "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("client",""))' "$result")" \
         "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("service",""))' "$result")" \
-        "${_FRP_CTL_ARGS[@]}"
+        ${_FRP_CTL_ARGS[@]+"${_FRP_CTL_ARGS[@]}"}
       ;;
     update_default)
       # Preserve flags such as --check from "update --check".
       frpctl_load_passthrough_args "$result"
-      frpctl_update "${_FRP_CTL_ARGS[@]}"
+      frpctl_update ${_FRP_CTL_ARGS[@]+"${_FRP_CTL_ARGS[@]}"}
       ;;
     update_project)
       frpctl_load_passthrough_args "$result"
       if frpctl_is_client; then
-        frpctl_client_update "${_FRP_CTL_ARGS[@]}"
+        frpctl_client_update ${_FRP_CTL_ARGS[@]+"${_FRP_CTL_ARGS[@]}"}
       fi
       if frpctl_is_server; then
-        frpctl_run frp-project-update "${_FRP_CTL_ARGS[@]}"
+        frpctl_run frp-project-update ${_FRP_CTL_ARGS[@]+"${_FRP_CTL_ARGS[@]}"}
       fi
       if ! frpctl_is_client && ! frpctl_is_server; then
         return 1
@@ -2315,7 +2316,7 @@ frpctl_dispatch_canonical() {
     update_frp)
       frpctl_require_server || return 1
       frpctl_load_passthrough_args "$result"
-      frpctl_run frp-update "${_FRP_CTL_ARGS[@]}"
+      frpctl_run frp-update ${_FRP_CTL_ARGS[@]+"${_FRP_CTL_ARGS[@]}"}
       ;;
     restore_backup) frpctl_require_server || return 1; frpctl_run frp-restore "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("path",""))' "$result")" ;;
     client_pause) frpctl_require_client || return 1; frpctl_lifecycle_dispatch pause ;;
@@ -2325,28 +2326,28 @@ frpctl_dispatch_canonical() {
     client_logs)
       frpctl_require_client || return 1
       frpctl_load_passthrough_args "$result"
-      frpctl_lifecycle_dispatch logs "${_FRP_CTL_ARGS[@]}"
+      frpctl_lifecycle_dispatch logs ${_FRP_CTL_ARGS[@]+"${_FRP_CTL_ARGS[@]}"}
       ;;
     client_support_bundle)
       frpctl_require_client || return 1
       frpctl_load_passthrough_args "$result"
-      frpctl_lifecycle_dispatch support-bundle "${_FRP_CTL_ARGS[@]}"
+      frpctl_lifecycle_dispatch support-bundle ${_FRP_CTL_ARGS[@]+"${_FRP_CTL_ARGS[@]}"}
       ;;
     client_uninstall)
       frpctl_require_client || return 1
       frpctl_load_passthrough_args "$result"
-      frpctl_lifecycle_dispatch uninstall "${_FRP_CTL_ARGS[@]}"
+      frpctl_lifecycle_dispatch uninstall ${_FRP_CTL_ARGS[@]+"${_FRP_CTL_ARGS[@]}"}
       ;;
     server_test) frpctl_require_server || return 1; frpctl_server_lifecycle_dispatch test ;;
     server_logs)
       frpctl_require_server || return 1
       frpctl_load_passthrough_args "$result"
-      frpctl_server_lifecycle_dispatch logs "${_FRP_CTL_ARGS[@]}"
+      frpctl_server_lifecycle_dispatch logs ${_FRP_CTL_ARGS[@]+"${_FRP_CTL_ARGS[@]}"}
       ;;
     server_support_bundle)
       frpctl_require_server || return 1
       frpctl_load_passthrough_args "$result"
-      frpctl_server_lifecycle_dispatch support-bundle "${_FRP_CTL_ARGS[@]}"
+      frpctl_server_lifecycle_dispatch support-bundle ${_FRP_CTL_ARGS[@]+"${_FRP_CTL_ARGS[@]}"}
       ;;
     dual_test)
       if frpctl_is_server; then
@@ -2363,24 +2364,24 @@ frpctl_dispatch_canonical() {
       frpctl_load_passthrough_args "$result"
       if frpctl_is_server; then
         echo "=== Server logs ==="
-        frpctl_server_lifecycle_dispatch logs "${_FRP_CTL_ARGS[@]}" || true
+        frpctl_server_lifecycle_dispatch logs ${_FRP_CTL_ARGS[@]+"${_FRP_CTL_ARGS[@]}"} || true
         echo
       fi
       if frpctl_is_client; then
         echo "=== Client logs ==="
-        frpctl_lifecycle_dispatch logs "${_FRP_CTL_ARGS[@]}" || true
+        frpctl_lifecycle_dispatch logs ${_FRP_CTL_ARGS[@]+"${_FRP_CTL_ARGS[@]}"} || true
       fi
       ;;
     dual_support_bundle)
       frpctl_load_passthrough_args "$result"
       if frpctl_is_server; then
         echo "=== Server support bundle ==="
-        frpctl_server_lifecycle_dispatch support-bundle "${_FRP_CTL_ARGS[@]}" || true
+        frpctl_server_lifecycle_dispatch support-bundle ${_FRP_CTL_ARGS[@]+"${_FRP_CTL_ARGS[@]}"} || true
         echo
       fi
       if frpctl_is_client; then
         echo "=== Client support bundle ==="
-        frpctl_lifecycle_dispatch support-bundle "${_FRP_CTL_ARGS[@]}" || true
+        frpctl_lifecycle_dispatch support-bundle ${_FRP_CTL_ARGS[@]+"${_FRP_CTL_ARGS[@]}"} || true
       fi
       ;;
     doctor)
@@ -2389,12 +2390,12 @@ frpctl_dispatch_canonical() {
         return 2
       fi
       frpctl_load_passthrough_args "$result"
-      frp_doctor_main "${_FRP_CTL_ARGS[@]}"
+      frp_doctor_main ${_FRP_CTL_ARGS[@]+"${_FRP_CTL_ARGS[@]}"}
       ;;
     help)
       frpctl_load_passthrough_args "$result"
       if [[ "${FRP_CTL_REPL:-}" == "1" || ${#_FRP_CTL_ARGS[@]} -gt 0 ]]; then
-        frpctl_repl_help "${_FRP_CTL_ARGS[@]}"
+        frpctl_repl_help ${_FRP_CTL_ARGS[@]+"${_FRP_CTL_ARGS[@]}"}
       else
         frpctl_usage
       fi
