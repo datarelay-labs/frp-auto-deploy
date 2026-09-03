@@ -114,7 +114,7 @@ if [[ -d "$etc_frp" ]]; then
     frp_u_rm_file "${etc_frp}/${f}"
   done
   frp_u_safe_rm_rf "${etc_frp}/backups"
-  frp_u_safe_rm_rf "${etc_frp}/client-manage.lock"
+  frp_u_rm_file "${etc_frp}/client-manage.lock"
   if [[ -f "${etc_frp}/server_token" || -f "${etc_frp}/frps.toml" ]]; then
     :
   else
