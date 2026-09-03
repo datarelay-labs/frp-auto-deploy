@@ -205,7 +205,8 @@ JSON
 chmod 0600 "$STATE_LIVE/client-state.json"
 printf 'serverAddr = "203.0.113.10"\n' >"$STATE_LIVE/frpc.toml"
 chmod 0600 "$STATE_LIVE/frpc.toml"
-printf 'PROJECT_VERSION=2.1.1\nFRP_VERSION=0.70.1\n' >"$STATE_LIVE/version"
+# Force an upgrade path (equal version + matching bundle short-circuits before install).
+printf 'PROJECT_VERSION=2.0.0\nFRP_VERSION=0.70.1\n' >"$STATE_LIVE/version"
 
 # Install remaining project files at mapped paths so validate/install have a full tree.
 while IFS=: read -r rel mode src; do
@@ -224,13 +225,20 @@ CTL_BEFORE2="$(cat "$BREW_LIVE/bin/frpctl")"
 COMMON_BEFORE2="$(cat "$(frp_client_path /usr/local/lib/frp-auto-deploy/frp-client-common.sh)")"
 
 export FRP_CLIENT_UPGRADE_HOOK_FAIL=install
-if "$ROOT/tools/frp-client" update --source "$SRC" \
-  >"$WORKDIR/darwin-roll.out" 2>"$WORKDIR/darwin-roll.err"; then
+set +e
+"$ROOT/tools/frp-client" update --source "$SRC" \
+  >"$WORKDIR/darwin-roll.out" 2>"$WORKDIR/darwin-roll.err"
+roll_rc=$?
+set -e
+unset FRP_CLIENT_UPGRADE_HOOK_FAIL
+if [[ "$roll_rc" -eq 0 ]]; then
+  cat "$WORKDIR/darwin-roll.out" "$WORKDIR/darwin-roll.err" >&2 || true
   fail "install hook should fail the update"
 fi
-unset FRP_CLIENT_UPGRADE_HOOK_FAIL
-grep -q 'UPGRADE_ROLLBACK=PASS' "$WORKDIR/darwin-roll.out" "$WORKDIR/darwin-roll.err" \
-  || fail "missing darwin automatic rollback marker"
+if ! grep -q 'UPGRADE_ROLLBACK=PASS' "$WORKDIR/darwin-roll.out" "$WORKDIR/darwin-roll.err"; then
+  cat "$WORKDIR/darwin-roll.out" "$WORKDIR/darwin-roll.err" >&2 || true
+  fail "missing darwin automatic rollback marker"
+fi
 [[ "$(cat "$BREW_LIVE/bin/frpctl")" == "$CTL_BEFORE2" ]] \
   || fail "automatic rollback did not restore mapped frpctl"
 [[ "$(cat "$(frp_client_path /usr/local/lib/frp-auto-deploy/frp-client-common.sh)")" == "$COMMON_BEFORE2" ]] \
