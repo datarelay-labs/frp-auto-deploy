@@ -5,7 +5,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Resolve to a physical path so macOS /var -> /private/var (and /tmp ->
+# /private/tmp) do not trip snapshot symlink-parent refusal under mktemp.
 WORKDIR="$(mktemp -d)"
+WORKDIR="$(cd "$WORKDIR" && pwd -P)"
 trap 'rm -rf "$WORKDIR"' EXIT
 
 pass() { echo "PASS $1"; }
