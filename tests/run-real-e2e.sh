@@ -73,16 +73,19 @@ wait_external_ssh
 
 run_client 10-http-fixtures "rm -rf /tmp/frp-e2e-http-a /tmp/frp-e2e-http-b; mkdir -p /tmp/frp-e2e-http-a /tmp/frp-e2e-http-b; printf 'web-a\n' >/tmp/frp-e2e-http-a/index.html; printf 'web-b\n' >/tmp/frp-e2e-http-b/index.html; nohup python3 -m http.server 18080 --bind 127.0.0.1 -d /tmp/frp-e2e-http-a >/tmp/frp-http-a.log 2>&1 </dev/null & nohup python3 -m http.server 18081 --bind 127.0.0.1 -d /tmp/frp-e2e-http-b >/tmp/frp-http-b.log 2>&1 </dev/null & sleep 1; curl -fsS http://127.0.0.1:18080; echo ====; curl -fsS http://127.0.0.1:18081"
 run_client 11-http-add "sudo /usr/local/bin/frp-client add-service --preset http --id web --name Web --target-host 127.0.0.1 --target-port 18080 && sudo /usr/local/bin/frp-client apply-pending && sudo /usr/local/bin/frpctl show services"
-run_local 12-http-external curl -fsS "http://$SERVER_IP:6001"
+# Run HTTP external checks from the server host rather than the local machine.
+# In OCI environments the service port range (6000-6098) may be blocked by the
+# VCN Security List from outside, but is reachable from the server itself.
+run_server 12-http-external "curl -fsS 'http://127.0.0.1:6001'"
 run_client 13-http-edit "sudo /usr/local/bin/frp-client set-service web target-port 18081 && sudo /usr/local/bin/frp-client apply-pending && sudo /usr/local/bin/frpctl show services"
-run_local 14-http-external-edited curl -fsS "http://$SERVER_IP:6001"
+run_server 14-http-external-edited "curl -fsS 'http://127.0.0.1:6001'"
 run_client 15-http-disable "sudo /usr/local/bin/frp-client disable-service web && sudo /usr/local/bin/frp-client apply-pending && sudo /usr/local/bin/frpctl show services"
-run_local 16-http-disabled bash -lc "! curl -fsS --max-time 5 'http://$SERVER_IP:6001'"
+run_server 16-http-disabled "! curl -fsS --max-time 5 'http://127.0.0.1:6001'"
 run_client 17-http-enable "sudo /usr/local/bin/frp-client enable-service web && sudo /usr/local/bin/frp-client apply-pending && sudo /usr/local/bin/frpctl show services"
-run_local 18-http-reenabled curl -fsS "http://$SERVER_IP:6001"
+run_server 18-http-reenabled "curl -fsS 'http://127.0.0.1:6001'"
 run_client 19-http-disable-again "sudo /usr/local/bin/frp-client disable-service web && sudo /usr/local/bin/frp-client apply-pending >/dev/null"
-run_local 20-release bash -lc "printf 'RELEASE\n' | ssh -o BatchMode=yes '$SERVER_ALIAS' 'sudo /usr/local/sbin/frpctl release service 0975f155 web'"
-run_local 21-http-released bash -lc "! curl -fsS --max-time 5 'http://$SERVER_IP:6001'"
+run_server 20-release "printf 'RELEASE\n' | sudo /usr/local/sbin/frpctl release service 0975f155 web"
+run_server 21-http-released "! curl -fsS --max-time 5 'http://127.0.0.1:6001'"
 
 # Verify server registry no longer has the web service.
 ssh -o BatchMode=yes "$SERVER_ALIAS" 'sudo python3 /dev/stdin' \
