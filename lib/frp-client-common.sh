@@ -37,6 +37,11 @@ fi
 
 frp_client_path() {
   local p="$1"
+  # Canonical Linux FHS paths are rewritten onto the platform layout first
+  # (identity on Linux), then optionally remapped under a test root.
+  if declare -F frp_platform_map_path >/dev/null 2>&1; then
+    p="$(frp_platform_map_path "$p")"
+  fi
   if [[ -n "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
     printf '%s' "${FRP_CLIENT_TEST_ROOT}${p}"
   else
@@ -2560,7 +2565,7 @@ PY
         ;;
     esac
   fi
-  request="$(python3 - "$machine_id" "$hostname_value" "$services_file" "$pubkey_pem" <<'PY'
+  request="$(python3 - "$machine_id" "$hostname_value" "$services_file" "$pubkey_pem" "$(frp_client_version_file)" <<'PY'
 import json, os, sys
 from pathlib import Path
 raw=json.loads(Path(sys.argv[3]).read_text(encoding='utf-8'))
@@ -2600,8 +2605,9 @@ if pub:
 op_id=os.environ.get('FRP_CLIENT_OPERATION_ID','').strip()
 if op_id:
     payload['operation_id']=op_id
-root=os.environ.get('FRP_CLIENT_TEST_ROOT') or os.environ.get('FRP_DEPLOY_TEST_ROOT') or ''
-ver_path=Path(root + '/etc/frp-auto-deploy/version') if root else Path('/etc/frp-auto-deploy/version')
+# Prefer the platform-mapped version path from bash so macOS reads state/version
+# rather than the Linux FHS location.
+ver_path=Path(sys.argv[5]) if len(sys.argv) > 5 and sys.argv[5] else Path('/etc/frp-auto-deploy/version')
 if ver_path.is_file():
     meta={}
     for line in ver_path.read_text(encoding='utf-8').splitlines():

@@ -53,6 +53,11 @@ frp_doctor_fs() {
   local p="$1"
   local root
   root="$(frp_doctor_root)"
+  # Canonical Linux FHS paths are rewritten onto the platform layout first
+  # (identity on Linux), then optionally remapped under a test root.
+  if declare -F frp_platform_map_path >/dev/null 2>&1; then
+    p="$(frp_platform_map_path "$p")"
+  fi
   if [[ -n "$root" ]]; then
     printf '%s' "${root}${p}"
   else

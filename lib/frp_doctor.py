@@ -16,6 +16,7 @@ import hashlib
 import http.client
 import json
 import os
+import platform
 import re
 import shutil
 import socket
@@ -192,14 +193,68 @@ def openssl_bin():
     return shutil.which('openssl')
 
 
+def _is_darwin():
+    return (os.environ.get('FRP_TEST_UNAME_S') or platform.system()) == 'Darwin'
+
+
+def _macos_state_root():
+    return (
+        os.environ.get('FRP_MACOS_STATE_ROOT')
+        or '/Library/Application Support/frp-auto-deploy'
+    )
+
+
+def _macos_brew_prefix():
+    return os.environ.get('FRP_MACOS_PREFIX') or '/usr/local'
+
+
+def _macos_map_path(absolute):
+    """Mirror of frp_macos_map_path for doctor filesystem probes."""
+    state = _macos_state_root()
+    text = str(absolute)
+    if text in ('/etc/frp', '/etc/frp-auto-deploy'):
+        return state
+    if text.startswith('/etc/frp/'):
+        return state + '/' + text[len('/etc/frp/'):]
+    if text.startswith('/etc/frp-auto-deploy/'):
+        return state + '/' + text[len('/etc/frp-auto-deploy/'):]
+    if text == '/var/lib/frp-auto-deploy':
+        return state + '/state'
+    if text.startswith('/var/lib/frp-auto-deploy/'):
+        return state + '/state/' + text[len('/var/lib/frp-auto-deploy/'):]
+    if text == '/etc/systemd/system/frpc.service':
+        label = os.environ.get('FRP_MACOS_LAUNCHD_LABEL') or 'com.datarelay.frp-auto-deploy.frpc'
+        return '/Library/LaunchDaemons/%s.plist' % label
+    if text == '/usr/local/lib/frp-auto-deploy':
+        return state + '/lib'
+    if text.startswith('/usr/local/lib/frp-auto-deploy/'):
+        return state + '/lib/' + text[len('/usr/local/lib/frp-auto-deploy/'):]
+    if text == '/usr/local/bin/frpc':
+        return state + '/bin/frpc'
+    prefix = _macos_brew_prefix()
+    if text.startswith('/usr/local/bin/'):
+        return prefix + '/bin/' + text[len('/usr/local/bin/'):]
+    if text.startswith('/usr/local/sbin/'):
+        return prefix + '/sbin/' + text[len('/usr/local/sbin/'):]
+    return text
+
+
+def _platform_map_path(absolute):
+    text = str(absolute)
+    if _is_darwin():
+        return _macos_map_path(text)
+    return text
+
+
 class Paths(object):
     def __init__(self, root):
         self.root = str(root or '')
 
     def p(self, abs_path):
+        mapped = _platform_map_path(abs_path)
         if self.root:
-            return Path(self.root + abs_path)
-        return Path(abs_path)
+            return Path(self.root + mapped)
+        return Path(mapped)
 
     def exists(self, abs_path):
         return self.p(abs_path).exists()

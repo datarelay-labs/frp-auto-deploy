@@ -11,6 +11,11 @@ _FRP_CTL_RC=0
 frpctl_path() {
   local p="$1"
   local root="${FRP_CTL_TEST_ROOT:-${FRP_CLIENT_TEST_ROOT:-${FRP_DEPLOY_TEST_ROOT:-${FRP_UPDATE_ROOT:-}}}}"
+  # Canonical Linux FHS paths are rewritten onto the platform layout first
+  # (identity on Linux), then optionally remapped under a test root.
+  if declare -F frp_platform_map_path >/dev/null 2>&1; then
+    p="$(frp_platform_map_path "$p")"
+  fi
   if [[ -n "$root" ]]; then
     printf '%s' "${root}${p}"
   else
@@ -23,6 +28,12 @@ frpctl_path() {
 frpctl_installed_libdir() {
   local cand
   cand="$(frpctl_path /usr/local/lib/frp-auto-deploy)"
+  if [[ -d "$cand" ]]; then
+    printf '%s' "$cand"
+    return 0
+  fi
+  # Production macOS layout before frp_platform_map_path is available.
+  cand="${FRP_MACOS_STATE_ROOT:-/Library/Application Support/frp-auto-deploy}/lib"
   if [[ -d "$cand" ]]; then
     printf '%s' "$cand"
     return 0

@@ -67,7 +67,8 @@ jobs:
           for t in tests/test-macos-detection.sh \
                    tests/test-macos-frp-pin.sh \
                    tests/test-macos-launchd-plist.sh \
-                   tests/test-macos-zero-touch-command.sh; do
+                   tests/test-macos-zero-touch-command.sh \
+                   tests/test-macos-path-integration.sh; do
             echo "=== system bash: ${t} ==="
             bash "$t"
           done
