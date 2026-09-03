@@ -19,6 +19,7 @@ MANDATORY=(
   tests/test-allocator-runtime-restart.sh
   tests/test-server-snapshot-restore-validation.py
   tests/test-zero-touch-recovery-journal.sh
+  tests/test-stale-helper-precedence.sh
   tests/test-run-all-security-coverage.sh
 )
 

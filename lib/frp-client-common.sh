@@ -520,68 +520,87 @@ frp_allocator_curl() {
   curl --silent --show-error --cacert "$dest" "$@"
 }
 
-frp_mgmt_auth_py() {
+# Resolve a client Python helper coherent with the executing bootstrap/common
+# tree. Prefer the helper shipped next to the currently sourced
+# frp-client-common.sh over an arbitrary previously-installed copy under
+# /usr/local/lib/frp-auto-deploy (or FRP_CLIENT_TEST_ROOT).
+#
+# Priority:
+#   1) explicit override path (when provided and present)
+#   2) sibling of the executing frp-client-common.sh (_FRP_CLIENT_COMMON_DIR)
+#   3) sibling of FRP_CLIENT_LIB when that points at a common.sh file
+#   4) BASH_SOURCE sibling / ../lib (bundle/source layouts)
+#   5) installed fallback via frp_client_lib_dir()
+#   6) absolute /usr/local/lib/frp-auto-deploy fallback
+#
+# When frp-client-common.sh itself is already installed under
+# /usr/local/lib/frp-auto-deploy, its sibling helper IS the installed current
+# helper — no special case required.
+frp_client_coherent_helper_py() {
+  local name="$1"
+  local override="${2:-}"
   local cand libdir here
-  if [[ -n "${FRP_MGMT_AUTH_PY:-}" && -f "${FRP_MGMT_AUTH_PY}" ]]; then
-    printf '%s' "$FRP_MGMT_AUTH_PY"
+
+  if [[ -n "$override" && -f "$override" ]]; then
+    printf '%s' "$override"
     return 0
   fi
-  libdir="$(frp_client_lib_dir)"
-  for cand in \
-    "${libdir}/frp_mgmt_auth.py" \
-    "${FRP_CLIENT_LIB:-}/frp_mgmt_auth.py"
-  do
-    if [[ -f "$cand" ]]; then
-      printf '%s' "$cand"
-      return 0
-    fi
-  done
-  if [[ -n "${FRP_CLIENT_LIB:-}" && -f "${FRP_CLIENT_LIB}" ]]; then
-    cand="$(dirname "$FRP_CLIENT_LIB")/frp_mgmt_auth.py"
+
+  if [[ -n "${_FRP_CLIENT_COMMON_DIR:-}" ]]; then
+    cand="${_FRP_CLIENT_COMMON_DIR}/${name}"
     if [[ -f "$cand" ]]; then
       printf '%s' "$cand"
       return 0
     fi
   fi
+
+  if [[ -n "${FRP_CLIENT_LIB:-}" && -f "${FRP_CLIENT_LIB}" ]]; then
+    cand="$(dirname "$FRP_CLIENT_LIB")/${name}"
+    if [[ -f "$cand" ]]; then
+      printf '%s' "$cand"
+      return 0
+    fi
+  fi
+
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   for cand in \
-    "$here/frp_mgmt_auth.py" \
-    "$here/../lib/frp_mgmt_auth.py" \
-    /usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py
+    "${here}/${name}" \
+    "${here}/../lib/${name}"
   do
     if [[ -f "$cand" ]]; then
       printf '%s' "$cand"
       return 0
     fi
   done
+
+  libdir="$(frp_client_lib_dir)"
+  cand="${libdir}/${name}"
+  if [[ -f "$cand" ]]; then
+    printf '%s' "$cand"
+    return 0
+  fi
+
+  cand="/usr/local/lib/frp-auto-deploy/${name}"
+  if [[ -f "$cand" ]]; then
+    printf '%s' "$cand"
+    return 0
+  fi
+
+  return 1
+}
+
+frp_mgmt_auth_py() {
+  local cand
+  if cand="$(frp_client_coherent_helper_py frp_mgmt_auth.py "${FRP_MGMT_AUTH_PY:-}")"; then
+    printf '%s' "$cand"
+    return 0
+  fi
   echo "ERROR: missing frp_mgmt_auth.py" >&2
   return 1
 }
 
 frp_clock_sync_py() {
-  local cand libdir here
-  libdir="$(frp_client_lib_dir)"
-  for cand in \
-    "${libdir}/frp_clock_sync.py" \
-    "${FRP_CLIENT_LIB:-}/frp_clock_sync.py"
-  do
-    if [[ -f "$cand" ]]; then
-      printf '%s' "$cand"
-      return 0
-    fi
-  done
-  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  for cand in \
-    "$here/frp_clock_sync.py" \
-    "$here/../lib/frp_clock_sync.py" \
-    /usr/local/lib/frp-auto-deploy/frp_clock_sync.py
-  do
-    if [[ -f "$cand" ]]; then
-      printf '%s' "$cand"
-      return 0
-    fi
-  done
-  return 1
+  frp_client_coherent_helper_py frp_clock_sync.py "${FRP_CLOCK_SYNC_PY:-}"
 }
 
 frp_management_timestamp() {
@@ -2850,13 +2869,92 @@ PY
   fi
 }
 
+# Secret-safe helper/OpenSSL stderr for token decrypt failures.
+# Never echoes enrollment secrets, FRP tokens, ciphertext, or private keys.
+frp_token_decrypt_safe_diag() {
+  local err_file="$1"
+  local secret="${2:-}"
+  local text=""
+  [[ -f "$err_file" ]] || return 0
+  text="$(cat "$err_file" 2>/dev/null || true)"
+  [[ -n "$text" ]] || return 0
+  # Drop env-style secret material and any occurrence of the live secret value.
+  text="$(printf '%s' "$text" | sed -E \
+    -e '/FRP_ENROLL_SECRET=/Id' \
+    -e '/MGMT_ENROLL_SECRET=/Id' \
+    -e '/BEGIN (EC |RSA |OPENSSH )?PRIVATE KEY/Id' \
+    -e '/END (EC |RSA |OPENSSH )?PRIVATE KEY/Id')"
+  if [[ -n "$secret" ]]; then
+    text="${text//"$secret"/[redacted]}"
+  fi
+  # Collapse very long opaque blobs (ciphertext / tokens) without printing them.
+  text="$(TEXT_IN="$text" python3 - <<'PY'
+import os, re
+text = os.environ.get('TEXT_IN', '')
+text = re.sub(r'[A-Za-z0-9+/=_-]{48,}', '[redacted-blob]', text)
+lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+print('\n'.join(lines[:6]))
+PY
+)"
+  [[ -n "$text" ]] || return 0
+  printf '%s\n' "$text" >&2
+}
+
 frp_decrypt_token() {
   local ciphertext="$1" secret="$2"
-  local token py
-  py="$(frp_mgmt_auth_py)"
-  token="$(printf '%s' "$ciphertext" | FRP_ENROLL_SECRET="$secret" python3 "$py" decrypt-token 2>/dev/null || true)"
+  local token py err_file rc=0 safe_ct=""
+  local lowered=""
+
+  if [[ -z "$ciphertext" ]]; then
+    echo "ERROR: FRP token ciphertext is missing or empty" >&2
+    frp_emit_failure_class TOKEN_CIPHERTEXT_INVALID
+    return 1
+  fi
+
+  if ! py="$(frp_mgmt_auth_py)"; then
+    echo "ERROR: FRP token decrypt helper is missing or unusable" >&2
+    frp_emit_failure_class TOKEN_DECRYPT_HELPER_UNUSABLE
+    return 1
+  fi
+  if [[ ! -f "$py" || ! -r "$py" ]]; then
+    echo "ERROR: FRP token decrypt helper is missing or unusable (${py})" >&2
+    frp_emit_failure_class TOKEN_DECRYPT_HELPER_UNUSABLE
+    return 1
+  fi
+
+  # Reject obviously malformed ciphertext before invoking crypto (no secrets logged).
+  safe_ct="$(printf '%s' "$ciphertext" | tr -d '[:space:]')"
+  if [[ ${#safe_ct} -lt 16 ]] || ! printf '%s' "$safe_ct" | grep -Eq '^[A-Za-z0-9+/=]+$'; then
+    echo "ERROR: FRP token ciphertext is invalid or malformed" >&2
+    frp_emit_failure_class TOKEN_CIPHERTEXT_INVALID
+    return 1
+  fi
+
+  err_file="$(mktemp)"
+  # Pass secret only via the helper process environment; never print that env.
+  token="$(printf '%s' "$ciphertext" | FRP_ENROLL_SECRET="$secret" python3 "$py" decrypt-token 2>"$err_file")" || rc=$?
+
+  if [[ "$rc" -ne 0 ]]; then
+    lowered="$(tr '[:upper:]' '[:lower:]' <"$err_file" 2>/dev/null || true)"
+    if [[ "$lowered" == *'invalid token ciphertext'* || "$lowered" == *'incorrect padding'* \
+      || "$lowered" == *'binascii'* || "$lowered" == *'invalid base64'* ]]; then
+      echo "ERROR: FRP token ciphertext is invalid or malformed" >&2
+      frp_token_decrypt_safe_diag "$err_file" "$secret"
+      rm -f "$err_file"
+      frp_emit_failure_class TOKEN_CIPHERTEXT_INVALID
+      return 1
+    fi
+    echo "ERROR: FRP token decrypt helper exited with status ${rc}" >&2
+    frp_token_decrypt_safe_diag "$err_file" "$secret"
+    rm -f "$err_file"
+    frp_emit_failure_class TOKEN_DECRYPT_FAILED
+    return 1
+  fi
+  rm -f "$err_file"
+
   if [[ -z "$token" ]]; then
-    echo "ERROR: failed to decrypt FRP token" >&2
+    echo "ERROR: FRP token decrypt produced an empty result" >&2
+    frp_emit_failure_class TOKEN_DECRYPT_EMPTY
     return 1
   fi
   printf '%s' "$token"

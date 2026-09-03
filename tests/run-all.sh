@@ -42,6 +42,7 @@ MANDATORY_SECURITY_TESTS=(
   tests/test-allocator-runtime-restart.sh
   tests/test-server-snapshot-restore-validation.py
   tests/test-zero-touch-recovery-journal.sh
+  tests/test-stale-helper-precedence.sh
   tests/test-run-all-security-coverage.sh
 )
 for _sec in "${MANDATORY_SECURITY_TESTS[@]}"; do
@@ -66,6 +67,7 @@ python3 tests/test-mgmt-identity.py
 ./tests/test-create-client.sh
 ./tests/test-zero-touch-bootstrap.sh
 ./tests/test-zero-touch-recovery-journal.sh
+./tests/test-stale-helper-precedence.sh
 ./tests/test-sourced-client-errexit.sh
 ./tests/test-ssh-explicit-user.sh
 ./tests/test-passive-online.sh
