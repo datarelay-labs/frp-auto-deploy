@@ -3795,7 +3795,7 @@ frp_client_upgrade_validate_staged() {
 
 frp_client_upgrade_backup_tools() {
   local source="${1:-${_FRP_CLIENT_UPGRADE_SOURCE:-}}"
-  local stamp dest live rel mode src backup_rel py
+  local stamp dest py live_map kind rel mode extra_id live
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
   dest="$(frp_client_upgrade_backup_root)/${stamp}"
   mkdir -p "$dest/files" "$dest/extras"
@@ -3806,66 +3806,97 @@ frp_client_upgrade_backup_tools() {
     echo "ERROR: frp_project_files.py is unavailable" >&2
     return 1
   }
-  # Build a self-describing snapshot: destinations come from the update source
-  # only while creating the snapshot; restore/verify never consult a source.
-  python3 - "$py" "$dest" "$source" <<'PY' || return 1
-import json, os, shutil, sys
+  # Resolve every canonical destination through frp_client_path (platform map +
+  # optional test root) so snapshot present/absent matches install/restore.
+  # Metadata still records canonical dest identity; only the live probe path
+  # is platform-mapped. Do not reimplement Darwin mapping in this Python.
+  live_map="$(mktemp)"
+  while IFS=$'\t' read -r kind rel mode extra_id; do
+    [[ -n "$kind" && -n "$rel" ]] || continue
+    live="$(frp_client_path "/${rel}")"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$kind" "$rel" "$mode" "${extra_id:-}" "$live" >>"$live_map"
+  done < <(
+    python3 - "$py" "$source" <<'PY'
+import sys
 from pathlib import Path
 
-py_path, dest_s, source = sys.argv[1:4]
+py_path, source = sys.argv[1:3]
 sys.path.insert(0, str(Path(py_path).resolve().parent))
 import frp_project_files as pf
 
-dest = Path(dest_s)
-root = Path(os.environ.get("FRP_CLIENT_TEST_ROOT") or "/")
-files = []
 for line in pf.client_project_destination_lines(source):
     rel, mode, _src = line.split(":", 2)
     rel = pf.validate_client_upgrade_dest(rel)
     mode = pf._normalize_mode(mode)
-    live = root / rel
-    if live.is_file() and not live.is_symlink():
-        backup_rel = "files/%s" % rel
-        target = dest / backup_rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(str(live), str(target))
-        os.chmod(target, int(mode, 8))
-        files.append({"dest": rel, "mode": mode, "state": "present", "backup": backup_rel})
-    else:
-        files.append({"dest": rel, "mode": mode, "state": "absent", "backup": None})
-
-extras = []
+    print("file\t%s\t%s\t" % (rel, mode))
 for extra_id, (extra_dest, default_mode) in pf.CLIENT_UPGRADE_EXTRA_ALLOWED.items():
+    rel = pf.validate_client_upgrade_dest(extra_dest, allow_extras=True)
     mode = pf._normalize_mode(default_mode)
-    live = root / extra_dest
-    if live.is_file() and not live.is_symlink():
-        backup_rel = "extras/%s" % extra_id
-        target = dest / backup_rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(str(live), str(target))
-        os.chmod(target, int(mode, 8))
-        extras.append(
-            {
-                "id": extra_id,
-                "dest": extra_dest,
+    print("extra\t%s\t%s\t%s" % (rel, mode, extra_id))
+PY
+  )
+  # Build a self-describing snapshot: destinations come from the update source
+  # only while creating the snapshot; restore/verify never consult a source.
+  if ! python3 - "$py" "$dest" "$live_map" <<'PY'
+import os, shutil, sys
+from pathlib import Path
+
+py_path, dest_s, live_map_s = sys.argv[1:4]
+sys.path.insert(0, str(Path(py_path).resolve().parent))
+import frp_project_files as pf
+
+dest = Path(dest_s)
+files = []
+extras = []
+with open(live_map_s, encoding="utf-8") as fh:
+    for raw in fh:
+        line = raw.rstrip("\n")
+        if not line:
+            continue
+        kind, rel, mode, extra_id, live_s = line.split("\t", 4)
+        rel = pf.validate_client_upgrade_dest(rel, allow_extras=(kind == "extra"))
+        mode = pf._normalize_mode(mode)
+        live = Path(live_s)
+        if live.is_file() and not live.is_symlink():
+            if kind == "file":
+                backup_rel = "files/%s" % rel
+            else:
+                backup_rel = "extras/%s" % extra_id
+            target = dest / backup_rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(str(live), str(target))
+            os.chmod(target, int(mode, 8))
+            entry = {
+                "dest": rel,
                 "mode": mode,
                 "state": "present",
                 "backup": backup_rel,
             }
-        )
-    else:
-        extras.append(
-            {
-                "id": extra_id,
-                "dest": extra_dest,
+            if kind == "extra":
+                entry["id"] = extra_id
+                extras.append(entry)
+            else:
+                files.append(entry)
+        else:
+            entry = {
+                "dest": rel,
                 "mode": mode,
                 "state": "absent",
                 "backup": None,
             }
-        )
+            if kind == "extra":
+                entry["id"] = extra_id
+                extras.append(entry)
+            else:
+                files.append(entry)
 
 pf.write_client_upgrade_snapshot_metadata(dest, files, extras)
 PY
+  then
+    rm -f "$live_map"
+    return 1
+  fi
+  rm -f "$live_map"
   # Pin a trusted recovery parser into the snapshot so restore works even when
   # the live tree never had frp_project_files.py (legacy clients) and must not
   # consult the candidate --source tree.

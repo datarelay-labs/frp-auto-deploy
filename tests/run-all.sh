@@ -45,6 +45,7 @@ MANDATORY_SECURITY_TESTS=(
   tests/test-macos-frp-pin.sh
   tests/test-macos-zero-touch-command.sh
   tests/test-macos-path-integration.sh
+  tests/test-macos-update-rollback.sh
   tests/test-run-all-security-coverage.sh
 )
 for _sec in "${MANDATORY_SECURITY_TESTS[@]}"; do
@@ -159,6 +160,7 @@ python3 tests/test-server-snapshot-restore-validation.py
 ./tests/test-macos-launchd-plist.sh
 ./tests/test-macos-zero-touch-command.sh
 ./tests/test-macos-path-integration.sh
+./tests/test-macos-update-rollback.sh
 
 ./tests/test-run-all-security-coverage.sh
 
