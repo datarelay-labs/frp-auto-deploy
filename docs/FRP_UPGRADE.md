@@ -129,7 +129,12 @@ from `PROJECT_VERSION` alone:
 
 - installed version **less than** candidate → update available
 - installed version **greater than** candidate → downgrade refused
-- same version and installed bundle SHA **equals** the SHA256SUMS digest → not needed
+- same version, same verified bundle SHA, same release channel, and same
+  source ref → not needed
+- same version and same verified bundle SHA, but channel or source ref
+  differs (for example a new candidate commit SHA, or candidate → stable)
+  → **identity refresh** (update version metadata and managed installer URLs;
+  do not reinstall identical server project files or restart services)
 - same version and SHA differs, or installed SHA is unknown while the target
   SHA was externally verified → update available
 

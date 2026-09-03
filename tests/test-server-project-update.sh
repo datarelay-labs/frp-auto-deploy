@@ -703,6 +703,130 @@ print(json.loads(Path(sys.argv[1]).read_text())["client_installer_url"])
 PY
 }
 
+windows_installer_url() {
+  python3 - "$1/etc/frp-auto-deploy/config.json" <<'PY'
+import json, sys
+from pathlib import Path
+print(json.loads(Path(sys.argv[1]).read_text()).get("windows_client_installer_url") or "")
+PY
+}
+
+# Same version + same bundle + different candidate SHA → identity refresh only.
+CAND_OLD_SHA=0f11ed1f628dff40eede0788d66d21141440a19c
+CAND_NEW_SHA=fce4c866d5e8451b1aae7f71cac8f2cf929944c1
+run_candidate() {
+  local tree="$1" ref="$2"
+  shift 2
+  env FRP_SERVER_TEST_ROOT="$tree" FRP_BUNDLE_SHA256="$OCI_CANDIDATE_SHA" \
+    FRP_AUDIT_LOG="$tree/var/log/frp-auto-deploy/audit.jsonl" \
+    FRP_RELEASE_CHANNEL=candidate \
+    FRP_SOURCE_REF="$ref" \
+    "$UPDATE" --source "$ROOT" "$@"
+}
+
+IDREF="$WORKDIR/cand-id-refresh"
+setup_tree "$IDREF"
+OLD_CAND_URL="https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/${CAND_OLD_SHA}/dist/bootstrap-client.sh"
+NEW_CAND_URL="https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/${CAND_NEW_SHA}/dist/bootstrap-client.sh"
+OLD_CAND_WIN_URL="https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/${CAND_OLD_SHA}/dist/bootstrap-client.ps1"
+NEW_CAND_WIN_URL="https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/${CAND_NEW_SHA}/dist/bootstrap-client.ps1"
+python3 - "$IDREF/etc/frp-auto-deploy/config.json" "$OLD_CAND_URL" "$OLD_CAND_WIN_URL" <<'PY'
+import json, sys
+from pathlib import Path
+p = Path(sys.argv[1])
+d = json.loads(p.read_text())
+d["client_installer_url"] = sys.argv[2]
+d["windows_client_installer_url"] = sys.argv[3]
+p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
+PY
+write_identity "$IDREF" "$PROJECT_VERSION" candidate "$CAND_OLD_SHA" "$OCI_CANDIDATE_SHA"
+IDREF_ALLOC="$(sha "$IDREF/usr/local/lib/frp-auto-deploy/frp-port-allocator.py")"
+IDREF_FRP="$(sha "$IDREF/usr/local/bin/frps")"
+IDREF_TOKEN="$(sha "$IDREF/etc/frp/server_token")"
+IDREF_REG="$(sha "$IDREF/var/lib/frp-auto-deploy/registry.json")"
+IDREF_CA="$(sha "$IDREF/etc/frp-auto-deploy/pki/ca.crt")"
+mkdir -p "$IDREF/var/log/frp-auto-deploy"
+
+run_candidate "$IDREF" "$CAND_NEW_SHA" --check >"$WORKDIR/idref-check.out" || fail "candidate identity --check"
+grep -q "Installed source ref      : ${CAND_OLD_SHA}" "$WORKDIR/idref-check.out" || fail "check old ref"
+grep -q "Target source ref         : ${CAND_NEW_SHA}" "$WORKDIR/idref-check.out" || fail "check new ref"
+grep -q "Installed bundle SHA256   : ${OCI_CANDIDATE_SHA}" "$WORKDIR/idref-check.out" || fail "check installed bundle"
+grep -q "Target bundle SHA256      : ${OCI_CANDIDATE_SHA}" "$WORKDIR/idref-check.out" || fail "check target bundle"
+grep -q 'Update                    : identity refresh' "$WORKDIR/idref-check.out" || fail "check should be identity refresh"
+grep -q 'State mutation             : NO' "$WORKDIR/idref-check.out" || fail "check mutation flag"
+grep -q "SOURCE_REF=${CAND_OLD_SHA}" "$IDREF/etc/frp-auto-deploy/version" || fail "check mutated source ref"
+pass "SERVER_SAME_BUNDLE_DIFFERENT_CANDIDATE_REF_CHECK"
+
+run_candidate "$IDREF" "$CAND_NEW_SHA" >"$WORKDIR/idref.out" || fail "candidate identity refresh"
+grep -q 'Server project update completed successfully' "$WORKDIR/idref.out" || fail "idref success"
+grep -q 'Update                : identity refresh' "$WORKDIR/idref.out" || fail "idref kind"
+grep -q 'Server project files  : unchanged' "$WORKDIR/idref.out" || fail "idref files unchanged"
+grep -q 'Release identity      : updated' "$WORKDIR/idref.out" || fail "idref identity updated"
+grep -q 'FRP binary      : unchanged' "$WORKDIR/idref.out" || fail "idref frp unchanged"
+grep -q 'Server state    : preserved' "$WORKDIR/idref.out" || fail "idref state preserved"
+if grep -q 'Update                    : not needed' "$WORKDIR/idref.out"; then
+  fail "idref incorrectly reported not needed"
+fi
+if grep -q 'State mutation             : NO' "$WORKDIR/idref.out"; then
+  fail "idref incorrectly reported no mutation"
+fi
+if grep -q 'Same-version update : refreshed management files' "$WORKDIR/idref.out"; then
+  fail "idref should not claim management file refresh"
+fi
+grep -q "SOURCE_REF=${CAND_NEW_SHA}" "$IDREF/etc/frp-auto-deploy/version" || fail "source ref not advanced"
+grep -q 'RELEASE_CHANNEL=candidate' "$IDREF/etc/frp-auto-deploy/version" || fail "channel lost"
+grep -q "BUNDLE_SHA256=${OCI_CANDIDATE_SHA}" "$IDREF/etc/frp-auto-deploy/version" || fail "bundle lost"
+grep -q "PROJECT_VERSION=${PROJECT_VERSION}" "$IDREF/etc/frp-auto-deploy/version" || fail "version lost"
+grep -q 'FRP_VERSION=0.70.1' "$IDREF/etc/frp-auto-deploy/version" || fail "frp version changed"
+[[ "$(sha "$IDREF/usr/local/lib/frp-auto-deploy/frp-port-allocator.py")" == "$IDREF_ALLOC" ]] ||
+  fail "identity refresh reinstalled allocator"
+[[ "$(sha "$IDREF/usr/local/bin/frps")" == "$IDREF_FRP" ]] || fail "identity refresh changed frps"
+[[ "$(sha "$IDREF/etc/frp/server_token")" == "$IDREF_TOKEN" ]] || fail "identity refresh changed token"
+[[ "$(sha "$IDREF/var/lib/frp-auto-deploy/registry.json")" == "$IDREF_REG" ]] || fail "identity refresh changed registry"
+[[ "$(sha "$IDREF/etc/frp-auto-deploy/pki/ca.crt")" == "$IDREF_CA" ]] || fail "identity refresh changed CA"
+[[ "$(installer_url "$IDREF")" == "$NEW_CAND_URL" ]] ||
+  fail "candidate installer URL not migrated (got $(installer_url "$IDREF"))"
+[[ "$(windows_installer_url "$IDREF")" == "$NEW_CAND_WIN_URL" ]] ||
+  fail "candidate windows installer URL not migrated"
+grep -q 'Client installer URL : migrated' "$WORKDIR/idref.out" || fail "linux installer migration report"
+grep -q 'Windows client installer URL : migrated' "$WORKDIR/idref.out" || fail "windows installer migration report"
+grep -q 'project_update.completed' "$IDREF/var/log/frp-auto-deploy/audit.jsonl" || fail "idref missing audit"
+[[ ! -f "$IDREF/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "idref left txn marker"
+pass "SERVER_SAME_BUNDLE_DIFFERENT_CANDIDATE_REF_REFRESH"
+pass "SERVER_IDENTITY_ONLY_UPDATE"
+pass "SERVER_CANDIDATE_INSTALLER_URL_MIGRATION"
+
+# Idempotent: same version + same bundle + same channel + same ref → not needed.
+run_candidate "$IDREF" "$CAND_NEW_SHA" --check >"$WORKDIR/idref-idem-check.out" || fail "idref idem check"
+grep -q 'Update                    : not needed' "$WORKDIR/idref-idem-check.out" || fail "idem check not needed"
+VER_IDEM="$(sha "$IDREF/etc/frp-auto-deploy/version")"
+AUDIT_IDEM="$(sha "$IDREF/var/log/frp-auto-deploy/audit.jsonl")"
+BACKUP_IDEM="$(find "$IDREF/var/lib/frp-auto-deploy/backups" -mindepth 1 -maxdepth 1 -type d | wc -l)"
+run_candidate "$IDREF" "$CAND_NEW_SHA" >"$WORKDIR/idref-idem.out" || fail "idref idem apply"
+grep -q 'Update                    : not needed' "$WORKDIR/idref-idem.out" || fail "idem apply not needed"
+grep -q 'State mutation             : NO' "$WORKDIR/idref-idem.out" || fail "idem mutation flag"
+if grep -q 'Server project update completed successfully' "$WORKDIR/idref-idem.out"; then
+  fail "idem apply mutated"
+fi
+[[ "$(sha "$IDREF/etc/frp-auto-deploy/version")" == "$VER_IDEM" ]] || fail "idem rewrote version"
+[[ "$(sha "$IDREF/var/log/frp-auto-deploy/audit.jsonl")" == "$AUDIT_IDEM" ]] || fail "idem wrote audit"
+[[ "$(find "$IDREF/var/lib/frp-auto-deploy/backups" -mindepth 1 -maxdepth 1 -type d | wc -l)" == "$BACKUP_IDEM" ]] ||
+  fail "idem created snapshot"
+pass "SERVER_SAME_BUNDLE_SAME_REF_IDEMPOTENT_NOOP"
+
+# candidate -> stable with identical bundle is also an identity refresh.
+C2S="$WORKDIR/cand-to-stable"
+setup_tree "$C2S"
+write_identity "$C2S" "$PROJECT_VERSION" candidate "$CAND_NEW_SHA" "$OCI_CANDIDATE_SHA"
+mkdir -p "$C2S/var/log/frp-auto-deploy"
+run_verified "$C2S" --check >"$WORKDIR/c2s-check.out" || fail "cand->stable --check"
+grep -q 'Update                    : identity refresh' "$WORKDIR/c2s-check.out" || fail "cand->stable check"
+run_verified "$C2S" >"$WORKDIR/c2s.out" || fail "cand->stable apply"
+grep -q 'Update                : identity refresh' "$WORKDIR/c2s.out" || fail "cand->stable kind"
+grep -q 'RELEASE_CHANNEL=stable' "$C2S/etc/frp-auto-deploy/version" || fail "cand->stable channel"
+grep -q "SOURCE_REF=v${PROJECT_VERSION}" "$C2S/etc/frp-auto-deploy/version" || fail "cand->stable ref"
+pass "SERVER_CANDIDATE_TO_STABLE_SAME_BUNDLE_IDENTITY_REFRESH"
+
 # Official managed installer URLs migrate on actual upgrade only.
 MIG="$WORKDIR/installer-migrate"
 setup_tree "$MIG"

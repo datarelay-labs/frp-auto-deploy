@@ -575,7 +575,8 @@ frp_server_apply_project_upgrade() {
   local resolved_channel resolved_ref
   local candidate_meta target_channel target_ref
   local installed_channel installed_ref installed_bundle target_bundle
-  local update_needed=1 vcmp
+  local update_needed=1 identity_only=0 vcmp
+  local bundle_same=0 identity_same=0
 
   _FRP_UPGRADE_MUTATION_STARTED=0
   _FRP_UPGRADE_ROLLBACK_DONE=0
@@ -643,21 +644,42 @@ frp_server_apply_project_upgrade() {
     "$installed_bundle" "$target_bundle"
   echo "FRP binary update         : NO"
 
+  # "Not needed" only when every authoritative identity field matches:
+  # project version, release channel, source ref, and verified bundle SHA.
+  # Same bundle with a different channel/ref (e.g. candidate SHA advance, or
+  # candidate -> stable) is an identity refresh, not a no-op.
   if [[ "$previous" != "legacy / unknown" ]]; then
     vcmp="$(frp_version_compare "$previous" "$target")"
+    if [[ "$installed_bundle" =~ ^[0-9a-fA-F]{64}$ ]] && \
+       [[ "$(printf '%s' "$installed_bundle" | tr '[:upper:]' '[:lower:]')" == "$target_bundle" ]]; then
+      bundle_same=1
+    fi
+    if [[ "$installed_channel" == "$target_channel" && \
+          "$installed_ref" == "$target_ref" ]]; then
+      identity_same=1
+    fi
     if [[ "$vcmp" == "eq" ]]; then
-      if [[ "$installed_bundle" =~ ^[0-9a-fA-F]{64}$ ]] && \
-         [[ "$(printf '%s' "$installed_bundle" | tr '[:upper:]' '[:lower:]')" == "$target_bundle" ]]; then
+      if [[ "$bundle_same" == "1" && "$identity_same" == "1" ]]; then
         update_needed=0
+      elif [[ "$bundle_same" == "1" ]]; then
+        update_needed=1
+        identity_only=1
       else
         update_needed=1
       fi
+    elif [[ "$vcmp" == "lt" && "$bundle_same" == "1" ]]; then
+      # Version advanced but server project bytes are identical: refresh
+      # release identity without reinstalling unchanged runtime files.
+      update_needed=1
+      identity_only=1
     fi
   fi
 
   if [[ "$check_only" == "1" ]]; then
     if [[ "$update_needed" == "0" ]]; then
       echo "Update                    : not needed"
+    elif [[ "$identity_only" == "1" ]]; then
+      echo "Update                    : identity refresh"
     else
       echo "Update                    : available"
     fi
@@ -680,18 +702,20 @@ frp_server_apply_project_upgrade() {
   frp_server_create_snapshot "$snapshot" || return 1
   frp_prune_backup_dirs "$backups" "$FRP_SERVER_UPGRADE_BACKUP_KEEP"
 
-  frp_server_upgrade_changed "$staged" etc/systemd/system/frps.service && restart_frps=1
-  frp_server_upgrade_changed "$staged" etc/systemd/system/frp-port-allocator.service && restart_alloc=1
-  while IFS= read -r rel; do
-    [[ -n "$rel" ]] || continue
-    frp_server_upgrade_changed "$staged" "$rel" && restart_alloc=1
-  done < <(python3 "$(_frp_project_files_py)" allocator-runtime-rels)
-  if frp_server_upgrade_is_single443; then
-    frp_server_upgrade_changed "$staged" etc/systemd/system/frp-frontend.service && restart_frontend=1
+  if [[ "$identity_only" != "1" ]]; then
+    frp_server_upgrade_changed "$staged" etc/systemd/system/frps.service && restart_frps=1
+    frp_server_upgrade_changed "$staged" etc/systemd/system/frp-port-allocator.service && restart_alloc=1
     while IFS= read -r rel; do
       [[ -n "$rel" ]] || continue
-      frp_server_upgrade_changed "$staged" "$rel" && restart_frontend=1
-    done < <(python3 "$(_frp_project_files_py)" frontend-runtime-rels)
+      frp_server_upgrade_changed "$staged" "$rel" && restart_alloc=1
+    done < <(python3 "$(_frp_project_files_py)" allocator-runtime-rels)
+    if frp_server_upgrade_is_single443; then
+      frp_server_upgrade_changed "$staged" etc/systemd/system/frp-frontend.service && restart_frontend=1
+      while IFS= read -r rel; do
+        [[ -n "$rel" ]] || continue
+        frp_server_upgrade_changed "$staged" "$rel" && restart_frontend=1
+      done < <(python3 "$(_frp_project_files_py)" frontend-runtime-rels)
+    fi
   fi
 
   if [[ "$-" == *E* ]]; then
@@ -711,60 +735,62 @@ frp_server_apply_project_upgrade() {
     frp_txn_write project-update commit "$previous" "$target"
   _FRP_UPGRADE_MUTATION_STARTED=1
 
-  if ! frp_server_upgrade_install_staged "$staged"; then
-    frp_server_upgrade_rollback "$snapshot"
-    frp_emit_failure_class FILE_COMMIT_FAILED
-    return 1
-  fi
-  if ! frp_server_upgrade_post_mutation_guard; then
-    frp_server_upgrade_rollback "$snapshot"
-    frp_emit_failure_class FILE_COMMIT_FAILED
-    return 1
-  fi
-  if [[ "${FRP_SERVER_UPGRADE_HOOK_FAIL:-}" == "verify" ]]; then
-    echo "ERROR: simulated post-install verification failure" >&2
-    frp_server_upgrade_rollback "$snapshot"
-    frp_emit_failure_class HEALTH_CHECK_FAILED
-    return 1
-  fi
-  if [[ "$(frp_server_upgrade_preserved_digest)" != "$preserved_before" ]]; then
-    echo "ERROR: protected server state changed during project update" >&2
-    frp_server_upgrade_rollback "$snapshot"
-    frp_emit_failure_class STATE_PRESERVATION_FAILED
-    return 1
-  fi
-
-  if [[ "$restart_frps" == "1" || "$restart_alloc" == "1" || "$restart_frontend" == "1" ]]; then
-    if ! frp_server_skip_systemd; then
-      frp_server_systemctl daemon-reload || {
-        frp_server_upgrade_rollback "$snapshot"; return 1;
-      }
-    else
-      frp_server_record_action "daemon-reload"
+  if [[ "$identity_only" != "1" ]]; then
+    if ! frp_server_upgrade_install_staged "$staged"; then
+      frp_server_upgrade_rollback "$snapshot"
+      frp_emit_failure_class FILE_COMMIT_FAILED
+      return 1
     fi
-  fi
-  if [[ "$restart_frps" == "1" ]]; then
-    frp_server_restart_unit frps || { frp_server_upgrade_rollback "$snapshot"; return 1; }
-    frp_server_health_frps || { frp_server_upgrade_rollback "$snapshot"; return 1; }
-  fi
-  if [[ "$restart_alloc" == "1" ]]; then
-    frp_server_restart_unit frp-port-allocator || { frp_server_upgrade_rollback "$snapshot"; return 1; }
-    frp_server_health_allocator "$(frp_server_upgrade_allocator_port)" ||
-      { frp_server_upgrade_rollback "$snapshot"; return 1; }
-  fi
-  if [[ "$restart_frontend" == "1" ]]; then
-    frp_server_restart_unit frp-frontend || { frp_server_upgrade_rollback "$snapshot"; return 1; }
-    frp_server_health_frontend || { frp_server_upgrade_rollback "$snapshot"; return 1; }
-  fi
-  if [[ "$restart_frps" != "1" ]]; then
-    frp_server_health_frps || { frp_server_upgrade_rollback "$snapshot"; return 1; }
-  fi
-  if [[ "$restart_alloc" != "1" ]]; then
-    frp_server_health_allocator "$(frp_server_upgrade_allocator_port)" ||
-      { frp_server_upgrade_rollback "$snapshot"; return 1; }
-  fi
-  if frp_server_upgrade_is_single443 && [[ "$restart_frontend" != "1" ]]; then
-    frp_server_health_frontend || { frp_server_upgrade_rollback "$snapshot"; return 1; }
+    if ! frp_server_upgrade_post_mutation_guard; then
+      frp_server_upgrade_rollback "$snapshot"
+      frp_emit_failure_class FILE_COMMIT_FAILED
+      return 1
+    fi
+    if [[ "${FRP_SERVER_UPGRADE_HOOK_FAIL:-}" == "verify" ]]; then
+      echo "ERROR: simulated post-install verification failure" >&2
+      frp_server_upgrade_rollback "$snapshot"
+      frp_emit_failure_class HEALTH_CHECK_FAILED
+      return 1
+    fi
+    if [[ "$(frp_server_upgrade_preserved_digest)" != "$preserved_before" ]]; then
+      echo "ERROR: protected server state changed during project update" >&2
+      frp_server_upgrade_rollback "$snapshot"
+      frp_emit_failure_class STATE_PRESERVATION_FAILED
+      return 1
+    fi
+
+    if [[ "$restart_frps" == "1" || "$restart_alloc" == "1" || "$restart_frontend" == "1" ]]; then
+      if ! frp_server_skip_systemd; then
+        frp_server_systemctl daemon-reload || {
+          frp_server_upgrade_rollback "$snapshot"; return 1;
+        }
+      else
+        frp_server_record_action "daemon-reload"
+      fi
+    fi
+    if [[ "$restart_frps" == "1" ]]; then
+      frp_server_restart_unit frps || { frp_server_upgrade_rollback "$snapshot"; return 1; }
+      frp_server_health_frps || { frp_server_upgrade_rollback "$snapshot"; return 1; }
+    fi
+    if [[ "$restart_alloc" == "1" ]]; then
+      frp_server_restart_unit frp-port-allocator || { frp_server_upgrade_rollback "$snapshot"; return 1; }
+      frp_server_health_allocator "$(frp_server_upgrade_allocator_port)" ||
+        { frp_server_upgrade_rollback "$snapshot"; return 1; }
+    fi
+    if [[ "$restart_frontend" == "1" ]]; then
+      frp_server_restart_unit frp-frontend || { frp_server_upgrade_rollback "$snapshot"; return 1; }
+      frp_server_health_frontend || { frp_server_upgrade_rollback "$snapshot"; return 1; }
+    fi
+    if [[ "$restart_frps" != "1" ]]; then
+      frp_server_health_frps || { frp_server_upgrade_rollback "$snapshot"; return 1; }
+    fi
+    if [[ "$restart_alloc" != "1" ]]; then
+      frp_server_health_allocator "$(frp_server_upgrade_allocator_port)" ||
+        { frp_server_upgrade_rollback "$snapshot"; return 1; }
+    fi
+    if frp_server_upgrade_is_single443 && [[ "$restart_frontend" != "1" ]]; then
+      frp_server_health_frontend || { frp_server_upgrade_rollback "$snapshot"; return 1; }
+    fi
   fi
 
   # Intentional release-line rewrite of official managed installer URLs only.
@@ -795,7 +821,11 @@ frp_server_apply_project_upgrade() {
   echo "Release channel : ${resolved_channel}"
   echo "Source ref      : ${resolved_ref}"
   echo "Bundle SHA256   : ${target_bundle}"
-  if [[ "$previous" == "$target" ]]; then
+  if [[ "$identity_only" == "1" ]]; then
+    echo "Update                : identity refresh"
+    echo "Server project files  : unchanged"
+    echo "Release identity      : updated"
+  elif [[ "$previous" == "$target" ]]; then
     echo "Same-version update : refreshed management files"
   fi
   echo "FRP binary      : unchanged"
