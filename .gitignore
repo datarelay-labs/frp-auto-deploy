@@ -15,6 +15,13 @@ client-identity.mac
 mgmt-nonces.json
 .frp-compat-stage/
 
+# Runtime Real E2E / overnight validation output (harness source stays in tests/)
+e2e-reports/
+OVERNIGHT_*.md
+
+# Nested / parallel worktrees must not land on this release line
+frp-auto-deploy-group/
+
 # Runtime-generated secrets, configs, and allocator state
 server_token
 install_key
