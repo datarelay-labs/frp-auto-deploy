@@ -44,7 +44,9 @@ python3 tests/test-mgmt-identity.py
 ./tests/test-client-metadata.sh
 ./tests/test-client-tags.sh
 python3 tests/test-client-registry.py
+python3 tests/test-restore-readiness.py
 ./tests/test-frp-client.sh
+./tests/test-release-service-client-state-reconcile.sh
 ./tests/test-lifecycle.sh
 ./tests/test-guided-ux.sh
 ./tests/test-client-upgrade.sh
