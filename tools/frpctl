@@ -1748,6 +1748,14 @@ frpctl_dispatch_canonical() {
       frpctl_require_server || return 1
       frpctl_invoke frp-set-client-installer-url "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("value",""))' "$result")"
       ;;
+    set_server_hostname)
+      frpctl_require_server || return 1
+      frpctl_invoke frp-server-set hostname "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("value",""))' "$result")"
+      ;;
+    unset_server_hostname)
+      frpctl_require_server || return 1
+      frpctl_invoke frp-server-set hostname --unset
+      ;;
     set_service)
       frpctl_require_client || return 1
       frpctl_invoke frp-client set-service \

@@ -40,7 +40,7 @@ def coerce_port(value):
 
 
 def cfg_public_host(cfg):
-    for key in ('public_host', 'public_ip'):
+    for key in ('public_ip', 'public_host'):
         value = cfg.get(key)
         if value is not None and str(value).strip():
             return str(value).strip()

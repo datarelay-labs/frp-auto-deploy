@@ -1452,13 +1452,14 @@ PY
 }
 
 frp_write_client_state() {
-  python3 - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$FRP_CLIENT_STATE_SCHEMA" "$8" "${9:-tcp}" <<'PY'
+  python3 - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$FRP_CLIENT_STATE_SCHEMA" "$8" "${9:-tcp}" "${10:-}" <<'PY'
 import json, os, sys, tempfile
 from pathlib import Path
 dest, allocator_url, server, server_port, hostname, machine_id, host_id = sys.argv[1:8]
 schema = int(sys.argv[8])
 services_raw = json.loads(Path(sys.argv[9]).read_text(encoding='utf-8'))
 transport = str(sys.argv[10] if len(sys.argv) > 10 else 'tcp').strip().lower() or 'tcp'
+public_hostname = str(sys.argv[11] if len(sys.argv) > 11 else '').strip()
 if transport not in ('tcp', 'wss'):
     raise SystemExit('ERROR: unsupported FRP transport')
 services = {}
@@ -1501,6 +1502,8 @@ state = {
         rec.get('enabled', True) is not False for rec in services.values()
     ),
 }
+if public_hostname:
+    state['public_hostname'] = public_hostname
 dest = Path(dest)
 dest.parent.mkdir(parents=True, exist_ok=True)
 fd, tmp = tempfile.mkstemp(prefix=dest.name + '.', suffix='.tmp', dir=str(dest.parent))
@@ -1807,10 +1810,14 @@ PY
 
 render_access_info() {
   local dest="$1" server="$2" services_json_file="$3"
-  python3 - "$dest" "$server" "$services_json_file" <<'PY'
+  local public_hostname="${4:-}"
+  if [[ -z "$public_hostname" && -f "$services_json_file" ]]; then
+    public_hostname="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); print(d.get("public_hostname","") if isinstance(d,dict) else "")' "$services_json_file" 2>/dev/null || true)"
+  fi
+  python3 - "$dest" "$server" "$services_json_file" "$public_hostname" <<'PY'
 import json,sys
 from pathlib import Path
-dest, server, svc_path = sys.argv[1:4]
+dest, server, svc_path, alias = sys.argv[1:5]
 raw = json.loads(Path(svc_path).read_text(encoding='utf-8'))
 if isinstance(raw, dict) and 'services' in raw:
     services = []
@@ -1818,13 +1825,35 @@ if isinstance(raw, dict) and 'services' in raw:
         rec = dict(item)
         rec['id'] = rec.get('id') or sid
         services.append(rec)
+    if not alias:
+        alias = str(raw.get('public_hostname') or '')
 else:
     services = raw
 lines = [f'FRP Server: {server}', '', 'Services:', '']
 def clean(value, limit=253):
     text = str(value or '')
     return ''.join(' ' if ord(c) < 32 or 127 <= ord(c) <= 159 else c for c in text)[:limit].strip()
+def is_ipv6(host):
+    text = str(host or '')
+    if text.startswith('[') and text.endswith(']'):
+        text = text[1:-1]
+    try:
+        import ipaddress
+        return isinstance(ipaddress.ip_address(text), ipaddress.IPv6Address)
+    except Exception:
+        return False
+def fmt_host(host):
+    host = clean(host)
+    if is_ipv6(host) and not (host.startswith('[') and host.endswith(']')):
+        return '[' + host + ']'
+    return host
+def host_port(host, port):
+    return f'{fmt_host(host)}:{port}'
+def http_url(scheme, host, port):
+    return f'{scheme}://{host_port(host, port)}'
 server = clean(server)
+alias = clean(alias)
+https_guidance_shown = False
 for item in services:
     if item.get('enabled', True) is False:
         continue
@@ -1836,23 +1865,58 @@ for item in services:
     remote_port = item.get('remote_port')
     lines.append(sid if name == sid else f'{sid} ({name})')
     lines.append(f'  Target : {local_ip}:{local_port}')
-    lines.append(f'  Public : {server}:{remote_port}')
+    preferred = alias if alias and alias != server else ''
+    if preferred:
+        lines.append(f'  Public : {host_port(preferred, remote_port)}')
+        lines.append(f'  Fallback public : {host_port(server, remote_port)}')
+    else:
+        lines.append(f'  Public : {host_port(server, remote_port)}')
     if preset == 'ssh':
         user = clean(item.get('ssh_user'), 32)
         if user:
             lines.append('  Connect:')
-            lines.append(f'    ssh -p {remote_port} {user}@{server}')
+            if preferred:
+                lines.append('    Preferred:')
+                lines.append(f'      ssh -p {remote_port} {user}@{preferred}')
+                lines.append('    Fallback:')
+                lines.append(f'      ssh -p {remote_port} {user}@{server}')
+            else:
+                lines.append(f'    ssh -p {remote_port} {user}@{server}')
         else:
             lines.append('  SSH user: legacy / unspecified')
     elif preset == 'http':
         lines.append('  URL:')
-        lines.append(f'    http://{server}:{remote_port}')
+        if preferred:
+            lines.append('    Preferred:')
+            lines.append(f'      {http_url("http", preferred, remote_port)}')
+            lines.append('    Fallback:')
+            lines.append(f'      {http_url("http", server, remote_port)}')
+        else:
+            lines.append(f'    {http_url("http", server, remote_port)}')
     elif preset == 'https':
         lines.append('  URL:')
-        lines.append(f'    https://{server}:{remote_port}')
+        if preferred:
+            lines.append('    Preferred:')
+            lines.append(f'      {http_url("https", preferred, remote_port)}')
+            lines.append('    Fallback:')
+            lines.append(f'      {http_url("https", server, remote_port)}')
+        else:
+            lines.append(f'    {http_url("https", server, remote_port)}')
+        if preferred and not https_guidance_shown:
+            lines.append('  Note:')
+            lines.append('    TLS is passed through to the target HTTPS service.')
+            lines.append(f'    To avoid certificate warnings, the target service certificate')
+            lines.append(f'    must be valid for {preferred}.')
+            https_guidance_shown = True
     else:
         lines.append('  Connect:')
-        lines.append(f'    {server}:{remote_port}')
+        if preferred:
+            lines.append('    Preferred:')
+            lines.append(f'      {host_port(preferred, remote_port)}')
+            lines.append('    Fallback:')
+            lines.append(f'      {host_port(server, remote_port)}')
+        else:
+            lines.append(f'    {host_port(server, remote_port)}')
     lines.append('')
 path = Path(dest)
 path.parent.mkdir(parents=True, exist_ok=True)
@@ -2298,6 +2362,9 @@ meta={
     'frp_transport': transport,
     'token_ciphertext': '',
 }
+alias=str(d.get('public_hostname') or '').strip()
+if alias:
+    meta['public_hostname']=alias
 Path(os.environ['META_FILE']).write_text(json.dumps(meta)+'\n', encoding='utf-8')
 PY
     then
@@ -2363,6 +2430,9 @@ meta={
     'token_ciphertext': token,
     'mgmt_status': str(d.get('mgmt_status') or ''),
 }
+alias=str(d.get('public_hostname') or '').strip()
+if alias:
+    meta['public_hostname']=alias
 Path(os.environ['META_FILE']).write_text(json.dumps(meta)+'\n', encoding='utf-8')
 PY
   if [[ -n "$pubkey_pem" ]]; then
@@ -2550,11 +2620,14 @@ import json, sys
 from pathlib import Path
 cand = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
 cur = json.loads(Path(sys.argv[2]).read_text(encoding='utf-8'))
-for key in ('allocator_url', 'frp_server', 'frp_server_port', 'frp_transport', 'hostname', 'machine_id', 'host_id', 'schema_version'):
+for key in ('allocator_url', 'frp_server', 'frp_server_port', 'frp_transport', 'hostname', 'machine_id', 'host_id', 'schema_version', 'public_hostname'):
     if key in cur and key not in cand:
         cand[key] = cur[key]
     elif key in cur:
         cand.setdefault(key, cur.get(key))
+# Drop stale public_hostname when the candidate explicitly cleared it.
+if 'public_hostname' in cand and not str(cand.get('public_hostname') or '').strip():
+    cand.pop('public_hostname', None)
 for sid, rec in (cand.get('services') or {}).items():
     prev = (cur.get('services') or {}).get(sid) or {}
     if rec.get('remote_port') in (None, '') and prev.get('remote_port') not in (None, ''):

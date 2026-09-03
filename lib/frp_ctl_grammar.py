@@ -173,9 +173,17 @@ def _set_resources(role):
     client, server = _role_parts(role)
     items = []
     if server:
-        items.extend(["client", "installer-url"])
+        items.extend(["client", "installer-url", "server"])
     if client:
         items.append("service")
+    return items
+
+
+def _unset_resources(role):
+    _, server = _role_parts(role)
+    items = []
+    if server:
+        items.extend(["client", "server"])
     return items
 
 
@@ -438,13 +446,15 @@ def _set_help(rest, role):
 
 def _unset_help(role):
     return (
-        "Unset client configuration\n"
-        "==========================\n\n"
+        "Unset configuration\n"
+        "===================\n\n"
         "Usage:\n"
         "  unset client <ID> label\n"
         "  unset client <ID> note\n"
-        "  unset client <ID> tag <key>\n\n"
+        "  unset client <ID> tag <key>\n"
+        "  unset server hostname\n\n"
         "unset removes metadata only. It does not release ports or revoke identity.\n"
+        "unset server hostname falls back to Public IP access.\n"
     )
 
 
@@ -574,6 +584,7 @@ def context_help(tokens, role, names=None, clients=None):
                     [
                         ("client", "Configure registered client metadata"),
                         ("installer-url", "Configure client installer URL"),
+                        ("server", "Configure server access settings"),
                     ]
                 )
             if client:
@@ -618,11 +629,34 @@ def context_help(tokens, role, names=None, clients=None):
             )
         if tokens[1] == "installer-url":
             return "Usage:\n  set installer-url <url>\n"
+        if tokens[1] == "server":
+            if len(tokens) == 2:
+                return _fmt_available(
+                    [("hostname", "Optional public DNS hostname for published services")]
+                )
+            return (
+                "Usage:\n"
+                "  set server hostname <fqdn>\n\n"
+                "Purpose:\n"
+                "  Set an optional DNS alias for published service access.\n"
+                "  FRP control continues to use the Public IP.\n\n"
+                "Example:\n"
+                "  set server hostname frp.example.com\n\n"
+                "Remove:\n"
+                "  unset server hostname\n"
+            )
         return _fmt_available([(item, "") for item in _set_resources(role)])
     if verb == "unset":
+        if len(tokens) == 1:
+            return _fmt_available(
+                [
+                    ("client", "Remove client metadata"),
+                    ("server", "Remove server access settings"),
+                ]
+            )
+        if tokens[1] == "server":
+            return "Usage:\n  unset server hostname\n"
         if len(tokens) <= 2:
-            if len(tokens) == 1:
-                return _fmt_available([("client", "Remove client metadata")])
             return _context_client_list(names, clients)
         return (
             "Available settings:\n\n"
@@ -982,6 +1016,38 @@ def _match_set(tokens, role, names=None):
         if len(tokens) < 3:
             return incomplete("Missing installer URL.", ["set installer-url <url>"])
         return {"status": "ok", "action": "set_installer_url", "value": tokens[2]}
+    if resource == "server":
+        if not server:
+            return {"status": "role", "need": "server", "command": "set server"}
+        if len(tokens) < 3:
+            return incomplete(
+                "Missing server setting.",
+                ["set server hostname <fqdn>"],
+                ["hostname"],
+                tip="set server ?",
+            )
+        if tokens[2] != "hostname":
+            return incomplete(
+                "Unknown server setting.",
+                ["set server hostname <fqdn>"],
+                ["hostname"],
+            )
+        if len(tokens) < 4:
+            return incomplete(
+                "Missing hostname.",
+                ["set server hostname <fqdn>"],
+                tip="set server hostname ?",
+            )
+        if len(tokens) > 4:
+            return {
+                "status": "error",
+                "message": "Too many arguments. Quote values that contain spaces.",
+            }
+        return {
+            "status": "ok",
+            "action": "set_server_hostname",
+            "value": tokens[3],
+        }
     return incomplete("Unknown set resource.", ["set <resource> ..."], avail)
 
 
@@ -989,10 +1055,39 @@ def _match_unset(tokens, role, names=None):
     _, server = _role_parts(role)
     if not server:
         return {"status": "role", "need": "server", "command": "unset"}
+    avail = _unset_resources(role)
     if len(tokens) < 2:
-        return incomplete("Missing resource.", ["unset client <ID> <setting>"], ["client"])
+        return incomplete(
+            "Missing resource.",
+            ["unset client <ID> <setting>", "unset server hostname"],
+            avail,
+        )
+    if tokens[1] == "server":
+        if len(tokens) < 3:
+            return incomplete(
+                "Missing server setting.",
+                ["unset server hostname"],
+                ["hostname"],
+                tip="unset server ?",
+            )
+        if tokens[2] != "hostname":
+            return incomplete(
+                "Unknown server setting.",
+                ["unset server hostname"],
+                ["hostname"],
+            )
+        if len(tokens) > 3:
+            return {
+                "status": "error",
+                "message": "Too many arguments.",
+            }
+        return {"status": "ok", "action": "unset_server_hostname"}
     if tokens[1] != "client":
-        return incomplete("Unknown unset resource.", ["unset client <ID> <setting>"], ["client"])
+        return incomplete(
+            "Unknown unset resource.",
+            ["unset client <ID> <setting>", "unset server hostname"],
+            avail,
+        )
     if len(tokens) < 3:
         return missing_client_help(
             [
@@ -1232,9 +1327,13 @@ def _tab_desc_map(line, role, names=None, clients=None):
         if server:
             rows["client"] = "Configure registered client metadata"
             rows["installer-url"] = "Configure client installer URL"
+            rows["server"] = "Configure server access settings"
         if client:
             rows["service"] = "Configure a local service"
         return rows, "named"
+    if verb == "set" and len(filled) >= 2 and filled[1] == "server":
+        if len(filled) == 2:
+            return {"hostname": "Optional public DNS hostname"}, "named"
     if verb == "set" and len(filled) >= 2 and filled[1] == "client":
         if len(filled) == 2:
             return {}, "clients"
@@ -1245,7 +1344,13 @@ def _tab_desc_map(line, role, names=None, clients=None):
                 "tag": "Key/value metadata",
             }, "named"
     if verb == "unset" and len(filled) == 1:
-        return {"client": "Remove client metadata"}, "named"
+        return {
+            "client": "Remove client metadata",
+            "server": "Remove server access settings",
+        }, "named"
+    if verb == "unset" and len(filled) >= 2 and filled[1] == "server":
+        if len(filled) == 2:
+            return {"hostname": "Remove public DNS hostname"}, "named"
     if verb == "unset" and len(filled) >= 2 and filled[1] == "client":
         if len(filled) == 2:
             return {}, "clients"
@@ -1372,6 +1477,9 @@ def _canonical_completion(tokens, trailing, role, names, services, local_service
                 return _filter(names, prefix)
             if len(filled) == 3:
                 return _filter(["label", "note", "tag"], prefix)
+        if filled[1] == "server" and server:
+            if len(filled) == 2:
+                return _filter(["hostname"], prefix)
         if filled[1] == "service" and client:
             if len(filled) == 2:
                 return _filter(local_services, prefix)
@@ -1380,7 +1488,10 @@ def _canonical_completion(tokens, trailing, role, names, services, local_service
         return []
     if verb == "unset":
         if len(filled) == 1:
-            return _filter(["client"], prefix)
+            return _filter(_unset_resources(role), prefix)
+        if filled[1] == "server" and server:
+            if len(filled) == 2:
+                return _filter(["hostname"], prefix)
         if filled[1] == "client":
             if len(filled) == 2:
                 return _filter(names, prefix)

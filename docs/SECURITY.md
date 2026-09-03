@@ -179,7 +179,7 @@ Disable is not release.
 | CA SHA256 fingerprint | printed by `frp-create-client` |
 | Server certificate | `/etc/frp-auto-deploy/pki/server.crt` |
 | Management public key | `/etc/frp/client-identity.pub` |
-| Service ID, public service port, public hostname | `frp-client-info`, `access-info.txt` |
+| Service ID, public service port, public hostname (optional DNS alias) | `frp-client-info`, `access-info.txt` |
 | Client desired state (no secrets) | `/etc/frp/client-state.json` |
 
 `client-state.json` is the canonical local desired state. `frpc.toml` and

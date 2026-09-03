@@ -379,11 +379,20 @@ def encrypt_token(token, secret):
 
 
 def cfg_public_host(cfg):
-    for key in ('public_host', 'public_ip'):
+    """FRP control host: public_ip preferred, then legacy public_host."""
+    for key in ('public_ip', 'public_host'):
         value = cfg.get(key)
         if value is not None and str(value).strip():
             return str(value).strip()
     raise RuntimeError('public_host is not configured')
+
+
+def cfg_public_hostname(cfg):
+    value = cfg.get('public_hostname')
+    if value is None:
+        return ''
+    text = str(value).strip()
+    return text
 
 
 def cfg_frp_control_public_port(cfg):
@@ -1333,6 +1342,9 @@ class Allocator:
             'frp_transport': cfg_frp_transport(self.cfg),
             'services': allocated,
         }
+        alias = cfg_public_hostname(self.cfg)
+        if alias:
+            response_payload['public_hostname'] = alias
         if identity_auth:
             mac_secret = response_mac_key
             if not mac_secret:

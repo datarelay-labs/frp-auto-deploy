@@ -109,6 +109,8 @@ port_end=""
 allocator_port=""
 allocator_public=""
 public_host=""
+public_ip=""
+public_hostname=""
 allocator_url=""
 ca_fingerprint=""
 deployment_mode=""
@@ -159,9 +161,13 @@ except Exception:
     raise SystemExit(0)
 if not isinstance(cfg, dict):
     raise SystemExit(0)
-host = cfg.get('public_host') or cfg.get('public_ip')
+host = cfg.get('public_ip') or cfg.get('public_host')
 if host:
     print('public_host=' + shlex.quote(str(host)))
+    print('public_ip=' + shlex.quote(str(host)))
+alias = cfg.get('public_hostname')
+if alias is not None and str(alias).strip():
+    print('public_hostname=' + shlex.quote(str(alias).strip()))
 public_port = coerce_port(cfg.get('frp_control_public_port')) or coerce_port(cfg.get('control_port'))
 listen_port = coerce_port(cfg.get('frp_control_listen_port')) or coerce_port(cfg.get('control_port'))
 if public_port is not None:
@@ -210,8 +216,14 @@ PY
 fi
 
 public_host_state="missing"
-if [[ -n "${public_host:-}" ]]; then
+if [[ -n "${public_host:-}" || -n "${public_ip:-}" ]]; then
   public_host_state="configured"
+fi
+public_ip_display="${public_ip:-${public_host:-}}"
+if [[ -n "${public_hostname:-}" ]]; then
+  public_hostname_display="$public_hostname"
+else
+  public_hostname_display="not configured"
 fi
 allocator_url_state="missing"
 if [[ -n "${allocator_url:-}" ]]; then
@@ -286,6 +298,8 @@ Registry schema : ${registry_schema}
 Registry state  : ${registry_state}
 Allocator URL   : ${allocator_url_state}
 Public host     : ${public_host_state}
+Public IP       : ${public_ip_display:-missing}
+Public hostname : ${public_hostname_display}
 
 frps            : ${frps_state}
 allocator       : ${allocator_state}
@@ -311,9 +325,12 @@ if [[ -n "${control_port:-}" ]]; then
   echo "Deployment mode : ${deployment_mode:-direct}"
   echo
   echo "FRP control"
-  echo "  Public endpoint : ${public_host:-unknown}:${control_port}"
+  echo "  Public endpoint : ${public_ip_display:-${public_host:-unknown}}:${control_port}"
   echo "  Transport       : ${frp_transport:-tcp}"
   echo "  Local listener  : ${control_bind:-0.0.0.0}:${control_listen_port:-$control_port}"
+  if [[ -n "${public_hostname:-}" ]]; then
+    echo "  Access hostname : ${public_hostname}"
+  fi
   echo "FRP public      : TCP/${control_port}"
   if [[ -n "${control_listen_port:-}" && "${control_listen_port}" != "${control_port}" ]]; then
     echo "FRP listen      : TCP/${control_listen_port}"

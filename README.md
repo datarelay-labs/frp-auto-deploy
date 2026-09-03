@@ -217,15 +217,22 @@ A fresh interactive install asks for the values in this order:
 
 | Step | Prompt | Typical Direct default | single-443 default |
 | --- | --- | --- | --- |
-| 1 | Public hostname or IP | detected public IP | detected public IP |
-| 2 | Internal FRP server IP | detected private IP | detected private IP |
-| 3 | Deployment mode | `Direct` | choose `Enterprise single-443` |
-| 4 | Public FRP control port | `443` | `443` |
-| 5 | FRP listen/backend port | `443` | `7000` |
-| 6 | Public enrollment HTTPS port | `6099` | `443` |
-| 7 | Allocator listen/backend port | `6099` | `6099` |
-| 8 | Published service range | `6000-6098` | `6000-6098` |
-| 9 | Allocator public URL | derived HTTPS URL | derived `https://host/enroll` |
+| 1 | Public IP | detected public IP | detected public IP |
+| 2 | Public DNS hostname (optional) | empty (IP only) | empty (IP only) |
+| 3 | Internal FRP server IP | detected private IP | detected private IP |
+| 4 | Deployment mode | `Direct` | choose `Enterprise single-443` |
+| 5 | Public FRP control port | `443` | `443` |
+| 6 | FRP listen/backend port | `443` | `7000` |
+| 7 | Public enrollment HTTPS port | `6099` | `443` |
+| 8 | Allocator listen/backend port | `6099` | `6099` |
+| 9 | Published service range | `6000-6098` | `6000-6098` |
+| 10 | Allocator public URL | derived HTTPS URL | derived `https://IP/enroll` |
+
+**Public IP** is the default and primary infrastructure endpoint (FRP control,
+allocator URL host). **Public hostname** is an optional DNS alias for
+published-service access only. DNS records are configured outside FRP Auto
+Deploy. HTTPS published services use TCP passthrough; the target certificate
+must cover the hostname if you advertise one.
 
 The installer stores runtime settings in:
 
@@ -240,7 +247,9 @@ the deployment pattern you selected.
 Useful non-interactive variables:
 
 ```text
-FRP_PUBLIC_HOST
+FRP_PUBLIC_IP
+FRP_PUBLIC_HOST                  legacy alias for Public IP / control host
+FRP_PUBLIC_HOSTNAME              optional DNS access alias
 FRP_INTERNAL_IP
 FRP_DEPLOYMENT_MODE              direct | single443
 FRP_CONTROL_PUBLIC_PORT

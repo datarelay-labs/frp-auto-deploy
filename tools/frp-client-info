@@ -74,7 +74,9 @@ require_v2(state)
 
 mid, client = CREG.resolve_client_or_exit(state, q)
 all_mids = list((state.get('clients') or {}))
-public_ip = CREG.sanitize_display(cfg.get('public_host') or cfg.get('public_ip') or '', 253)
+public_ip = CREG.sanitize_display(cfg.get('public_ip') or cfg.get('public_host') or '', 253)
+public_hostname = CREG.sanitize_display(cfg.get('public_hostname') or '', 253)
+access_host = public_hostname or public_ip
 services = client.get('services') or {}
 if not isinstance(services, dict):
     services = {}
@@ -122,7 +124,7 @@ def print_services():
         enabled_flag = 'enabled' if svc.get('enabled', True) is not False else 'disabled'
         sid_txt = CREG.sanitize_display(sid, 10)
         target = '%s:%s' % (local_ip, local_port)
-        public = '%s:%s' % (public_ip or 'host', remote_port)
+        public = '%s:%s' % (access_host or 'host', remote_port)
         print('%-10s %-6s %-14s %-22s %s' % (
             sid_txt, protocol, target[:14], public[:22], enabled_flag,
         ))
@@ -131,11 +133,25 @@ def print_services():
         print()
         print('Connect:')
         if ssh.get('ssh_user'):
-            print('  ssh -p %s %s@%s' % (
-                ssh.get('remote_port') or '-',
-                CREG.ssh_user_display(ssh),
-                public_ip or 'host',
-            ))
+            if public_hostname and public_ip and public_hostname != public_ip:
+                print('  Preferred:')
+                print('    ssh -p %s %s@%s' % (
+                    ssh.get('remote_port') or '-',
+                    CREG.ssh_user_display(ssh),
+                    public_hostname,
+                ))
+                print('  Fallback:')
+                print('    ssh -p %s %s@%s' % (
+                    ssh.get('remote_port') or '-',
+                    CREG.ssh_user_display(ssh),
+                    public_ip,
+                ))
+            else:
+                print('  ssh -p %s %s@%s' % (
+                    ssh.get('remote_port') or '-',
+                    CREG.ssh_user_display(ssh),
+                    access_host or 'host',
+                ))
         else:
             print('  legacy / unspecified')
 

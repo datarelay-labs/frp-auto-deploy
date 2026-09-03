@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""Set or unset the optional public hostname access alias.
+
+This mutates advertised/access metadata only:
+  - does not restart frps / allocator / frontend
+  - does not rotate CA, tokens, or CLIENT IDs
+  - does not change remote_port reservations
+  - does not rewrite allocator_public_url or FRP control endpoints
+"""
+from __future__ import annotations
+
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+
+def fail(message: str) -> None:
+    print('ERROR: %s' % message, file=sys.stderr)
+    raise SystemExit(1)
+
+
+def _load(name, rel):
+    here = Path(__file__).resolve()
+    root = os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
+    candidates = [
+        here.parent.parent / 'lib' / rel,
+        Path('/usr/local/lib/frp-auto-deploy') / rel,
+    ]
+    if root:
+        candidates.insert(1, Path(root) / 'usr/local/lib/frp-auto-deploy' / rel)
+    for path in candidates:
+        if path.is_file():
+            spec = importlib.util.spec_from_file_location(name, str(path))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+    raise RuntimeError('%s is unavailable' % rel)
+
+
+def usage():
+    print(
+        'Usage:\n'
+        '  frp-server-set hostname <fqdn>\n'
+        '  frp-server-set hostname --unset\n',
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
+
+def main(argv):
+    if len(argv) < 2 or argv[0] != 'hostname':
+        usage()
+    action = argv[1]
+    unset = action in ('--unset', 'unset', '')
+    hostname = ''
+    if not unset:
+        if action.startswith('-'):
+            usage()
+        hostname = action
+        if len(argv) > 2:
+            fail('too many arguments; quote hostnames that contain spaces')
+    elif len(argv) > 2:
+        usage()
+
+    SCFG = _load('frp_server_config', 'frp_server_config.py')
+    LOCKS = _load('frp_control_locks', 'frp_control_locks.py')
+
+    test_root = os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
+    root = Path(test_root or '/')
+    cfg_path = SCFG.config_path()
+    if not cfg_path.is_file():
+        fail('server config.json is missing')
+
+    try:
+        with LOCKS.ExclusiveFileLock(LOCKS.lifecycle_lock_path(root)):
+            cfg = SCFG.load_config(cfg_path)
+            control = SCFG.control_host(cfg)
+            previous = SCFG.set_public_hostname(cfg, '' if unset else hostname)
+            # Keep legacy public_host mirrored to control IP/host.
+            if 'public_ip' in cfg and cfg.get('public_ip'):
+                cfg['public_host'] = str(cfg['public_ip']).strip()
+            SCFG.atomic_write_config(cfg_path, cfg)
+    except LOCKS.LockTimeout:
+        fail('timed out waiting for the server lifecycle lock')
+    except SCFG.ConfigError as exc:
+        fail(str(exc))
+    except Exception as exc:
+        fail(str(exc))
+
+    try:
+        AUDIT = _load('frp_audit', 'frp_audit.py')
+        if unset:
+            AUDIT.try_emit(
+                'server.hostname_unset',
+                actor='frp-server-set',
+                details={'previous': previous or ''},
+            )
+        else:
+            AUDIT.try_emit(
+                'server.hostname_set',
+                actor='frp-server-set',
+                details={'hostname': SCFG.public_hostname(cfg), 'previous': previous or ''},
+            )
+    except Exception:
+        pass
+
+    if unset:
+        print('Public hostname unset.')
+        print('Published service access falls back to the Public IP (%s).' % control)
+        return 0
+
+    alias = SCFG.public_hostname(cfg)
+    print(SCFG.dns_record_guidance(alias, control))
+    print()
+    print('FRP control endpoint is unchanged: %s' % control)
+    print('No services were restarted.')
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main(sys.argv[1:]))

@@ -166,6 +166,8 @@ FRP Auto Deploy는 공인 IP를 가진 하나의 FRP Server와 방화벽 뒤 Cli
                 │ FRP Auto Deploy│
                 │     Server     │
                 │   Public IP    │
+                │ (+ optional    │
+                │  DNS hostname) │
                 └───────┬────────┘
                         │
                 FRP Control Tunnel
