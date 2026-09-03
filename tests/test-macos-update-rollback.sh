@@ -208,6 +208,20 @@ chmod 0600 "$STATE_LIVE/frpc.toml"
 # Force an upgrade path (equal version + matching bundle short-circuits before install).
 printf 'PROJECT_VERSION=2.0.0\nFRP_VERSION=0.70.1\n' >"$STATE_LIVE/version"
 
+# Dummy frpc at the mapped Darwin runtime path (validate-existing verifies toml).
+cat >"$STATE_LIVE/bin/frpc" <<'EOF'
+#!/bin/sh
+if [ "$1" = verify ]; then
+  exit 0
+fi
+if [ "$1" = --version ]; then
+  echo "frpc version 0.70.1"
+  exit 0
+fi
+exit 0
+EOF
+chmod 0755 "$STATE_LIVE/bin/frpc"
+
 # Install remaining project files at mapped paths so validate/install have a full tree.
 while IFS=: read -r rel mode src; do
   [[ -n "$rel" ]] || continue
