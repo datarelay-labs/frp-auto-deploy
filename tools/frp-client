@@ -277,83 +277,10 @@ PY
 frp_client_list() {
   local path
   path="$(frp_client_state_path)"
-  # Reconcile client local state with authoritative reservation state.
-  # After `frpctl release service`, the server closes the public port, but
-  # this client tool otherwise only reflects local management state.
-  #
-  # We only auto-delete `enabled=false` services, so `disable-service`
-  # semantics (reservation remains until release) are not affected.
-  if [[ "${FRP_SKIP_CONNECTIVITY_CHECK:-}" != "1" ]]; then
-    python3 - "$path" <<'PY'
-import json, os, socket, sys, time
-from pathlib import Path
-
-path = Path(sys.argv[1])
-try:
-    data = json.loads(path.read_text(encoding="utf-8"))
-except Exception:
-    raise SystemExit(0)
-
-services = data.get("services") or {}
-if not isinstance(services, dict):
-    raise SystemExit(0)
-
-server_host = str(data.get("frp_server") or "").strip()
-if not server_host:
-    raise SystemExit(0)
-
-retries = int(os.environ.get("FRP_RELEASE_RECONCILE_RETRIES", "20") or "20")
-interval = float(os.environ.get("FRP_RELEASE_RECONCILE_INTERVAL_SEC", "0.3") or "0.3")
-timeout = float(os.environ.get("FRP_RELEASE_RECONCILE_CONNECT_TIMEOUT_SEC", "0.6") or "0.6")
-
-retries = max(1, retries)
-interval = max(0.0, interval)
-timeout = max(0.1, timeout)
-
-
-def can_connect(port: object) -> bool:
-    try:
-        p = int(port)
-    except Exception:
-        return False
-    try:
-        s = socket.create_connection((server_host, p), timeout=timeout)
-        s.close()
-        return True
-    except Exception:
-        return False
-
-
-for sid, rec in list(services.items()):
-    if not isinstance(rec, dict):
-        continue
-    # Only reconcile disabled services; enabled services are potentially active
-    # and should not be deleted based on transient connectivity failures.
-    if rec.get("enabled", True) is not False:
-        continue
-    remote_port = rec.get("remote_port")
-    if remote_port in (None, ""):
-        continue
-
-    ok = False
-    for _ in range(retries):
-        if can_connect(remote_port):
-            ok = True
-            break
-        time.sleep(interval)
-
-    # If the server no longer has the reservation/listener, remove the stale
-    # disabled record from the client local state.
-    if not ok:
-        services.pop(sid, None)
-
-data["services"] = services
-try:
-    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-except Exception:
-    pass
-PY
-  fi
+  # Reconcile disabled services against the server registry. After
+  # `frpctl release service`, the reservation is removed server-side but
+  # the client local state can retain a stale disabled entry until we check.
+  frp_client_reconcile_released_services || true
   frp_load_client_state "$path"
   frp_print_state_services "$path"
 }

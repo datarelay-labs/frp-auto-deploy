@@ -2204,6 +2204,124 @@ PY
   return 0
 }
 
+frp_client_reconcile_released_services() {
+  local path allocator_url machine_id hostname_value request timestamp signature nonce response curl_err py key_path mac
+  path="$(frp_client_state_path)"
+  [[ -f "$path" ]] || return 0
+  if [[ "${FRP_SKIP_CONNECTIVITY_CHECK:-}" == "1" ]]; then
+    return 0
+  fi
+  if ! python3 - "$path" <<'PY'
+import json, sys
+from pathlib import Path
+state = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+services = state.get('services') or {}
+if not any(isinstance(rec, dict) and rec.get('enabled', True) is False for rec in services.values()):
+    raise SystemExit(1)
+PY
+  then
+    return 0
+  fi
+
+  if [[ -n "${FRP_CLIENT_RECONCILE_REGISTRY_IDS:-}" ]]; then
+    REGISTRY_IDS="$FRP_CLIENT_RECONCILE_REGISTRY_IDS" STATE_PATH="$path" python3 - <<'PY'
+import json, os, sys
+from pathlib import Path
+state = json.loads(Path(os.environ['STATE_PATH']).read_text(encoding='utf-8'))
+ids = set(json.loads(os.environ['REGISTRY_IDS']))
+services = state.get('services') or {}
+for sid in list(services.keys()):
+    rec = services.get(sid) or {}
+    if rec.get('enabled', True) is False and sid not in ids:
+        services.pop(sid, None)
+state['services'] = services
+Path(os.environ['STATE_PATH']).write_text(json.dumps(state, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+PY
+    return 0
+  fi
+
+  if [[ "$(frp_identity_status)" != enrolled ]]; then
+    return 0
+  fi
+
+  allocator_url="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8")).get("allocator_url") or "")' "$path")"
+  machine_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8")).get("machine_id") or "")' "$path")"
+  hostname_value="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8")).get("hostname") or "")' "$path")"
+  [[ -n "$allocator_url" && -n "$machine_id" ]] || return 0
+
+  request="$(python3 - "$machine_id" "$hostname_value" <<'PY'
+import json, sys
+print(json.dumps({
+  'machine_id': sys.argv[1],
+  'hostname': sys.argv[2],
+}, separators=(',', ':')))
+PY
+)"
+  timestamp="$(date +%s)"
+  py="$(frp_mgmt_auth_py)" || return 0
+  key_path="$(frp_client_identity_key_path)" || return 0
+  nonce="$(python3 - "$py" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location('frp_mgmt_auth', sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+print(mod.new_nonce())
+PY
+)"
+  signature="$(BODY="$request" python3 - "$py" "$key_path" "$machine_id" "$timestamp" "$nonce" <<'PY'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location('frp_mgmt_auth', sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+key, machine_id, ts, nonce = sys.argv[2:6]
+body = os.environ['BODY']
+message = mod.signed_message(machine_id, body, ts, nonce)
+sys.stdout.write(mod.sign_message(key, message))
+PY
+)"
+  curl_err="$(mktemp)"
+  if ! response="$(frp_allocator_curl \
+    -X POST \
+    -H 'Content-Type: application/json' \
+    -H 'X-Mgmt-Auth: 1' \
+    -H 'X-Mgmt-Reconcile: 1' \
+    -H "X-Timestamp: ${timestamp}" \
+    -H "X-Mgmt-Nonce: ${nonce}" \
+    -H "X-Mgmt-Signature: ${signature}" \
+    --data "$request" \
+    "$allocator_url" 2>"$curl_err")"; then
+    rm -f "$curl_err"
+    return 0
+  fi
+  rm -f "$curl_err"
+  mac="$(frp_identity_load_mac)" || return 0
+  if ! REGISTRY_IDS="$response" STATE_PATH="$path" MGMT_MAC_KEY="$mac" python3 - <<'PY'
+import hashlib,hmac,json,os,sys
+from pathlib import Path
+secret=os.environ['MGMT_MAC_KEY']
+d=json.loads(os.environ['REGISTRY_IDS'])
+if isinstance(d, dict) and d.get('error'):
+    raise SystemExit(0)
+received=d.pop('response_hmac',None)
+canonical=json.dumps(d,sort_keys=True,separators=(',',':'),ensure_ascii=False)
+expected=hmac.new(secret.encode(),canonical.encode(),hashlib.sha256).hexdigest()
+if not received or not hmac.compare_digest(received,expected):
+    raise SystemExit(0)
+ids=set(str(x) for x in (d.get('registry_service_ids') or []))
+state=json.loads(Path(os.environ['STATE_PATH']).read_text(encoding='utf-8'))
+services=state.get('services') or {}
+for sid in list(services.keys()):
+    rec=services.get(sid) or {}
+    if rec.get('enabled', True) is False and sid not in ids:
+        services.pop(sid, None)
+state['services']=services
+Path(os.environ['STATE_PATH']).write_text(json.dumps(state, indent=2, sort_keys=True)+'\n', encoding='utf-8')
+PY
+  then
+    return 0
+  fi
+}
+
 frp_enroll_services() {
   local allocator_url="$1" enroll_id="$2" enroll_secret="$3"
   local machine_id="$4" hostname_value="$5" services_file="$6"
