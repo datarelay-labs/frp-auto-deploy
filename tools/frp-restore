@@ -7,11 +7,13 @@ import importlib.util
 import json
 import os
 import shutil
+import ssl
 import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -327,6 +329,31 @@ def _clear_txn(root: Path) -> None:
         marker.unlink()
 
 
+def _readiness_timeout() -> float:
+    return max(0.0, float(os.environ.get("FRP_RESTORE_READY_TIMEOUT", "20") or "20"))
+
+
+def _readiness_interval() -> float:
+    return max(0.0, float(os.environ.get("FRP_RESTORE_READY_INTERVAL", "0.5") or "0.5"))
+
+
+def _wait_until_ready(check, description: str) -> None:
+    deadline = time.monotonic() + _readiness_timeout()
+    last_error: Exception | None = None
+    while True:
+        try:
+            if check():
+                return
+            last_error = None
+        except Exception as exc:
+            last_error = exc
+        if time.monotonic() >= deadline:
+            if last_error is not None:
+                raise RestoreError(f"{description} after restore: {last_error}") from last_error
+            raise RestoreError(f"{description} after restore")
+        time.sleep(_readiness_interval())
+
+
 def verify_restored_control_state(root: Path, in_rollback: bool = False) -> None:
     if os.environ.get("FRP_RESTORE_HOOK_HEALTH_FAIL") == "1" and not in_rollback:
         raise RestoreError("simulated post-restore health failure")
@@ -362,14 +389,16 @@ def verify_restored_control_state(root: Path, in_rollback: bool = False) -> None
     if frontend:
         units.append("frp-frontend.service")
     for unit in units:
-        active = subprocess.run(
-            ["systemctl", "is-active", unit],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if (active.stdout or "").strip() != "active":
-            raise RestoreError(f"{unit} is not active after restore")
+        def unit_active() -> bool:
+            active = subprocess.run(
+                ["systemctl", "is-active", unit],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return (active.stdout or "").strip() == "active"
+
+        _wait_until_ready(unit_active, f"{unit} is not active")
     listen = None
     for line in text.splitlines():
         if line.strip().startswith("bindPort"):
@@ -377,24 +406,29 @@ def verify_restored_control_state(root: Path, in_rollback: bool = False) -> None
             listen = raw.strip().strip('"')
             break
     if listen:
-        probe = subprocess.run(
-            ["ss", "-lnt"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if probe.returncode == 0 and listen not in (probe.stdout or ""):
-            raise RestoreError("frps control port is not listening after restore")
-    listen_port = int(config.get("allocator_listen_port") or config.get("listen_port") or 6099)
-    try:
-        import urllib.request
+        def frps_listening() -> bool:
+            probe = subprocess.run(
+                ["ss", "-lnt"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return probe.returncode == 0 and listen in (probe.stdout or "")
 
+        _wait_until_ready(frps_listening, "frps control port is not listening")
+    listen_port = int(config.get("allocator_listen_port") or config.get("listen_port") or 6099)
+    import urllib.request
+
+    def allocator_healthy() -> bool:
+        ctx = ssl.create_default_context(cafile=str(ca_path))
         urllib.request.urlopen(
-            f"http://127.0.0.1:{listen_port}/healthz",
+            f"https://127.0.0.1:{listen_port}/healthz",
+            context=ctx,
             timeout=5,
         ).read()
-    except Exception as exc:
-        raise RestoreError("allocator /healthz failed after restore") from exc
+        return True
+
+    _wait_until_ready(allocator_healthy, "allocator /healthz failed")
     if frontend:
         host = str(config.get("public_host") or "")
         port = int(config.get("frp_control_public_port") or 443)
@@ -403,22 +437,24 @@ def verify_restored_control_state(root: Path, in_rollback: bool = False) -> None
             if not py.is_file():
                 py = Path(__file__).resolve().parent.parent / "lib" / "frp_frontend.py"
             if py.is_file():
-                result = subprocess.run(
-                    [
-                        sys.executable,
-                        str(py),
-                        "--verify-proxy",
-                        "--public-host",
-                        host,
-                        "--frontend-port",
-                        str(port),
-                        "--ca-cert",
-                        str(ca_path),
-                    ],
-                    check=False,
-                )
-                if result.returncode != 0:
-                    raise RestoreError("verified frontend proxy health check failed after restore")
+                def frontend_healthy() -> bool:
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            str(py),
+                            "--verify-proxy",
+                            "--public-host",
+                            host,
+                            "--frontend-port",
+                            str(port),
+                            "--ca-cert",
+                            str(ca_path),
+                        ],
+                        check=False,
+                    )
+                    return result.returncode == 0
+
+                _wait_until_ready(frontend_healthy, "verified frontend proxy health check failed")
 
 
 def restart_services(root: Path, allow_hook: bool = True) -> None:
