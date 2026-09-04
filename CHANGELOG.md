@@ -17,8 +17,9 @@ Maintenance release preparing the next immutable tag. FRP remains pinned at
   (cross-version restore fail-closed before mutation)
 - Release metadata completeness for official install/uninstall artifacts
 - Transitional shorter Zero-Touch: publicly trusted installer plus opaque
-  `zt1.` package (no insecure TLS). Ideal `/i/<ticket>` short URL trust model
-  remains pending
+  `zt1.` package (no insecure TLS). Ideal `/i/<ticket>` short URL is additive
+  via optional `bootstrap_hostname` + operator reverse proxy
+  (`docs/ZERO_TOUCH_SHORT_URL.md`; not required for v2.1.2 installs).
 - Rocky Linux 8 container regression coverage in the distro matrix
 
 ### Compatibility

@@ -346,6 +346,21 @@ Zero-touch does **not**:
 The server prints a one-time install command containing a short-lived bootstrap
 ticket. Send that command securely to the remote operator and run it once.
 
+When `bootstrap_hostname` is configured and an operator reverse proxy terminates
+publicly trusted HTTPS for that name, the preferred command is:
+
+```bash
+curl -fsSL https://bootstrap.example.com/i/<opaque-ticket> | sudo bash
+```
+
+Otherwise the v2.1.2 transitional form is printed:
+
+```bash
+curl -fsSL <immutable-installer> | sudo bash -s -- 'zt1.<opaque>'
+```
+
+See `docs/ZERO_TOUCH_SHORT_URL.md`.
+
 After enrollment:
 
 ```bash

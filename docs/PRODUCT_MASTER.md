@@ -9,7 +9,7 @@
 > **Release HEAD (published stable):** `729fe31b69adae5e65bf9aaf45efe82d8deab867`
 > **Pinned upstream FRP:** 0.70.1
 > **Primary management interface:** `sudo frpctl`
-> **ZERO_TOUCH_SHORT_URL_TRUST_MODEL:** PENDING
+> **ZERO_TOUCH_SHORT_URL_TRUST_MODEL:** OPTION_B_EXTERNAL_REVERSE_PROXY (implemented on feature branch; not yet a tagged release)
 
 ---
 
@@ -1445,7 +1445,7 @@ Published stable:     2.1.1 (tag v2.1.1)
 Next project line:    2.1.2 (candidate tree; tag not created)
 FRP:                  0.70.1
 Published Release HEAD: 729fe31b69adae5e65bf9aaf45efe82d8deab867
-ZERO_TOUCH_SHORT_URL_TRUST_MODEL: PENDING
+ZERO_TOUCH_SHORT_URL_TRUST_MODEL: OPTION_B_EXTERNAL_REVERSE_PROXY
 ```
 
 v2.1.2 focus (this tree):
@@ -1456,8 +1456,10 @@ v2.1.2 focus (this tree):
 - transitional shorter Zero-Touch (`zt1.` package; no insecure TLS)
 - FRP remains 0.70.1
 
-Ideal `/i/<ticket>` short URL is **not** complete. Trust-model decision remains
-pending (`ZERO_TOUCH_SHORT_URL_TRUST_MODEL=PENDING`).
+Ideal `/i/<ticket>` short URL is implemented as an additive Option B feature
+(operator reverse proxy + `bootstrap_hostname`). See
+`docs/ZERO_TOUCH_SHORT_URL.md`. Missing `bootstrap_hostname` keeps the `zt1`
+fallback.
 
 v2.1.1 release-validated platforms:
 
@@ -2038,9 +2040,11 @@ Group 단위 destructive bulk operation은 Group MVP에 포함하지 않는다.
 
 Zero-Touch short-command note:
 
-- Ideal `curl https://<server>/i/<ticket> | sudo bash` is blocked by the private-CA trust model without insecure TLS.
-- `ZERO_TOUCH_SHORT_URL_TRUST_MODEL=PENDING`
-- Current transitional short form uses a publicly trusted immutable installer plus one opaque `zt1.` package (allocator URL + CA pin + bootstrap ticket).
+- Ideal `curl https://<bootstrap-host>/i/<ticket> | sudo bash` is implemented via
+  Option B (operator reverse proxy + optional `bootstrap_hostname`).
+- `ZERO_TOUCH_SHORT_URL_TRUST_MODEL=OPTION_B_EXTERNAL_REVERSE_PROXY`
+- Current transitional short form (`zt1.`) remains the default when
+  `bootstrap_hostname` is unset.
 - Legacy long `env FRP_*=...` Zero-Touch commands remain supported.
 
 즉 현 시점에서 Group MVP는 v2.1.2 candidate closure 이후에 착수한다.

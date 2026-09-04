@@ -19,7 +19,7 @@ seed_state() {
     "$tree/etc/frp" \
     "$tree/var/lib/frp-auto-deploy/enrollments" \
     "$tree/var/lib/frp-auto-deploy/bootstrap"
-  printf '{"deployment_mode":"direct","marker":"%s","public_hostname":"frp-backup.example.com","public_ip":"203.0.113.10"}\n' "$marker" \
+  printf '{"deployment_mode":"direct","marker":"%s","public_hostname":"frp-backup.example.com","bootstrap_hostname":"bootstrap-backup.example.com","public_ip":"203.0.113.10"}\n' "$marker" \
     >"$tree/etc/frp-auto-deploy/config.json"
   cat >"$tree/etc/frp-auto-deploy/version" <<EOF
 PROJECT_VERSION=2.1.0
@@ -145,6 +145,8 @@ python3 "$ROOT/tools/frp-restore" "$BACKUP" >"$RESTORE_STDOUT" \
 grep -q '"marker":"original"' "$TREE/etc/frp-auto-deploy/config.json" || fail "config restore"
 grep -q '"public_hostname":"frp-backup.example.com"' "$TREE/etc/frp-auto-deploy/config.json" \
   || fail "public_hostname restore"
+grep -q '"bootstrap_hostname":"bootstrap-backup.example.com"' "$TREE/etc/frp-auto-deploy/config.json" \
+  || fail "bootstrap_hostname restore"
 grep -q '"public_ip":"203.0.113.10"' "$TREE/etc/frp-auto-deploy/config.json" || fail "public_ip restore"
 grep -q '"label":"original"' "$TREE/var/lib/frp-auto-deploy/registry.json" || fail "registry restore"
 grep -q '6002' "$TREE/var/lib/frp-auto-deploy/registry.json" || fail "reservation restore"
