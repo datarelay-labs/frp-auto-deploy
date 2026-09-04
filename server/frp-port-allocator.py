@@ -755,18 +755,51 @@ def normalize_services(raw_services):
 class Allocator:
     def __init__(self, config_path):
         self.config_path = config_path
-        self.cfg = load_json(config_path)
-        self.registry_file = self.cfg['registry_file']
-        self.enrollments_dir = Path(self.cfg['enrollments_dir'])
+        self._cfg_mtime_ns = None
+        self.cfg = {}
+        self._apply_config(load_json(config_path), force_paths=True)
         self.enrollments_dir.mkdir(parents=True, exist_ok=True)
         try:
             os.chmod(str(self.enrollments_dir), 0o700)
         except OSError:
             pass
-        self.bootstrap_dir = bootstrap_dir_from_cfg(self.cfg)
         ensure_secret_dir(self.bootstrap_dir, 0o700)
-        self.token_file = self.cfg['token_file']
-        self.nonce_file = Path(self.registry_file).resolve().parent / 'mgmt-nonces.json'
+
+    def _config_mtime_ns(self):
+        try:
+            return Path(self.config_path).stat().st_mtime_ns
+        except OSError:
+            return None
+
+    def _apply_config(self, cfg, force_paths=False):
+        """Apply config dict. Path fields are sticky unless force_paths=True."""
+        if not isinstance(cfg, dict):
+            raise TypeError('config must be a JSON object')
+        if force_paths or not self.cfg:
+            self.registry_file = cfg['registry_file']
+            self.enrollments_dir = Path(cfg['enrollments_dir'])
+            self.bootstrap_dir = bootstrap_dir_from_cfg(cfg)
+            self.token_file = cfg['token_file']
+            self.nonce_file = Path(self.registry_file).resolve().parent / 'mgmt-nonces.json'
+        self.cfg = cfg
+        self._cfg_mtime_ns = self._config_mtime_ns()
+
+    def reload_cfg_if_changed(self):
+        """Refresh in-memory config when config.json changes on disk.
+
+        frpctl set / installer-url tools update disk without restarting the
+        allocator. Short-URL scripts and advertised endpoints must see the
+        latest bootstrap_hostname / client_installer_url without a restart.
+        """
+        mtime_ns = self._config_mtime_ns()
+        if mtime_ns is None or mtime_ns == self._cfg_mtime_ns:
+            return False
+        try:
+            cfg = load_json(self.config_path)
+        except (OSError, json.JSONDecodeError, TypeError):
+            return False
+        self._apply_config(cfg, force_paths=False)
+        return True
 
     def registry_lock(self):
         return FileLock(registry_lock_path(self.registry_file))
@@ -891,6 +924,7 @@ class Allocator:
         """Build the generic short-URL bootstrap script, or None on failure."""
         if ZT is None or PKI is None:
             return None
+        self.reload_cfg_if_changed()
         allocator = str(self.cfg.get('allocator_public_url') or '').strip()
         installer = str(self.cfg.get('client_installer_url') or '').strip()
         ca_path = str(self.cfg.get('tls_ca_cert') or '').strip()
@@ -1705,6 +1739,7 @@ def make_handler(allocator):
 
         def do_GET(self):
             def _handle():
+                allocator.reload_cfg_if_changed()
                 path = self._request_path()
                 if self._handle_short_url_get(path):
                     return
@@ -1740,6 +1775,7 @@ def make_handler(allocator):
 
         def do_POST(self):
             def _handle():
+                allocator.reload_cfg_if_changed()
                 path = self._request_path()
                 try:
                     length = int(self.headers.get('Content-Length', '0'))

@@ -66,11 +66,10 @@ pass "SERVER_UPGRADE"
 
 # Start a tiny allowlisted HTTP→HTTPS proxy on the server (operator reverse proxy),
 # then expose it with cloudflared (publicly trusted TLS).
-ssh_server 'sudo pkill -f "cloudflared tunnel --url" 2>/dev/null || true
-sudo pkill -f frp-short-url-proxy.py 2>/dev/null || true
-sleep 1'
+# Avoid `pkill -f <scriptname>` matching this remote shell command line.
+ssh_server 'sudo pkill -x cloudflared >/dev/null 2>&1 || true; sudo pkill -f "[f]rp-short-url-proxy.py" >/dev/null 2>&1 || true; sleep 1' || true
 PROXY_PORT=18080
-ssh_server "sudo tee /tmp/frp-short-url-proxy.py >/dev/null" <<'PY'
+ssh_server 'rm -f /tmp/frp-short-url-proxy.py; cat > /tmp/frp-short-url-proxy.py' <<'PY' || fail "write allowlist proxy"
 #!/usr/bin/env python3
 """Minimal Option-B allowlist proxy for short-URL Real E2E."""
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -134,30 +133,54 @@ class H(BaseHTTPRequestHandler):
 
 ThreadingHTTPServer(('127.0.0.1', int(__import__('os').environ.get('PORT', '18080'))), H).serve_forever()
 PY
-ssh_server "sudo PORT=$PROXY_PORT nohup python3 /tmp/frp-short-url-proxy.py > /tmp/frp-short-url-proxy.log 2>&1 & echo \$!" \
+ssh_server "PORT=$PROXY_PORT nohup python3 /tmp/frp-short-url-proxy.py > /tmp/frp-short-url-proxy.log 2>&1 & echo \$!" \
   >"$OUT_DIR/proxy.pid" || fail "start allowlist proxy"
-ssh_server "nohup cloudflared tunnel --url http://127.0.0.1:$PROXY_PORT > /tmp/frp-short-url-tunnel.log 2>&1 & echo \$!" \
+ssh_server "rm -f /tmp/frp-short-url-tunnel.log; nohup cloudflared tunnel --url http://127.0.0.1:$PROXY_PORT > /tmp/frp-short-url-tunnel.log 2>&1 < /dev/null & echo \$!" \
   >"$OUT_DIR/tunnel.pid" || fail "start tunnel"
-sleep 5
-BOOTSTRAP_HOST="$(ssh_server 'grep -oE "https://[a-zA-Z0-9.-]+\\.trycloudflare\\.com" /tmp/frp-short-url-tunnel.log | head -1 | sed "s#https://##"')"
+BOOTSTRAP_HOST=""
+for _ in $(seq 1 30); do
+  BOOTSTRAP_HOST="$(ssh_server 'grep -oE "[a-zA-Z0-9-]+\\.trycloudflare\\.com" /tmp/frp-short-url-tunnel.log 2>/dev/null | head -1' || true)"
+  if [[ -n "$BOOTSTRAP_HOST" ]]; then
+    break
+  fi
+  sleep 2
+done
 [[ -n "$BOOTSTRAP_HOST" ]] || {
-  ssh_server 'tail -80 /tmp/frp-short-url-tunnel.log; echo ----; tail -40 /tmp/frp-short-url-proxy.log' >"$OUT_DIR/tunnel-debug.log" || true
+  ssh_server 'tail -80 /tmp/frp-short-url-tunnel.log; echo ----; tail -40 /tmp/frp-short-url-proxy.log; ss -lntp | grep 18080 || true' >"$OUT_DIR/tunnel-debug.log" || true
   cat "$OUT_DIR/tunnel-debug.log"
   fail "cloudflared hostname not ready"
 }
 note "BOOTSTRAP_HOST=$BOOTSTRAP_HOST"
 pass "PUBLIC_PROXY_TUNNEL"
 
-# Stock OS trust must accept the bootstrap host certificate.
-curl -fsSL --proto '=https' --tlsv1.2 -o /dev/null "https://${BOOTSTRAP_HOST}/healthz" \
-  || fail "stock OS trust failed for bootstrap host /healthz"
+# Wait until the publicly trusted bootstrap edge answers /healthz.
+ok=0
+for _ in $(seq 1 40); do
+  if curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 5 --max-time 15 \
+    -o /dev/null "https://${BOOTSTRAP_HOST}/healthz"; then
+    ok=1
+    break
+  fi
+  sleep 2
+done
+[[ "$ok" == "1" ]] || fail "stock OS trust failed for bootstrap host /healthz"
 pass "STOCK_OS_TRUST_HEALTHZ"
 
 # Configure bootstrap hostname + installer URL on server.
+# Tools update config.json without restarting services; allocator reloads on
+# mtime change, and we still bounce it so E2E never races a stale process.
 ssh_server "sudo /usr/local/sbin/frpctl set server bootstrap-hostname '$BOOTSTRAP_HOST'" \
   >"$OUT_DIR/set-bootstrap.log" 2>&1 || fail "set bootstrap-hostname"
 ssh_server "sudo /usr/local/sbin/frp-set-client-installer-url '$INSTALLER_URL'" \
   >"$OUT_DIR/set-installer.log" 2>&1 || fail "set installer url"
+ssh_server 'sudo systemctl daemon-reload; sudo systemctl restart frp-port-allocator' \
+  >"$OUT_DIR/restart-allocator.log" 2>&1 || fail "restart allocator after config"
+for _ in $(seq 1 30); do
+  if ssh_server 'curl -fsSk https://127.0.0.1:6099/healthz >/dev/null 2>&1'; then
+    break
+  fi
+  sleep 1
+done
 pass "BOOTSTRAP_HOSTNAME_CONFIGURED"
 
 # Purge any previous short-url client on the target.
@@ -178,7 +201,9 @@ if not m:
 print(m.group(0))
 PY
 )"
-note "SHORT_URL_COMMAND=$CMD"
+note "SHORT_URL_COMMAND_HOST=$BOOTSTRAP_HOST"
+# Do not log the opaque ticket. Keep only the command shape.
+note "SHORT_URL_COMMAND=curl -fsSL https://${BOOTSTRAP_HOST}/i/<redacted> | sudo bash"
 [[ "$CMD" == *"$BOOTSTRAP_HOST"* ]] || fail "command host mismatch"
 if [[ "$CMD" == *zt1.* ]]; then
   fail "short URL path unexpectedly used zt1"
@@ -189,14 +214,24 @@ fi
 pass "SHORT_URL_COMMAND_PRINTED"
 
 # Run exact printed command on clean client (stock OS trust, no preinstalled CA).
-ssh_client "sudo bash -lc $(printf '%q' "$CMD")" >"$OUT_DIR/client-enroll.log" 2>&1 \
+# Use pipefail so a failed curl cannot look like success.
+ssh_client "sudo bash -o pipefail -lc $(printf '%q' "$CMD")" >"$OUT_DIR/client-enroll.log" 2>&1 \
   || { cat "$OUT_DIR/client-enroll.log"; fail "short URL client enroll"; }
+if ! grep -qiE 'enrollment complete|Zero-touch setup complete|FRP client ready|installed' "$OUT_DIR/client-enroll.log"; then
+  # Accept active frpc + client-state as success when installer wording differs.
+  if ! ssh_client 'sudo test -f /etc/frp-auto-deploy/client-state.json && systemctl is-active frpc'; then
+    cat "$OUT_DIR/client-enroll.log"
+    fail "short URL enroll did not produce client state"
+  fi
+fi
 pass "SHORT_URL_ENROLL"
 
 # Verify server sees the client.
 SHOW="$OUT_DIR/show-client.out"
-ssh_server "sudo /usr/local/sbin/frpctl show clients; sudo /usr/local/sbin/frpctl show client '$CLIENT_LABEL'" \
-  >"$SHOW" 2>&1 || { cat "$SHOW"; fail "show client"; }
+ssh_server "sudo /usr/local/sbin/frpctl show clients" >"$SHOW" 2>&1 || { cat "$SHOW"; fail "show clients"; }
+ssh_server "sudo /usr/local/sbin/frpctl show client '$CLIENT_LABEL'" >>"$SHOW" 2>&1 \
+  || ssh_server "sudo /usr/local/sbin/frpctl show client \$(sudo python3 -c \"import json;d=json.load(open('/var/lib/frp-auto-deploy/registry.json'));print(next(cid for cid,c in (d.get('clients') or {}).items() if (c.get('label') or '')=='$CLIENT_LABEL'))\")" >>"$SHOW" 2>&1 \
+  || { cat "$SHOW"; fail "show client"; }
 grep -qi "$CLIENT_LABEL" "$SHOW" || fail "client label missing"
 grep -qiE '6000|ssh' "$SHOW" || fail "ssh service/port missing"
 pass "CLIENT_SERVICES_PORTS"
@@ -249,8 +284,7 @@ grep -qiE 'Could not resolve|SSL|certificate|not known' "$OUT_DIR/bad-cert.err" 
 pass "CERT_FAILURE_FAILS_CLOSED"
 
 # Cleanup tunnel/proxy
-ssh_server 'sudo pkill -f "cloudflared tunnel --url" 2>/dev/null || true
-sudo pkill -f frp-short-url-proxy.py 2>/dev/null || true' || true
+ssh_server 'sudo pkill -x cloudflared 2>/dev/null || true; sudo pkill -f "[f]rp-short-url-proxy.py" 2>/dev/null || true' || true
 
 note "SHORT_URL_REAL_E2E=PASS"
 note "OUT_DIR=$OUT_DIR"

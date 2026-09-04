@@ -410,6 +410,35 @@ print('ok')
 PY
 pass "PUBLIC_HOSTNAME_SEMANTICS_UNCHANGED"
 
+# Config edits on disk must apply to GET /i/ without restarting the allocator.
+# (frpctl set / installer-url tools do not restart services.)
+NEW_INSTALLER='https://example.test/bootstrap-client-reloaded.sh'
+python3 - "$TREE/etc/frp-auto-deploy/config.json" "$NEW_INSTALLER" <<'PY' || fail "mutate installer url"
+import json
+import sys
+import time
+path = sys.argv[1]
+url = sys.argv[2]
+cfg = json.load(open(path))
+cfg['client_installer_url'] = url
+json.dump(cfg, open(path, 'w'), indent=2, sort_keys=True)
+open(path, 'a').write('\n')
+# Ensure mtime advances on coarse filesystems.
+time.sleep(0.05)
+print('ok')
+PY
+# Need a fresh unused ticket for GET (previous ticket was completed).
+TICKET2="$(python3 "$ROOT/tools/frp-create-client" --one-line --ssh --ssh-user testuser \
+  --client-name short-url-reload --note reload-cfg 2>"$WORKDIR/create-reload.err" \
+  | python3 -c "import re,sys; t=sys.stdin.read(); m=re.search(r\"/i/(bt1\\.[0-9a-f]+\\.[0-9a-f]+)\", t); print(m.group(1) if m else '')")"
+[[ -n "$TICKET2" ]] || { cat "$WORKDIR/create-reload.err"; fail "create reload ticket"; }
+SCRIPT_RELOAD="$WORKDIR/script-reload.sh"
+curl -fsSk "https://127.0.0.1:${FRP_TEST_ALLOC_PORT}/i/${TICKET2}" -o "$SCRIPT_RELOAD" \
+  || fail "GET /i after config mutate"
+grep -F "$NEW_INSTALLER" "$SCRIPT_RELOAD" \
+  || { cat "$SCRIPT_RELOAD"; fail "GET /i did not pick up reloaded installer URL"; }
+pass "CONFIG_RELOAD_WITHOUT_RESTART"
+
 if grep -RInE 'curl -k|curl --insecure|wget --no-check-certificate' \
   "$ROOT/lib/frp_zero_touch.py" 2>/dev/null; then
   fail "insecure TLS found in short URL helper"
