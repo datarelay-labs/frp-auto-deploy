@@ -2,7 +2,7 @@
 
 `frp-auto-deploy` supports two server deployment modes. Direct mode is the
 default and matches 2.0.0. Enterprise single-443 is optional. Project version
-**2.1.0** is the current stable release.
+**2.1.1** is the current stable release.
 
 Published service ports stay **TCP/6000-6098** (1:1) in both modes.
 
@@ -98,7 +98,7 @@ The official bootstrap URL is unchanged:
 
 ```bash
 curl -fsSL \
-https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/bootstrap-server.sh \
+https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.1/dist/bootstrap-server.sh \
 | sudo bash
 ```
 
