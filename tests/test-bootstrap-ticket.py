@@ -452,6 +452,76 @@ def test_redeem_retry_before_and_after_enroll():
         env.cleanup()
 
 
+def test_bootstrap_completion_fail_closed():
+    """Enrollment must not succeed if bootstrap ticket completion cannot persist."""
+    env = Env()
+    try:
+        ticket, enroll, _r = env.issue()
+        code, result = env.redeem(ticket, 'machine-fail')
+        if code != 200:
+            fail('redeem before fail-closed enroll', result)
+            return
+
+        original = env.allocator.save_bootstrap
+
+        def boom(path, record):
+            raise OSError('injected bootstrap save failure')
+
+        env.allocator.save_bootstrap = boom
+        body = json.dumps({
+            'machine_id': 'machine-fail',
+            'hostname': 'host-fail',
+            'services': env.ssh_services(),
+        }, separators=(',', ':')).encode()
+        ts = str(int(time.time()))
+        sig = hmac.new(
+            enroll['secret'].encode(),
+            (ts + '\n' + body.decode()).encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        ecode, eresult = env.allocator.enroll(enroll['id'], ts, sig, body)
+        env.allocator.save_bootstrap = original
+        if ecode == 200:
+            fail('enroll succeeded despite bootstrap save failure', eresult)
+            return
+        if eresult.get('error_class') != 'SERVER_MUTATION_FAILED':
+            fail('unexpected enroll error class', eresult)
+            return
+
+        state = env.allocator.load_registry()
+        if 'machine-fail' in (state.get('clients') or {}):
+            fail('client left behind after bootstrap completion failure')
+            return
+
+        # Ticket remains usable for retry; must not create duplicates on success.
+        code2, _result2 = env.redeem(ticket, 'machine-fail')
+        if code2 != 200:
+            fail('ticket not reusable after failed enroll', code2)
+            return
+        env.allocator.save_bootstrap = original
+        ts2 = str(int(time.time()))
+        sig2 = hmac.new(
+            enroll['secret'].encode(),
+            (ts2 + '\n' + body.decode()).encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        ecode2, eresult2 = env.allocator.enroll(enroll['id'], ts2, sig2, body)
+        if ecode2 != 200:
+            fail('retry enroll after injected failure', eresult2)
+            return
+        state2 = env.allocator.load_registry()
+        clients = state2.get('clients') or {}
+        if list(clients.keys()).count('machine-fail') != 1 and 'machine-fail' not in clients:
+            fail('missing client after retry')
+            return
+        if len([k for k in clients if k == 'machine-fail']) != 1:
+            fail('duplicate client after retry')
+            return
+        pass_('BOOTSTRAP_COMPLETION_FAIL_CLOSED')
+    finally:
+        env.cleanup()
+
+
 def main():
     test_issue_hashed_and_entropy()
     test_redeem_bind_and_retry()
@@ -464,6 +534,7 @@ def main():
     test_cleanup_expired()
     test_enroll_reuses_existing_and_note()
     test_redeem_retry_before_and_after_enroll()
+    test_bootstrap_completion_fail_closed()
     if FAILED:
         print('BOOTSTRAP_TICKET_TEST=FAIL')
         return 1

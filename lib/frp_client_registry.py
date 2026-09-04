@@ -354,10 +354,36 @@ def format_candidate_table(matches):
 
 
 def resolve_client(state, query):
+    """Resolve a client selector with CLIENT ID precedence.
+
+    Priority:
+      1. exact CLIENT ID (machine_id)
+      2. unique CLIENT ID prefix
+      3. exact unique label
+      4. exact unique hostname
+
+    Labels and hostnames must never shadow an actual CLIENT ID or unique
+    CLIENT ID prefix (critical for destructive commands).
+    """
     query = '' if query is None else str(query).strip()
     if not query:
         raise ClientLookupError('client identifier is required')
     clients = sorted_clients(state)
+
+    exact_mid = [item for item in clients if item[0] == query]
+    if len(exact_mid) == 1:
+        return exact_mid[0]
+    if len(exact_mid) > 1:
+        raise ClientLookupError('multiple clients matched', exact_mid)
+
+    prefix_matches = [
+        item for item in clients
+        if item[0].startswith(query)
+    ]
+    if len(prefix_matches) == 1:
+        return prefix_matches[0]
+    if len(prefix_matches) > 1:
+        raise ClientLookupError('multiple clients matched', prefix_matches)
 
     label_matches = [
         item for item in clients
@@ -376,15 +402,6 @@ def resolve_client(state, query):
         return host_matches[0]
     if len(host_matches) > 1:
         raise ClientLookupError('multiple clients matched', host_matches)
-
-    mid_matches = [
-        item for item in clients
-        if item[0] == query or item[0].startswith(query)
-    ]
-    if len(mid_matches) == 1:
-        return mid_matches[0]
-    if len(mid_matches) > 1:
-        raise ClientLookupError('multiple clients matched', mid_matches)
 
     raise ClientLookupError('client not found')
 
