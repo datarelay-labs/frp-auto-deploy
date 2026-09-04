@@ -587,6 +587,14 @@ if [[ "${FRP_CLIENT_SOURCED:-}" != "1" ]]; then
         frp_client_installer_usage
         exit 0
         ;;
+      zt1.*)
+        # Short Zero-Touch opaque package from:
+        #   curl -fsSL <public-installer> | sudo bash -s -- zt1.<payload>
+        if ! frp_zero_touch_apply_package "$1"; then
+          exit 1
+        fi
+        shift
+        ;;
       *)
         echo "ERROR: unknown option: $1" >&2
         frp_client_installer_usage >&2

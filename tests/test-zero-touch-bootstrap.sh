@@ -11,6 +11,26 @@ trap '[[ -n "$ALLOC_PID" ]] && kill "$ALLOC_PID" 2>/dev/null || true; [[ -n "$LI
 pass() { echo "PASS $1"; }
 fail() { echo "FAIL $1" >&2; exit 1; }
 
+extract_bootstrap_ticket() {
+  # Extract bt1 ticket from short zt1 package output or legacy env one-liner.
+  python3 - "$1" <<'PY'
+import base64, json, re, sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text()
+m = re.search(r"sudo bash -s -- '(zt1\.[^']+)'", text)
+if m:
+    parts = m.group(1).split('.', 1)
+    padded = parts[1] + ('=' * (-len(parts[1]) % 4))
+    payload = json.loads(base64.urlsafe_b64decode(padded.encode('ascii')).decode('utf-8'))
+    print(payload['t'])
+    raise SystemExit(0)
+m2 = re.search(r"FRP_BOOTSTRAP_TICKET=(?:'([^']+)'|\"([^\"]+)\"|(\S+))", text)
+if not m2:
+    raise SystemExit(0)
+print(next(g for g in m2.groups() if g))
+PY
+}
+
 chmod +x "$ROOT/tools/frp-create-client"
 
 make_frpc() {
@@ -122,8 +142,10 @@ grep -q 'frp-create-client --one-line --ssh --ssh-user aella' "$WORKDIR/help.out
 pass "CREATE_CLIENT_HELP"
 
 "$CREATE" --one-line --client-name inventory-only >"$WORKDIR/nosvc.out" 2>"$WORKDIR/nosvc.err"
-grep -q 'FRP_MANAGEMENT_ONLY=1' "$WORKDIR/nosvc.out" || fail "management-only marker"
+grep -q 'sudo bash -s --' "$WORKDIR/nosvc.out" || fail "short command shape"
+grep -q 'zt1.' "$WORKDIR/nosvc.out" || fail "opaque package token"
 grep -q 'no service or public port' "$WORKDIR/nosvc.out" || fail "management-only explanation"
+# Legacy env marker is no longer required; profile is server-side.
 pass "ONE_LINE_MANAGEMENT_ONLY"
 
 set +e
@@ -247,7 +269,8 @@ grep -q 'Client name : seoul-groupware' "$WORKDIR/prompt.out" || fail "confirmat
 grep -q 'SSH user    : aella' "$WORKDIR/prompt.out" || fail "confirmation user"
 grep -q 'SSH port    : 22' "$WORKDIR/prompt.out" || fail "confirmation port"
 grep -q 'Target      : 127.0.0.1:22' "$WORKDIR/prompt.out" || fail "confirmation target"
-grep -q "FRP_SSH_USER='aella'" "$WORKDIR/prompt.out" || fail "generated command missing entered user"
+grep -q 'zt1\.' "$WORKDIR/prompt.out" || fail "generated command missing opaque package"
+grep -q 'sudo bash -s --' "$WORKDIR/prompt.out" || fail "generated command missing short runner"
 if grep -E 'FRP_SSH_USER=.ubuntu|Client SSH user: ubuntu|SSH user : ubuntu' \
   "$WORKDIR/prompt.out" "$WORKDIR/prompt.err"; then
   fail "prompt defaulted to ubuntu"
@@ -271,7 +294,8 @@ fi
 if grep -q 'Client SSH user:' "$WORKDIR/explicit.out" "$WORKDIR/explicit.err"; then
   fail "explicit --ssh-user asked for username"
 fi
-grep -q "FRP_SSH_USER='aella'" "$WORKDIR/explicit.out" || fail "explicit --ssh-user missing from command"
+grep -q 'zt1\.' "$WORKDIR/explicit.out" || fail "explicit command missing opaque package"
+[[ "$(ticket_ssh_user)" == "aella" ]] || fail "explicit --ssh-user not stored in profile"
 pass "EXPLICIT_SSH_USER_NONINTERACTIVE"
 
 # ---------------------------------------------------------------------------
@@ -293,21 +317,30 @@ fi
 CMD_LINE="$(grep -E '^curl -fsSL ' "$WORKDIR/oneline.out" | head -n1)"
 [[ -n "$CMD_LINE" ]] || fail "missing curl command"
 [[ "$(grep -cE '^curl -fsSL ' "$WORKDIR/oneline.out")" == "1" ]] || fail "more than one curl line"
-printf '%s' "$CMD_LINE" | grep -q "FRP_ZERO_TOUCH=1" || fail "missing FRP_ZERO_TOUCH"
-printf '%s' "$CMD_LINE" | grep -q "FRP_BOOTSTRAP_TICKET=" || fail "missing ticket env"
-printf '%s' "$CMD_LINE" | grep -q "FRP_SSH_USER=" || fail "missing ssh user"
-printf '%s' "$CMD_LINE" | grep -q "aella" || fail "ssh user value"
-printf '%s' "$CMD_LINE" | grep -q "FRP_ALLOCATOR_CA_SHA256=" || fail "missing CA fp"
+printf '%s' "$CMD_LINE" | grep -q "sudo bash -s --" || fail "missing short package runner"
+printf '%s' "$CMD_LINE" | grep -q "zt1\." || fail "missing opaque package"
 printf '%s' "$CMD_LINE" | grep -q "FRP_SERVICES_JSON=" && fail "services JSON in command"
+if printf '%s' "$CMD_LINE" | grep -qiE 'curl -k|curl --insecure|wget --no-check-certificate'; then
+  fail "insecure TLS in zero-touch command"
+fi
 echo "$CMD_LINE" | python3 -c 'import sys; line=sys.stdin.read(); assert "\n" not in line.strip()' || fail "command not one line"
 TICKET="$(python3 - "$WORKDIR/oneline.out" <<'PY'
-import re, sys
+import base64, json, re, sys
 from pathlib import Path
 text = Path(sys.argv[1]).read_text()
-m = re.search(r"FRP_BOOTSTRAP_TICKET=(?:'([^']+)'|\"([^\"]+)\"|(\S+))", text)
+m = re.search(r"sudo bash -s -- '(zt1\.[^']+)'", text)
 if not m:
-    raise SystemExit('missing ticket')
-print(next(g for g in m.groups() if g))
+    # Legacy long form fallback
+    m2 = re.search(r"FRP_BOOTSTRAP_TICKET=(?:'([^']+)'|\"([^\"]+)\"|(\S+))", text)
+    if not m2:
+        raise SystemExit('missing ticket')
+    print(next(g for g in m2.groups() if g))
+    raise SystemExit(0)
+package = m.group(1)
+parts = package.split('.', 1)
+padded = parts[1] + ('=' * (-len(parts[1]) % 4))
+payload = json.loads(base64.urlsafe_b64decode(padded.encode('ascii')).decode('utf-8'))
+print(payload['t'])
 PY
 )"
 [[ "$TICKET" == bt1.* ]] || fail "ticket format $TICKET"
@@ -341,8 +374,29 @@ pass "SERVER_CREATION_NO_PORT_RESERVATION_CLI"
 
 FRP_DEPLOY_TEST_ROOT="$TREE" python3 "$CREATE" --one-line --ssh --ssh-port 2222 --ssh-user user \
   >"$WORKDIR/sshport.out"
-grep -q "FRP_SSH_PORT=" "$WORKDIR/sshport.out" || fail "ssh-port env"
-grep -q "2222" "$WORKDIR/sshport.out" || fail "ssh-port value"
+# SSH port/user live in the server-side bootstrap profile, not the short command.
+python3 - "$WORKDIR/sshport.out" "$TREE/var/lib/frp-auto-deploy/bootstrap" <<'PY' || fail "ssh-port profile"
+import base64, json, re, sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text()
+m = re.search(r"sudo bash -s -- '(zt1\.[^']+)'", text)
+assert m, text
+package = m.group(1)
+parts = package.split('.', 1)
+padded = parts[1] + ('=' * (-len(parts[1]) % 4))
+payload = json.loads(base64.urlsafe_b64decode(padded.encode('ascii')).decode('utf-8'))
+ticket = payload['t']
+tid = ticket.split('.')[1]
+record = json.loads((Path(sys.argv[2]) / (tid + '.json')).read_text())
+services = record.get('services') or []
+if isinstance(services, dict):
+    ssh = services.get('ssh') or {}
+else:
+    ssh = next((s for s in services if isinstance(s, dict) and s.get('id') == 'ssh'), {})
+assert int(ssh.get('local_port') or 0) == 2222, ssh
+assert str(ssh.get('ssh_user') or '') == 'user', ssh
+print('ok')
+PY
 pass "SSH_PORT_IN_COMMAND"
 
 # Shell injection: allocator URL with semicolon is quoted.
@@ -358,22 +412,24 @@ PY
 FRP_DEPLOY_TEST_ROOT="$TREE" python3 "$CREATE" --one-line --ssh --ssh-user aella --note "note;rm -rf /" \
   >"$WORKDIR/quoted.out"
 python3 - "$WORKDIR/quoted.out" <<'PY' || fail "command injection"
-import re, subprocess, sys
+import base64, json, re, sys
 from pathlib import Path
 text = Path(sys.argv[1]).read_text()
-m = re.search(r"^curl -fsSL (.+) \| sudo env (.+) bash$", text, re.M)
+m = re.search(r"^curl -fsSL (.+) \| sudo bash -s -- (.+)$", text, re.M)
 if not m:
     raise SystemExit('missing one-line command')
-script = "URL=%s; printf '%%s' \"$URL\"" % m.group(1)
-# The installer URL assignment is the curl argument, already quoted by shlex.
 line = m.group(0)
-if "';" in line and "FRP_ALLOCATOR_URL='https://203.0.113.10/enroll;id'" not in line:
-    raise SystemExit('allocator URL not quoted')
-if "FRP_ALLOCATOR_URL='https://203.0.113.10/enroll;id'" not in line:
-    raise SystemExit('quoted allocator missing')
-if "bootstrap-client.sh;uname" in line and "'https://example.test/bootstrap-client.sh;uname'" not in line:
+if "'https://example.test/bootstrap-client.sh;uname'" not in line:
     raise SystemExit('installer URL not quoted')
-# Note is not placed in the command.
+# Opaque package must carry the allocator URL safely (decoded value, not shell-evaled).
+pm = re.search(r"sudo bash -s -- '(zt1\.[^']+)'", line)
+if not pm:
+    raise SystemExit('missing opaque package')
+parts = pm.group(1).split('.', 1)
+padded = parts[1] + ('=' * (-len(parts[1]) % 4))
+payload = json.loads(base64.urlsafe_b64decode(padded.encode('ascii')).decode('utf-8'))
+if payload.get('u') != 'https://203.0.113.10/enroll;id':
+    raise SystemExit('allocator URL not preserved in package')
 cmd = [l for l in text.splitlines() if l.startswith('curl ')][0]
 if 'rm -rf' in cmd:
     raise SystemExit('note leaked into command')
@@ -411,7 +467,26 @@ pass "SSH_USER_NEWLINE_REJECTED"
 
 FRP_DEPLOY_TEST_ROOT="$TREE" python3 "$CREATE" --one-line --ssh --ssh-user 'ubuntu.admin@host-01' \
   >"$WORKDIR/safeuser.out"
-grep -q "FRP_SSH_USER='ubuntu.admin@host-01'" "$WORKDIR/safeuser.out" || fail "safe ssh-user not quoted"
+python3 - "$WORKDIR/safeuser.out" "$TREE/var/lib/frp-auto-deploy/bootstrap" <<'PY' || fail "safe ssh-user not in profile"
+import base64, json, re, sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text()
+m = re.search(r"sudo bash -s -- '(zt1\.[^']+)'", text)
+assert m
+parts = m.group(1).split('.', 1)
+padded = parts[1] + ('=' * (-len(parts[1]) % 4))
+payload = json.loads(base64.urlsafe_b64decode(padded.encode('ascii')).decode('utf-8'))
+tid = payload['t'].split('.')[1]
+record = json.loads((Path(sys.argv[2]) / (tid + '.json')).read_text())
+services = record.get('services') or []
+if isinstance(services, dict):
+    user = (services.get('ssh') or {}).get('ssh_user')
+else:
+    ssh = next((s for s in services if isinstance(s, dict) and s.get('id') == 'ssh'), {})
+    user = ssh.get('ssh_user')
+assert user == 'ubuntu.admin@host-01', user
+print('ok')
+PY
 pass "SSH_USER_SAFE_QUOTED"
 
 # Restore canonical URLs for later tests.
@@ -542,14 +617,7 @@ issue_ticket() {
 }
 
 issue_ticket >"$WORKDIR/live-create.out"
-LIVE_TICKET="$(python3 - "$WORKDIR/live-create.out" <<'PY'
-import re, sys
-from pathlib import Path
-text = Path(sys.argv[1]).read_text()
-m = re.search(r"FRP_BOOTSTRAP_TICKET=(?:'([^']+)'|\"([^\"]+)\"|(\S+))", text)
-print(next(g for g in m.groups() if g) if m else '')
-PY
-)"
+LIVE_TICKET="$(extract_bootstrap_ticket "$WORKDIR/live-create.out")"
 [[ -n "$LIVE_TICKET" ]] || fail "live ticket missing"
 
 CLIENT="$WORKDIR/client"
@@ -678,14 +746,7 @@ pass "EXISTING_CLIENT_REENROLL_PROTECTION"
 # (REDEEM_RETRY_BEFORE_ENROLL). After enrollment succeeds the ticket is consumed.
 RETRY="$WORKDIR/client-retry"
 issue_ticket >"$WORKDIR/retry-create.out"
-RETRY_TICKET="$(python3 - "$WORKDIR/retry-create.out" <<'PY'
-import re, sys
-from pathlib import Path
-text = Path(sys.argv[1]).read_text()
-m = re.search(r"FRP_BOOTSTRAP_TICKET=(?:'([^']+)'|\"([^\"]+)\"|(\S+))", text)
-print(next(g for g in m.groups() if g) if m else '')
-PY
-)"
+RETRY_TICKET="$(extract_bootstrap_ticket "$WORKDIR/retry-create.out")"
 if ! run_zero_touch "$RETRY" "$RETRY_TICKET" 'ccddeeff00112233445566778899aa' "$WORKDIR/retry1.out"; then
   cat "$WORKDIR/retry1.out" "$WORKDIR/retry1.err" >&2
   fail "retry first run"
@@ -719,14 +780,7 @@ pass "SECOND_MACHINE_REJECTED"
 
 # Bound-but-not-completed: redeem only via HTTPS, then a different machine must get BOUND.
 issue_ticket >"$WORKDIR/bound-create.out"
-BOUND_TICKET="$(python3 - "$WORKDIR/bound-create.out" <<'PY'
-import re, sys
-from pathlib import Path
-text = Path(sys.argv[1]).read_text()
-m = re.search(r"FRP_BOOTSTRAP_TICKET=(?:'([^']+)'|\"([^\"]+)\"|(\S+))", text)
-print(next(g for g in m.groups() if g) if m else '')
-PY
-)"
+BOUND_TICKET="$(extract_bootstrap_ticket "$WORKDIR/bound-create.out")"
 python3 - "$ALLOC_PORT" "$LIVE_CA_FP" "$BOUND_TICKET" "$ALLOC_ROOT/pki/ca.crt" <<'PY'
 import json, ssl, sys, urllib.request
 port, fp, ticket, ca = sys.argv[1:5]
@@ -755,14 +809,7 @@ pass "SECOND_MACHINE_BOUND_BEFORE_ENROLL"
 
 # SSH user missing fails before redeem.
 issue_ticket >"$WORKDIR/missuser-create.out"
-MU_TICKET="$(python3 - "$WORKDIR/missuser-create.out" <<'PY'
-import re, sys
-from pathlib import Path
-text = Path(sys.argv[1]).read_text()
-m = re.search(r"FRP_BOOTSTRAP_TICKET=(?:'([^']+)'|\"([^\"]+)\"|(\S+))", text)
-print(next(g for g in m.groups() if g) if m else '')
-PY
-)"
+MU_TICKET="$(extract_bootstrap_ticket "$WORKDIR/missuser-create.out")"
 MU="$WORKDIR/client-missuser"
 mkdir -p "$MU/etc/frp" "$MU/usr/local/bin"
 make_frpc "$MU/usr/local/bin/frpc"
@@ -806,14 +853,7 @@ pass "CLIENT_PREFLIGHT_PRESERVED"
 
 # SSH port closed fails before redeem.
 issue_ticket >"$WORKDIR/missport-create.out"
-MP_TICKET="$(python3 - "$WORKDIR/missport-create.out" <<'PY'
-import re, sys
-from pathlib import Path
-text = Path(sys.argv[1]).read_text()
-m = re.search(r"FRP_BOOTSTRAP_TICKET=(?:'([^']+)'|\"([^\"]+)\"|(\S+))", text)
-print(next(g for g in m.groups() if g) if m else '')
-PY
-)"
+MP_TICKET="$(extract_bootstrap_ticket "$WORKDIR/missport-create.out")"
 CLOSED_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); p=s.getsockname()[1]; s.close(); print(p)')"
 MP="$WORKDIR/client-missport"
 mkdir -p "$MP/etc/frp" "$MP/usr/local/bin"
@@ -839,14 +879,7 @@ pass "SSH_TARGET_DOWN_FAILS_BEFORE_REDEEM"
 
 # Wrong CA fingerprint fails before ticket is sent.
 issue_ticket >"$WORKDIR/badca-create.out"
-BC_TICKET="$(python3 - "$WORKDIR/badca-create.out" <<'PY'
-import re, sys
-from pathlib import Path
-text = Path(sys.argv[1]).read_text()
-m = re.search(r"FRP_BOOTSTRAP_TICKET=(?:'([^']+)'|\"([^\"]+)\"|(\S+))", text)
-print(next(g for g in m.groups() if g) if m else '')
-PY
-)"
+BC_TICKET="$(extract_bootstrap_ticket "$WORKDIR/badca-create.out")"
 BC="$WORKDIR/client-badca"
 mkdir -p "$BC/etc/frp" "$BC/usr/local/bin"
 make_frpc "$BC/usr/local/bin/frpc"
@@ -921,14 +954,7 @@ pass "PARTIAL_CLIENT_RECOVERY_PROTECTION"
 # Expired ticket via client.
 EXP="$WORKDIR/client-exp"
 issue_ticket >"$WORKDIR/exp-create.out"
-EXP_TICKET="$(python3 - "$WORKDIR/exp-create.out" <<'PY'
-import re, sys
-from pathlib import Path
-text = Path(sys.argv[1]).read_text()
-m = re.search(r"FRP_BOOTSTRAP_TICKET=(?:'([^']+)'|\"([^\"]+)\"|(\S+))", text)
-print(next(g for g in m.groups() if g) if m else '')
-PY
-)"
+EXP_TICKET="$(extract_bootstrap_ticket "$WORKDIR/exp-create.out")"
 EXP_ID="${EXP_TICKET#bt1.}"
 EXP_ID="${EXP_ID%%.*}"
 python3 - "$ALLOC_ROOT/bootstrap/${EXP_ID}.json" "$ALLOC_ROOT/enrollments" <<'PY'
