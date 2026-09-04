@@ -272,7 +272,7 @@ frp_client_existing_install_message() {
   echo "  sudo frpctl update" >&2
   echo >&2
   echo "or, from the bootstrap bundle:" >&2
-  echo "  curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.1/dist/bootstrap-client.sh | sudo bash -s -- --upgrade" >&2
+  echo "  curl -fsSL https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v${PROJECT_VERSION}/dist/bootstrap-client.sh | sudo bash -s -- --upgrade" >&2
   echo >&2
   echo "Use sudo frp-client to change published services." >&2
   echo "An Enrollment Code is only for first install or trust recovery." >&2
@@ -586,6 +586,14 @@ if [[ "${FRP_CLIENT_SOURCED:-}" != "1" ]]; then
       -h|--help)
         frp_client_installer_usage
         exit 0
+        ;;
+      zt1.*)
+        # Short Zero-Touch opaque package from:
+        #   curl -fsSL <public-installer> | sudo bash -s -- zt1.<payload>
+        if ! frp_zero_touch_apply_package "$1"; then
+          exit 1
+        fi
+        shift
         ;;
       *)
         echo "ERROR: unknown option: $1" >&2

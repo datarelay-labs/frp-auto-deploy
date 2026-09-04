@@ -42,12 +42,19 @@ EOF
     >"$tree/var/lib/frp-auto-deploy/enrollments/ticket.json"
   printf '{"ticket":"%s-bootstrap"}\n' "$marker" \
     >"$tree/var/lib/frp-auto-deploy/bootstrap/ticket.json"
+  mkdir -p "$tree/var/log/frp-auto-deploy"
+  printf '{"event":"backup.created","marker":"%s"}\n' "$marker" \
+    >"$tree/var/log/frp-auto-deploy/audit.jsonl"
+  printf '{"event":"rotated","marker":"%s"}\n' "$marker" \
+    >"$tree/var/log/frp-auto-deploy/audit.jsonl.1"
   chmod 700 \
     "$tree/etc/frp-auto-deploy" "$tree/etc/frp-auto-deploy/pki" \
     "$tree/etc/frp" "$tree/var/lib/frp-auto-deploy" \
     "$tree/var/lib/frp-auto-deploy/enrollments" \
-    "$tree/var/lib/frp-auto-deploy/bootstrap"
+    "$tree/var/lib/frp-auto-deploy/bootstrap" \
+    "$tree/var/log/frp-auto-deploy"
   find "$tree/etc/frp-auto-deploy" "$tree/etc/frp" "$tree/var/lib/frp-auto-deploy" \
+    "$tree/var/log/frp-auto-deploy" \
     -type f -exec chmod 600 {} +
 }
 
@@ -148,6 +155,10 @@ grep -q 'original-enrollment' "$TREE/var/lib/frp-auto-deploy/enrollments/ticket.
   || fail "enrollment restore"
 grep -q 'original-bootstrap' "$TREE/var/lib/frp-auto-deploy/bootstrap/ticket.json" \
   || fail "bootstrap restore"
+grep -q '"marker":"original"' "$TREE/var/log/frp-auto-deploy/audit.jsonl" \
+  || fail "audit.jsonl restore"
+grep -q '"marker":"original"' "$TREE/var/log/frp-auto-deploy/audit.jsonl.1" \
+  || fail "rotated audit restore"
 [[ ! -f "$TREE/etc/frp-auto-deploy/frontend.conf" ]] || fail "absent optional file not removed"
 [[ "$(mode_of "$TREE/etc/frp/server_token")" == "0o600" ]] || fail "token mode"
 [[ "$(mode_of "$TREE/etc/frp-auto-deploy/pki")" == "0o700" ]] || fail "PKI directory mode"
@@ -157,8 +168,33 @@ fi
 find "$TREE/var/lib/frp-auto-deploy/backups" -name 'pre-restore-*.tar.gz' -type f \
   | grep -q . || fail "pre-restore snapshot missing"
 pass "RESTORE_EXACT_STATE_PERMISSIONS_NO_SECRET_LEAK"
+pass "AUDIT_INCLUDED_IN_BACKUP_RESTORE"
+
+# Cross-version restore must fail closed.
+CROSS="$WORKDIR/cross-tree"
+seed_state "$CROSS" cross
+export FRP_DEPLOY_TEST_ROOT="$CROSS"
+python3 "$ROOT/tools/frp-backup" "$WORKDIR/cross.tar.gz" >/dev/null
+# Simulate newer installed product while backup remains older.
+cat >"$CROSS/etc/frp-auto-deploy/version" <<EOF
+PROJECT_VERSION=2.1.2
+FRP_VERSION=0.70.1
+RELEASE_CHANNEL=dev
+SOURCE_REF=main
+BUNDLE_SHA256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+if python3 "$ROOT/tools/frp-restore" "$WORKDIR/cross.tar.gz" \
+  >"$WORKDIR/cross.stdout" 2>"$WORKDIR/cross.stderr"; then
+  fail "cross-version restore should fail closed"
+fi
+grep -qi 'cross-version restore is not supported' "$WORKDIR/cross.stderr" \
+  || fail "cross-version diagnostic"
+grep -q 'PROJECT_VERSION=2.1.2' "$CROSS/etc/frp-auto-deploy/version" \
+  || fail "cross-version restore mutated installed version"
+pass "CROSS_VERSION_RESTORE_FAIL_CLOSED"
 
 seed_state "$TREE" rollback-source
+export FRP_DEPLOY_TEST_ROOT="$TREE"
 ROLLBACK_BEFORE="$WORKDIR/rollback.before"
 cp "$TREE/var/lib/frp-auto-deploy/registry.json" "$ROLLBACK_BEFORE"
 if FRP_RESTORE_HOOK_FAIL_AFTER=4 \

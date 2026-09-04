@@ -339,6 +339,36 @@ _frp_server_upgrade_err() {
   return "$ec"
 }
 
+frp_server_upgrade_restore_snapshot_files() {
+  # File-only restore for project-update rollback. Avoid --apply-services here:
+  # mid-upgrade unit state is often transitional on live systemd hosts and can
+  # fail strict enable/active replay even when files restore cleanly. Health is
+  # re-checked separately after an explicit unit restart.
+  local dest="${1:-${FRP_INSTALL_SNAPSHOT:-}}" py
+  [[ -n "$dest" && -d "$dest" ]] || return 0
+  if [[ "${FRP_SERVER_UPGRADE_HOOK_ROLLBACK_SYSTEMD:-}" == "1" ]]; then
+    echo "ERROR: simulated systemd service-state restoration failure" >&2
+    return 1
+  fi
+  py=""
+  if [[ -n "${BASE_DIR:-}" && -f "$BASE_DIR/lib/frp_install_txn.py" ]]; then
+    py="$BASE_DIR/lib/frp_install_txn.py"
+  else
+    py="$(frp_server_fs /usr/local/lib/frp-auto-deploy/frp_install_txn.py)"
+  fi
+  python3 "$py" restore --root "$(frp_server_snapshot_root)" --dest "$dest" || return 1
+  if frp_server_skip_systemd || frp_server_test_mode; then
+    return 0
+  fi
+  frp_server_systemctl daemon-reload || true
+  frp_server_restart_unit frps || return 1
+  frp_server_restart_unit frp-port-allocator || return 1
+  if frp_server_upgrade_is_single443; then
+    frp_server_restart_unit frp-frontend || return 1
+  fi
+  return 0
+}
+
 frp_server_upgrade_rollback() {
   local snapshot="$1"
   if [[ "${_FRP_UPGRADE_ROLLBACK_DONE:-0}" == "1" ]]; then
@@ -349,7 +379,7 @@ frp_server_upgrade_rollback() {
   fi
   _FRP_UPGRADE_IN_ROLLBACK=1
   FRP_INSTALL_SNAPSHOT="$snapshot"
-  if ! frp_server_rollback_snapshot; then
+  if ! frp_server_upgrade_restore_snapshot_files "$snapshot"; then
     echo "UPGRADE_ROLLBACK=FAIL"
     echo "RECOVERY_REQUIRED=YES"
     echo "LIVE_PROJECT_FILES_RESTORED=NO"
@@ -424,7 +454,7 @@ frp_server_apply_project_upgrade() {
   resolved_ref="$FRP_RESOLVED_SOURCE_REF"
 
   candidate_meta="$(frp_server_upgrade_validate_source_metadata \
-    "$source" "$resolved_ref" "$resolved_channel")" || return 1
+    "$source" "${FRP_EXPECTED_SOURCE_REF:-}" "$resolved_channel")" || return 1
   target="$(printf '%s' "$candidate_meta" | awk -F'\t' '{print $1}')"
   target_channel="$(printf '%s' "$candidate_meta" | awk -F'\t' '{print $2}')"
   target_ref="$(printf '%s' "$candidate_meta" | awk -F'\t' '{print $3}')"
@@ -520,8 +550,8 @@ frp_server_apply_project_upgrade() {
   trap '_frp_server_upgrade_err; frp_release_server_lock; rm -rf "'"$staged"'"; if [[ "${_FRP_UPGRADE_ERRTRACE_WAS}" != "1" ]]; then set +E; fi; exit 1' ERR
   trap 'if [[ "${_FRP_UPGRADE_ERRTRACE_WAS}" != "1" ]]; then set +E; fi; trap - ERR; frp_release_server_lock; rm -rf "'"$staged"'"' RETURN
 
-  FRP_TXN_RELEASE_CHANNEL="$resolved_channel" \
-  FRP_TXN_SOURCE_REF="$resolved_ref" \
+  FRP_TXN_RELEASE_CHANNEL="$target_channel" \
+  FRP_TXN_SOURCE_REF="$target_ref" \
   FRP_TXN_BUNDLE_SHA256="${target_bundle:-}" \
   FRP_TXN_SNAPSHOT_PATH="$snapshot" \
   FRP_TXN_MUTATION_STARTED=true \
@@ -584,7 +614,7 @@ frp_server_apply_project_upgrade() {
     frp_server_health_frontend || { frp_server_upgrade_rollback "$snapshot"; return 1; }
   fi
 
-  if ! FRP_RELEASE_CHANNEL="$resolved_channel" \
+  if ! FRP_RELEASE_CHANNEL="$target_channel" \
       FRP_BUNDLE_SHA256="$target_bundle" \
       FRP_VERSION_REQUIRE_VERIFIED_BUNDLE=1 \
       PROJECT_VERSION="$target" \

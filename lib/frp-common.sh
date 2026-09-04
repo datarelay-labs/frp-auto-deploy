@@ -8,7 +8,7 @@ fi
 FRP_COMMON_LOADED=1
 
 # Defaults match VERSION. A sibling VERSION file overrides project/FRP versions.
-PROJECT_VERSION="${PROJECT_VERSION:-2.1.1}"
+PROJECT_VERSION="${PROJECT_VERSION:-2.1.2}"
 FRP_VERSION="${FRP_VERSION:-0.70.1}"
 # FRP 0.70.1 pkg/util/net/websocket.go FrpWebsocketPath. Not configurable.
 FRP_WEBSOCKET_PATH="${FRP_WEBSOCKET_PATH:-/~!frp}"
@@ -905,6 +905,50 @@ frp_require_python() {
   fi
 }
 
+frp_python_version_ok() {
+  frp_command_exists python3 || return 1
+  frp_invoke python3 -c "import sys; raise SystemExit(0 if sys.version_info >= (${FRP_PYTHON_MIN_MAJOR}, ${FRP_PYTHON_MIN_MINOR}) else 1)"
+}
+
+frp_el8_family() {
+  local id ver
+  id="$(printf '%s' "${DISTRO_ID:-}" | tr '[:upper:]' '[:lower:]')"
+  ver="$(printf '%s' "${DISTRO_VERSION:-}" | cut -d. -f1)"
+  case "$id" in
+    rhel|centos|rocky|almalinux|ol)
+      [[ "$ver" == "8" ]]
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+frp_prefer_newer_python() {
+  # On EL8 the `python3` package is often 3.6. Prefer an installed 3.9+ binary
+  # via an early PATH shim without rewriting the distro /usr/bin/python3.
+  local candidate shimdir
+  if frp_python_version_ok; then
+    return 0
+  fi
+  for candidate in python3.12 python3.11 python3.10 python3.9 python3.8; do
+    if frp_command_exists "$candidate" && \
+       frp_invoke "$candidate" -c "import sys; raise SystemExit(0 if sys.version_info >= (${FRP_PYTHON_MIN_MAJOR}, ${FRP_PYTHON_MIN_MINOR}) else 1)"; then
+      shimdir="${FRP_PYTHON_SHIM_DIR:-/usr/local/bin}"
+      mkdir -p "$shimdir" 2>/dev/null || shimdir="${TMPDIR:-/tmp}/frp-python-shim"
+      mkdir -p "$shimdir"
+      ln -sfn "$(command -v "$candidate")" "$shimdir/python3"
+      case ":$PATH:" in
+        *":$shimdir:"*) ;;
+        *) export PATH="$shimdir:$PATH" ;;
+      esac
+      hash -r 2>/dev/null || true
+      return 0
+    fi
+  done
+  return 1
+}
+
 frp_required_commands() {
   local role="${FRP_DEPENDENCY_ROLE:-client}"
   printf '%s\n' curl openssl python3 tar sha256sum timeout hostname install
@@ -918,6 +962,12 @@ frp_collect_missing_commands() {
   MISSING_COMMANDS=()
   while IFS= read -r cmd; do
     [[ -n "$cmd" ]] || continue
+    if [[ "$cmd" == "python3" ]]; then
+      if ! frp_python_version_ok; then
+        MISSING_COMMANDS+=("$cmd")
+      fi
+      continue
+    fi
     if ! frp_command_exists "$cmd"; then
       MISSING_COMMANDS+=("$cmd")
     fi
@@ -929,7 +979,14 @@ frp_package_for_command() {
   case "$cmd" in
     curl) printf 'curl' ;;
     openssl) printf 'openssl' ;;
-    python3) printf 'python3' ;;
+    python3)
+      if frp_el8_family; then
+        # EL8 platform python3 is 3.6; AppStream python39 satisfies the gate.
+        printf 'python39'
+      else
+        printf 'python3'
+      fi
+      ;;
     tar) printf 'tar' ;;
     sha256sum|timeout|install) printf 'coreutils' ;;
     hostname) printf 'hostname' ;;
@@ -1000,6 +1057,7 @@ frp_print_missing_tools_error() {
 ensure_dependencies() {
   frp_collect_missing_commands
   if ((${#MISSING_COMMANDS[@]} == 0)); then
+    frp_prefer_newer_python || true
     return 0
   fi
   if [[ -z "${PACKAGE_MANAGER:-}" ]]; then
@@ -1019,6 +1077,7 @@ ensure_dependencies() {
       return 1
       ;;
   esac
+  frp_prefer_newer_python || true
   frp_collect_missing_commands
   if ((${#MISSING_COMMANDS[@]} > 0)); then
     echo "ERROR: missing required command after dependency installation:" >&2

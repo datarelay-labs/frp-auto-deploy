@@ -62,6 +62,7 @@ frp_matrix_display_name() {
   case "$1" in
     ubuntu:22.04) printf '%s' 'Ubuntu 22.04' ;;
     ubuntu:24.04) printf '%s' 'Ubuntu 24.04' ;;
+    rockylinux:8) printf '%s' 'Rocky Linux 8' ;;
     rockylinux:9) printf '%s' 'Rocky Linux 9' ;;
     almalinux:9) printf '%s' 'AlmaLinux 9' ;;
     amazonlinux:2023) printf '%s' 'Amazon Linux 2023' ;;

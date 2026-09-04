@@ -405,14 +405,15 @@ if env FRP_SERVER_TEST_ROOT="$TXN" FRP_SERVER_UPGRADE_HOOK_FAIL=install \
   "$UPDATE" --source "$ROOT" >"$WORKDIR/txn.out" 2>"$WORKDIR/txn.err"; then
   fail "txn fixture should fail after writing marker"
 fi
-python3 - "$TXN/var/lib/frp-auto-deploy/update-pending.json" <<'PY'
+python3 - "$TXN/var/lib/frp-auto-deploy/update-pending.json" "$PROJECT_VERSION" <<'PY'
 import json, sys
 from pathlib import Path
 data = json.loads(Path(sys.argv[1]).read_text())
+want_ref = "v%s" % sys.argv[2]
 assert data.get("schema_version") == 2
 assert data.get("operation") == "project-update"
 assert data.get("release_channel") == "stable"
-assert data.get("source_ref") == "v2.1.1"
+assert data.get("source_ref") == want_ref, data.get("source_ref")
 assert data.get("snapshot_path")
 assert data.get("mutation_started") is True
 assert Path(data["snapshot_path"]).is_dir()

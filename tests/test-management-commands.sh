@@ -158,6 +158,43 @@ PY
 grep -q 'service grafana' "$WORKDIR/svc-release.out" || fail "service release output"
 pass "frp-release-service generic"
 
+# Last-service release must keep the Client record (management-only zero-service).
+python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY'
+import json,sys
+from pathlib import Path
+p=Path(sys.argv[1])
+state=json.loads(p.read_text())
+state['clients']['lastsvc001']={
+  'hostname':'last-svc-host',
+  'label':'last-svc-label',
+  'note':'keep-me',
+  'tags':{'site':'lab'},
+  'mgmt_status':'enrolled',
+  'mgmt_pubkey':'KEEP',
+  'services':{
+    'ssh':{'name':'SSH','protocol':'tcp','local_ip':'127.0.0.1','local_port':22,'remote_port':6020,'preset':'ssh','ssh_user':'aella','enabled':True},
+  },
+}
+p.write_text(json.dumps(state, indent=2, sort_keys=True)+'\n')
+PY
+printf 'RELEASE\n' | python3 "$ROOT/tools/frp-release-service" lastsvc001 ssh >"$WORKDIR/last-svc.out"
+python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY' || fail "last service release deleted client"
+import json,sys
+from pathlib import Path
+state=json.loads(Path(sys.argv[1]).read_text())
+client=state['clients'].get('lastsvc001')
+assert client is not None, 'client record removed'
+assert client.get('services') == {}
+assert client.get('label') == 'last-svc-label'
+assert client.get('note') == 'keep-me'
+assert client.get('tags') == {'site':'lab'}
+assert client.get('mgmt_status') == 'enrolled'
+assert client.get('mgmt_pubkey') == 'KEEP'
+PY
+pass "frp-release-service keeps client after last service"
+# Cleanup management-only fixture before later status assertions.
+printf 'RELEASE\n' | python3 "$ROOT/tools/frp-release-client" lastsvc001 --force >/dev/null
+
 printf 'REVOKE\n' | python3 "$ROOT/tools/frp-revoke-client" dev-dp-mirror >"$WORKDIR/revoke.out"
 python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY' || fail "revoke"
 import json,sys
@@ -234,7 +271,9 @@ python3 - "$TREE/var/lib/frp-auto-deploy/registry.json" <<'PY' || fail "explicit
 import json,sys
 from pathlib import Path
 state=json.loads(Path(sys.argv[1]).read_text())
-assert 'legacy00aa' not in state['clients']
+# Last-service release keeps the Client record; only the service/port is released.
+assert 'legacy00aa' in state['clients']
+assert state['clients']['legacy00aa'].get('services') == {}
 assert state['clients']['aabbccdd']['services']['ssh']['remote_port']==6002
 assert all(
     svc.get('remote_port') != 6010

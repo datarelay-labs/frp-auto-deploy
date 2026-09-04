@@ -96,8 +96,8 @@ def main(argv=None):
         parser.error('use exactly one of --count N or CSV input')
     if args.ttl <= 0:
         parser.error('--ttl must be positive')
-    if args.count is not None and (args.count < 1 or args.count > 1000):
-        parser.error('--count must be between 1 and 1000')
+    if args.count is not None and (args.count < 1 or args.count > 50):
+        parser.error('--count must be between 1 and 50 (product scale target)')
 
     create = load_create_client()
     cfg = json.loads(CONFIG.read_text(encoding='utf-8'))
@@ -127,6 +127,8 @@ def main(argv=None):
             rows = [(row.get('label'), row.get('ssh_user'), row.get('note')) for row in reader]
         if not rows:
             parser.error('CSV contains no enrollment rows')
+        if len(rows) > 50:
+            parser.error('CSV enrollment batch must be at most 50 rows (product scale target)')
 
     validated = []
     for index, raw in enumerate(rows):
@@ -178,19 +180,26 @@ def main(argv=None):
                 'enroll_path': enroll_path,
                 'ticket_id': ticket_id,
             })
-            env = [
-                'FRP_ALLOCATOR_URL=' + create.shell_quote(allocator_url),
-                'FRP_ALLOCATOR_CA_SHA256=' + create.shell_quote(ca_fp),
-                'FRP_BOOTSTRAP_TICKET=' + create.shell_quote(ticket),
-                'FRP_ZERO_TOUCH=1',
-            ]
-            if ssh_user:
-                env.append('FRP_SSH_USER=' + create.shell_quote(ssh_user))
-            else:
-                env.append('FRP_MANAGEMENT_ONLY=1')
-            command = 'curl -fsSL %s | sudo env %s bash' % (
-                create.shell_quote(installer), ' '.join(env)
-            )
+            try:
+                package = create.encode_zero_touch_package(allocator_url, ca_fp, ticket)
+                command = 'curl -fsSL %s | sudo bash -s -- %s' % (
+                    create.shell_quote(installer),
+                    create.shell_quote(package),
+                )
+            except ValueError:
+                env = [
+                    'FRP_ALLOCATOR_URL=' + create.shell_quote(allocator_url),
+                    'FRP_ALLOCATOR_CA_SHA256=' + create.shell_quote(ca_fp),
+                    'FRP_BOOTSTRAP_TICKET=' + create.shell_quote(ticket),
+                    'FRP_ZERO_TOUCH=1',
+                ]
+                if ssh_user:
+                    env.append('FRP_SSH_USER=' + create.shell_quote(ssh_user))
+                else:
+                    env.append('FRP_MANAGEMENT_ONLY=1')
+                command = 'curl -fsSL %s | sudo env %s bash' % (
+                    create.shell_quote(installer), ' '.join(env)
+                )
             issued.append((label, str(ticket_record.get('expires_at')), command))
             _audit_emit(
                 'enrollment.created',

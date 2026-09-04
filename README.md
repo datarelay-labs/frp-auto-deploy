@@ -21,19 +21,23 @@ It solves the operational work around FRP:
 
 | Item | Current |
 | --- | --- |
-| Stable project release | **v2.1.1** |
+| Published stable release | **v2.1.1** |
+| Project version (this tree) | **2.1.2** |
 | Pinned / tested FRP | **v0.70.1** |
 | Default deployment mode | **Direct** |
 | Optional enterprise mode | **single-443** |
-| Stable install source | immutable `v2.1.1` tag |
+| Published stable install source | immutable `v2.1.1` tag |
+| Next immutable tag (after final gate) | `v2.1.2` |
 | `main` branch | development channel; may contain post-v2.1.1 changes |
 
-Current project version: **2.1.1**
+Current project version: **2.1.2**
 Current pinned FRP version: **v0.70.1**
 
-v2.1.1 is the **current stable release**. Stable installs use the immutable tag.
-Following mutable `main` is explicit opt-in only, for example
-`FRP_RELEASE_CHANNEL=dev`.
+**v2.1.1** is the **current stable release** (published tag). Stable field installs
+use the immutable `v2.1.1` tag until `v2.1.2` is tagged after the final release
+gate. This tree prepares **2.1.2** (correctness hardening, upgrade safety,
+backup/audit hardening, and transitional shorter Zero-Touch). Following
+mutable `main` is explicit opt-in only, for example `FRP_RELEASE_CHANNEL=dev`.
 
 On development builds, use release channel, source ref, and verified
 bundle SHA256 to identify the exact build.
@@ -204,11 +208,19 @@ More detail: [docs/DEPLOYMENT_MODES.md](docs/DEPLOYMENT_MODES.md)
 
 # 3. Install the server
 
-For a stable installation, use the immutable v2.1.1 bundle:
+For a published stable installation, use the immutable v2.1.1 bundle:
 
 ```bash
 curl -fsSL \
   https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.1/dist/bootstrap-server.sh \
+  | sudo bash
+```
+
+After the `v2.1.2` tag exists, the project-line immutable install source is:
+
+```bash
+curl -fsSL \
+  https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.2/dist/bootstrap-server.sh \
   | sudo bash
 ```
 

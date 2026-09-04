@@ -32,12 +32,15 @@ OPTIONAL_FILES = (
     "etc/frp-auto-deploy/frontend.conf",
     "var/lib/frp-auto-deploy/mgmt-nonces.json",
     "var/lib/frp-auto-deploy/nginx-ownership",
+    "var/log/frp-auto-deploy/audit.jsonl",
 )
 OPTIONAL_TREES = (
     "etc/frp-auto-deploy/pki",
     "var/lib/frp-auto-deploy/enrollments",
     "var/lib/frp-auto-deploy/bootstrap",
 )
+# Rotated audit companions (audit.jsonl.1 .. audit.jsonl.N).
+AUDIT_ROTATED_GLOB = "var/log/frp-auto-deploy/audit.jsonl.*"
 
 
 def fail(message: str) -> "NoReturn":
@@ -139,6 +142,16 @@ def collect_files(root: Path) -> list[tuple[str, Path]]:
                 found[child_rel] = source
             elif not source.is_dir():
                 fail(f"unsupported control-state entry: /{child_rel}")
+    # Include rotated audit logs with secure permissions preserved.
+    audit_dir = root / "var/log/frp-auto-deploy"
+    if audit_dir.is_dir() and not audit_dir.is_symlink():
+        for source in sorted(audit_dir.glob("audit.jsonl.*")):
+            if source.is_symlink() or not source.is_file():
+                continue
+            if source.name.endswith(".lock"):
+                continue
+            child_rel = source.relative_to(root).as_posix()
+            found[child_rel] = source
     return sorted(found.items())
 
 

@@ -62,6 +62,39 @@ def test_display_and_match():
     mid, client = creg.resolve_client(state, '0303cedf')
     if mid != '0303cedf99999999':
         fail('prefix lookup', mid)
+    # CLIENT ID / prefix must win over label or hostname collisions.
+    collision = {
+        'schema_version': 2,
+        'clients': {
+            'abcdef1200112233': {
+                'hostname': 'host-a',
+                'label': 'other-label',
+            },
+            'ffffffffffff0001': {
+                'hostname': 'host-b',
+                'label': 'abcdef12',
+            },
+        },
+    }
+    mid, client = creg.resolve_client(collision, 'abcdef12')
+    if mid != 'abcdef1200112233':
+        fail('CLIENT ID prefix must win over label', mid)
+    host_collision = {
+        'schema_version': 2,
+        'clients': {
+            '1122334455667788': {
+                'hostname': 'edge-01',
+                'label': 'label-a',
+            },
+            '99aabbccddeeff00': {
+                'hostname': '11223344',
+                'label': 'label-b',
+            },
+        },
+    }
+    mid, client = creg.resolve_client(host_collision, '11223344')
+    if mid != '1122334455667788':
+        fail('CLIENT ID prefix must win over hostname', mid)
     ids = ['abcdabcd11112222', 'abcdabcd99998888', '24cd7856aabbccdd']
     if creg.unique_short_id('24cd7856aabbccdd', ids) != '24cd7856':
         fail('unique short id')

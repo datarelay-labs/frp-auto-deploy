@@ -207,6 +207,40 @@ def read_text(path):
     return Path(path).read_text(encoding='utf-8').strip()
 
 
+def read_project_version(root=''):
+    """Return installed PROJECT_VERSION for health/compatibility checks."""
+    candidates = []
+    if root:
+        candidates.append(Path(root) / 'etc/frp-auto-deploy/version')
+    candidates.extend(
+        [
+            Path('/etc/frp-auto-deploy/version'),
+            Path(__file__).resolve().parent.parent / 'VERSION',
+        ]
+    )
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            for line in path.read_text(encoding='utf-8', errors='replace').splitlines():
+                key, sep, value = line.partition('=')
+                if sep and key.strip() == 'PROJECT_VERSION':
+                    return value.strip()
+        except OSError:
+            continue
+    return ''
+
+
+def parse_project_version(text):
+    text = str(text or '').strip()
+    parts = []
+    for piece in text.split('.'):
+        if not piece.isdigit():
+            return None
+        parts.append(int(piece))
+    return tuple(parts) if parts else None
+
+
 def canonical_json(data):
     return json.dumps(data, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
 
@@ -889,13 +923,19 @@ class Allocator:
         Same-machine redeem remains allowed until this runs. After
         completed_at is set, further redeem attempts fail with
         BOOTSTRAP_TICKET_USED.
+
+        Returns True when the ticket is consumed, already consumed, or no
+        matching bootstrap ticket exists (manual enrollment). Returns False
+        when a matching ticket exists but completion could not be persisted.
+        Callers must fail closed on False so enrollment success never leaves
+        a reusable ticket.
         """
         if not enrollment_id:
-            return
+            return True
         try:
             entries = list(self.bootstrap_dir.glob('*.json'))
         except OSError:
-            return
+            return False
         now_iso = utc_now_iso()
         for path in entries:
             try:
@@ -910,15 +950,16 @@ class Allocator:
             if bound and bound != machine_id:
                 continue
             if record.get('completed_at'):
-                return
+                return True
             record['completed_at'] = now_iso
             if not bound:
                 record['bound_machine_id'] = machine_id
             try:
                 self.save_bootstrap(path, record)
             except OSError:
-                return
-            return
+                return False
+            return True
+        return True
 
     def cleanup_expired_enrollments(self):
         now = int(time.time())
@@ -1256,6 +1297,16 @@ class Allocator:
                     state = self.load_registry()
                     clients = state.setdefault('clients', {})
                     client = clients.get(machine_id)
+                    previous_client = (
+                        json.loads(json.dumps(client))
+                        if isinstance(client, dict)
+                        else None
+                    )
+                    previous_enrollment = (
+                        json.loads(json.dumps(record))
+                        if isinstance(record, dict)
+                        else None
+                    )
                     now_iso = utc_now_iso()
 
                     if identity_auth:
@@ -1381,9 +1432,23 @@ class Allocator:
                         record['used_at'] = record.get('used_at') or now_iso
                         record['last_used_at'] = now_iso
                         self.save_enrollment(enroll_path, record)
-                        self.complete_bootstrap_for_enrollment(
+                        completed = self.complete_bootstrap_for_enrollment(
                             record.get('id') or enrollment_id, machine_id
                         )
+                        if not completed:
+                            # Fail closed: never report enrollment success while the
+                            # bootstrap ticket remains reusable. Roll back registry
+                            # and enrollment mutations from this attempt.
+                            if previous_client is None:
+                                clients.pop(machine_id, None)
+                            else:
+                                clients[machine_id] = previous_client
+                            self.save_registry(state)
+                            if previous_enrollment is not None:
+                                self.save_enrollment(enroll_path, previous_enrollment)
+                            raise OSError(
+                                'failed to consume bootstrap ticket after enrollment'
+                            )
                     response_mac_key = client.get('mgmt_mac_key') if identity_auth else None
         except RegistrySchemaError as exc:
             print('allocator registry error: %s' % exc, flush=True)
@@ -1483,7 +1548,16 @@ def make_handler(allocator):
             def _handle():
                 path = self._request_path()
                 if path == '/healthz':
-                    self.send_json(200, {'status': 'ok'})
+                    payload = {'status': 'ok'}
+                    project_version = read_project_version(
+                        os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
+                    )
+                    if project_version:
+                        payload['project_version'] = project_version
+                    # Supported upgrade order: server first, then clients.
+                    # Clients may refuse updates when server is older.
+                    payload['min_client_version'] = '2.1.1'
+                    self.send_json(200, payload)
                     return
                 if path == '/ca.crt':
                     ca_path = allocator.cfg.get('tls_ca_cert')
