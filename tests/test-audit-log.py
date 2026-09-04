@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Audit log redaction and rotation regressions for post-v2.1.1 hardening."""
 import json
 import os
 import tempfile
@@ -27,12 +28,13 @@ class AuditLogTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_redacts_secrets_and_appends(self):
+    def test_redacts_current_bt1_ticket_and_zt1_package(self):
         ok = self.audit.emit(
             "enrollment.created",
             client_id="aabbccdd",
             details={
-                "ticket": "btck.0123456789abcdef.deadbeef",
+                "ticket": "bt1.0123456789abcdef." + ("ab" * 32),
+                "package": "zt1." + ("A" * 48),
                 "label": "web01",
                 "note": "ok",
             },
@@ -43,8 +45,11 @@ class AuditLogTests(unittest.TestCase):
         record = json.loads(path.read_text().splitlines()[-1])
         self.assertEqual(record["event"], "enrollment.created")
         self.assertEqual(record["details"]["ticket"], "[REDACTED]")
+        self.assertEqual(record["details"]["package"], "[REDACTED]")
         self.assertEqual(record["details"]["label"], "web01")
-        self.assertNotIn("deadbeef", path.read_text())
+        text = path.read_text()
+        self.assertNotIn("abababab", text)
+        self.assertNotIn("zt1." + ("A" * 16), text)
 
     def test_write_failure_warns_not_raise(self):
         blocker = Path(self.root) / "blocked"
@@ -53,15 +58,29 @@ class AuditLogTests(unittest.TestCase):
         ok = self.audit.emit("backup.created")
         self.assertFalse(ok)
 
-    def test_rotation_on_emit(self):
+    def test_rotation_keeps_at_most_n(self):
         os.environ["FRP_AUDIT_ROTATE_BYTES"] = "80"
-        os.environ["FRP_AUDIT_ROTATE_KEEP"] = "2"
-        for index in range(20):
-            self.audit.emit("backup.created", details={"n": index, "pad": "x" * 20})
+        os.environ["FRP_AUDIT_ROTATE_KEEP"] = "5"
+        for index in range(80):
+            self.audit.emit("backup.created", details={"n": index, "pad": "x" * 40})
         path = self.audit.audit_path()
-        rotated = Path(str(path) + ".1")
         self.assertTrue(path.is_file())
-        self.assertTrue(rotated.is_file())
+        self.assertTrue(Path(str(path) + ".1").is_file())
+        self.assertFalse(Path(str(path) + ".6").exists())
+        # keep=5 => at most .1 .. .5
+        for index in range(1, 6):
+            rotated = Path(f"{path}.{index}")
+            if index == 1:
+                self.assertTrue(rotated.is_file())
+
+    def test_rotation_keep_2_has_no_dot_3(self):
+        os.environ["FRP_AUDIT_ROTATE_BYTES"] = "60"
+        os.environ["FRP_AUDIT_ROTATE_KEEP"] = "2"
+        for index in range(40):
+            self.audit.emit("backup.created", details={"n": index, "pad": "y" * 30})
+        path = self.audit.audit_path()
+        self.assertTrue(Path(str(path) + ".1").is_file())
+        self.assertFalse(Path(str(path) + ".3").exists())
 
     def test_installed_module_path(self):
         installed = Path(self.root) / "usr" / "local" / "lib" / "frp-auto-deploy"

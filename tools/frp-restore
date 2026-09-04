@@ -34,6 +34,7 @@ OPTIONAL_EXACT = {
     "etc/frp-auto-deploy/frontend.conf",
     "var/lib/frp-auto-deploy/mgmt-nonces.json",
     "var/lib/frp-auto-deploy/nginx-ownership",
+    "var/log/frp-auto-deploy/audit.jsonl",
 }
 TREE_PREFIXES = (
     "etc/frp-auto-deploy/pki/",
@@ -41,6 +42,7 @@ TREE_PREFIXES = (
     "var/lib/frp-auto-deploy/bootstrap/",
 )
 TREE_ROOTS = tuple(prefix.rstrip("/") for prefix in TREE_PREFIXES)
+AUDIT_ROTATED_PREFIX = "var/log/frp-auto-deploy/audit.jsonl."
 
 
 class RestoreError(RuntimeError):
@@ -60,14 +62,21 @@ def sha256(path: Path) -> str:
 
 
 def allowed_path(rel: str) -> bool:
-    return rel in REQUIRED or rel in OPTIONAL_EXACT or any(
-        rel.startswith(prefix) for prefix in TREE_PREFIXES
-    )
+    if rel in REQUIRED or rel in OPTIONAL_EXACT:
+        return True
+    if any(rel.startswith(prefix) for prefix in TREE_PREFIXES):
+        return True
+    if rel.startswith(AUDIT_ROTATED_PREFIX):
+        suffix = rel[len(AUDIT_ROTATED_PREFIX) :]
+        return suffix.isdigit() and not rel.endswith(".lock")
+    return False
 
 
 def allowed_directory(rel: str) -> bool:
     prefix = rel.rstrip("/") + "/"
-    candidates = REQUIRED | OPTIONAL_EXACT | set(TREE_ROOTS)
+    candidates = REQUIRED | OPTIONAL_EXACT | set(TREE_ROOTS) | {
+        "var/log/frp-auto-deploy",
+    }
     return any(candidate == rel or candidate.startswith(prefix) for candidate in candidates)
 
 
@@ -75,6 +84,41 @@ def validate_rel(rel: str) -> None:
     path = Path(rel)
     if not rel or path.is_absolute() or ".." in path.parts or "\\" in rel:
         raise RestoreError("archive contains an unsafe path")
+
+
+def read_installed_project_version(root: Path) -> str:
+    path = root / "etc/frp-auto-deploy/version"
+    if not path.is_file():
+        return ""
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key.strip() == "PROJECT_VERSION":
+            return value.strip()
+    return ""
+
+
+def assert_same_version_restore(root: Path, manifest: dict) -> None:
+    """Fail closed on cross-version restore unless an explicit migration exists.
+
+    Same-version restore is supported. Restoring an older backup's version
+    metadata onto newer installed code (or the reverse) is rejected.
+    """
+    backup_version = str(manifest.get("project_version") or "").strip()
+    installed_version = read_installed_project_version(root)
+    if not backup_version or backup_version == "unknown":
+        raise RestoreError(
+            "backup project_version is missing; cross-version restore is not supported"
+        )
+    if not installed_version:
+        # Fresh/missing identity: allow restore to establish version state.
+        return
+    if backup_version != installed_version:
+        raise RestoreError(
+            "cross-version restore is not supported: "
+            f"backup project_version={backup_version} "
+            f"installed project_version={installed_version}. "
+            "Restore requires the same product version (or an explicit migration path)."
+        )
 
 
 def extract_and_validate(archive_path: Path, destination: Path) -> dict:
@@ -279,6 +323,20 @@ def apply_payload(root: Path, extracted: Path, allow_hook: bool = True) -> None:
         count += 1
         if allow_hook and hook_after and count >= hook_after:
             raise RestoreError("simulated restore failure")
+
+    # Restore rotated audit companions declared in the backup payload.
+    audit_payload_dir = payload / "var/log/frp-auto-deploy"
+    if audit_payload_dir.is_dir():
+        for source in sorted(audit_payload_dir.glob("audit.jsonl.*")):
+            if not source.is_file() or source.name.endswith(".lock"):
+                continue
+            rel = source.relative_to(payload).as_posix()
+            if not allowed_path(rel):
+                continue
+            atomic_file(source, root / rel, rel)
+            count += 1
+            if allow_hook and hook_after and count >= hook_after:
+                raise RestoreError("simulated restore failure")
 
 
 def _load_module(name, filename):
@@ -514,6 +572,8 @@ def main() -> int:
     locks = _load_module("frp_control_locks", "frp_control_locks.py")
     try:
         candidate_temp, candidate = validate_to_temp(archive)
+        manifest = json.loads((candidate / "manifest.json").read_text(encoding="utf-8"))
+        assert_same_version_restore(root, manifest)
         timeout = float(os.environ.get("FRP_RESTORE_LOCK_TIMEOUT", "30"))
         lock_cm = locks.acquire_control_locks(root, timeout=timeout) if locks is not None else None
         if lock_cm is not None:

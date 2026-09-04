@@ -17,16 +17,35 @@
       "websocket_path": "/~!frp"
     }
   },
-  "note": "Checksums are integrity hashes from SHA256SUMS, not cryptographic signatures. This manifest describes the v2.1.1 stable release identity with immutable git_ref vPROJECT_VERSION and never mutable main. Dev channel (FRP_RELEASE_CHANNEL=dev) remains explicit opt-in via main.",
+  "note": "Checksums are integrity hashes from SHA256SUMS, not cryptographic signatures. This manifest describes the v2.1.1 stable release identity with immutable git_ref vPROJECT_VERSION and never mutable main. Dev channel (FRP_RELEASE_CHANNEL=dev) remains explicit opt-in via main. Top-level artifacts list official install/uninstall scripts; self-contained bundle manifests are separate and must not self-reference.",
+  "supply_chain": {
+    "immutable_version_reference": "git tag vPROJECT_VERSION",
+    "artifact_integrity": "SHA256SUMS verified by project-update before execution",
+    "recommended_future": [
+      "GitHub tag protection / rulesets",
+      "optional signed checksums",
+      "optional GitHub artifact attestation"
+    ]
+  },
   "artifacts": {
     "bootstrap-client.sh": {
       "path": "dist/bootstrap-client.sh",
       "url_path": "dist/bootstrap-client.sh",
-      "sha256": "aa350c8385be450124e68ac353d2ee0d1874e51ca0b765a94e3e4be1f1c8439b"
+      "sha256": "1e6ed3c4dfafc9ae26bb8cdb13bca8deb85d9e71482cd936dde5d43b43b72a2f"
     },
     "bootstrap-server.sh": {
       "path": "dist/bootstrap-server.sh",
       "url_path": "dist/bootstrap-server.sh"
+    },
+    "uninstall-client.sh": {
+      "path": "dist/uninstall-client.sh",
+      "url_path": "dist/uninstall-client.sh",
+      "sha256": "cff130a795dd57f7a1f8bf25a8dc4936653f337099cb0fb3ddfb51088b2c89af"
+    },
+    "uninstall-server.sh": {
+      "path": "dist/uninstall-server.sh",
+      "url_path": "dist/uninstall-server.sh",
+      "sha256": "92b4fc7735a95fbe32c0c4cda192725dada1e0279c7903a4883b3a9f12bd0a0d"
     }
   }
 }

@@ -6,6 +6,7 @@ write errors as warnings unless they explicitly choose fail-closed.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -21,8 +22,13 @@ SECRET_KEY_RE = re.compile(
     r"bootstrap|hmac|auth_token|server_token)",
     re.IGNORECASE,
 )
+# Value patterns for current bt1.<id>.<secret> tickets and legacy btck.* form.
 SECRET_VALUE_RE = re.compile(
-    r"(BEGIN [A-Z ]*PRIVATE KEY|btck\.[0-9a-f]{16}\.|enroll-secret-)",
+    r"(BEGIN [A-Z ]*PRIVATE KEY|"
+    r"bt1\.[0-9a-f]{8,}\.[0-9a-f]{16,}|"
+    r"btck\.[0-9a-f]{16}\.|"
+    r"zt1\.[A-Za-z0-9_-]{16,}|"
+    r"enroll-secret-)",
     re.IGNORECASE,
 )
 
@@ -49,6 +55,11 @@ def audit_path():
         else:
             path = Path(root) / path
     return path
+
+
+def audit_lock_path():
+    path = audit_path()
+    return path.parent / (path.name + ".lock")
 
 
 def _redact(value):
@@ -88,6 +99,25 @@ def _atomic_append(path: Path, line: str):
         os.close(fd)
 
 
+def _with_audit_lock(fn):
+    """Serialize emit/rotation with a simple exclusive flock."""
+    lock_path = audit_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return fn()
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
 def emit(event, actor="local-root", details=None, fail_closed=False, **fields):
     """Write one JSONL audit record. Returns True on success."""
     record = {
@@ -103,15 +133,18 @@ def emit(event, actor="local-root", details=None, fail_closed=False, **fields):
         record["details"] = _redact(details)
     record = _redact(record)
     try:
-        rotate_if_needed(
-            max_bytes=int(os.environ.get("FRP_AUDIT_ROTATE_BYTES", str(5 * 1024 * 1024))),
-            keep=int(os.environ.get("FRP_AUDIT_ROTATE_KEEP", "5")),
-        )
-        payload = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
-        if len(payload.encode("utf-8")) > MAX_RECORD_BYTES:
-            raise AuditError("audit record too large")
-        _atomic_append(audit_path(), payload + "\n")
-        return True
+        def _write():
+            rotate_if_needed(
+                max_bytes=int(os.environ.get("FRP_AUDIT_ROTATE_BYTES", str(5 * 1024 * 1024))),
+                keep=int(os.environ.get("FRP_AUDIT_ROTATE_KEEP", "5")),
+            )
+            payload = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+            if len(payload.encode("utf-8")) > MAX_RECORD_BYTES:
+                raise AuditError("audit record too large")
+            _atomic_append(audit_path(), payload + "\n")
+            return True
+
+        return _with_audit_lock(_write)
     except Exception as exc:
         if fail_closed:
             raise AuditError(str(exc)) from exc
@@ -170,18 +203,19 @@ def sys_stderr_warn(message):
 
 
 def rotate_if_needed(max_bytes=5 * 1024 * 1024, keep=5):
+    """Rotate audit.jsonl so at most `keep` rotated files remain (.1 .. .keep)."""
     path = audit_path()
     if not path.is_file() or path.stat().st_size < max_bytes:
         return
-    for index in range(keep, 0, -1):
+    keep = max(1, int(keep))
+    oldest = Path(f"{path}.{keep}")
+    if oldest.exists():
+        oldest.unlink()
+    for index in range(keep - 1, 0, -1):
         src = Path(f"{path}.{index}")
-        dest = Path(f"{path}.{index + 1}")
-        if index == keep and dest.exists():
-            dest.unlink()
         if src.exists():
-            src.replace(Path(f"{path}.{index + 1}") if index < keep else dest)
-    rotated = Path(str(path) + ".1")
-    path.replace(rotated)
+            src.replace(Path(f"{path}.{index + 1}"))
+    path.replace(Path(f"{path}.1"))
     path.touch()
     os.chmod(path, 0o600)
 
