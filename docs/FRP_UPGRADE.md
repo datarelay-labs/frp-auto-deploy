@@ -78,7 +78,54 @@ operator cycle PASSes.
 ## How to publish a new project release
 
 Follow `docs/RELEASE_CHECKLIST.md` and `docs/RELEASE_VALIDATION.md`.
-Do not move or rewrite the frozen `v2.1.0` tag.
+Do not move or rewrite the frozen `v2.1.0` or `v2.1.1` tags.
+
+## Product upgrade (FRP Auto Deploy)
+
+Product upgrade is separate from upstream FRP binary upgrade.
+
+### Supported upgrade order
+
+```text
+1. Upgrade the server first
+2. Then upgrade clients
+```
+
+- **Server N + Client N-1** is supported during the upgrade window (existing
+  tunnels, ports, and management identity remain).
+- **Client N + Server N-1** is blocked before mutation with
+  `SERVER_VERSION_TOO_OLD`. Clients must not race ahead of the server.
+
+### State preservation contract
+
+A normal project upgrade must preserve:
+
+- CLIENT IDs, service IDs, public ports
+- labels / notes / tags / public_hostname
+- FRP token, private CA, management identities
+- enrollment / bootstrap / audit operational state
+- release channel metadata
+
+Update is never re-enrollment.
+
+### Backup / restore version policy
+
+```text
+same-version restore = SUPPORTED
+cross-version restore = FAIL CLOSED
+```
+
+Audit logs (`audit.jsonl` and rotated companions) are part of server
+operational state and are included in backup/restore.
+
+### Transaction model
+
+```text
+PRECHECK → DOWNLOAD → VERIFY → SNAPSHOT → STAGE → COMMIT → RESTART → HEALTH → SUCCESS
+```
+
+Failure after mutation triggers rollback. If rollback fails, the operator
+sees an explicit `RECOVERY_REQUIRED` marker.
 
 ## Legacy client secure bridge
 

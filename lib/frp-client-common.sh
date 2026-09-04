@@ -1989,6 +1989,58 @@ frp_zero_touch_active() {
   [[ "${FRP_ZERO_TOUCH:-}" == "1" ]] || [[ -n "${FRP_BOOTSTRAP_TICKET:-}" ]]
 }
 
+frp_zero_touch_apply_package() {
+  # Decode opaque zt1.<payload> from short Zero-Touch command into env vars.
+  # Never uses insecure TLS; CA pin and allocator URL come from the package.
+  local package="${1:-}"
+  local decoded
+  if [[ -z "$package" ]]; then
+    echo "ERROR: zero-touch package is empty." >&2
+    frp_emit_failure_class ZERO_TOUCH_INPUT_INVALID
+    return 1
+  fi
+  if ! decoded="$(python3 - "$package" <<'PY'
+import base64
+import json
+import sys
+
+text = sys.argv[1].strip()
+parts = text.split('.', 1)
+if len(parts) != 2 or parts[0] != 'zt1' or not parts[1]:
+    raise SystemExit('invalid zero-touch package')
+padded = parts[1] + ('=' * (-len(parts[1]) % 4))
+try:
+    raw = base64.urlsafe_b64decode(padded.encode('ascii'))
+    payload = json.loads(raw.decode('utf-8'))
+except Exception:
+    raise SystemExit('invalid zero-touch package')
+if not isinstance(payload, dict) or int(payload.get('v') or 0) != 1:
+    raise SystemExit('unsupported zero-touch package version')
+url = str(payload.get('u') or '').strip()
+ca = str(payload.get('c') or '').strip().lower()
+ticket = str(payload.get('t') or '').strip()
+if not url.lower().startswith('https://') or len(ca) != 64 or not ticket:
+    raise SystemExit('incomplete zero-touch package')
+if any(ch not in '0123456789abcdef' for ch in ca):
+    raise SystemExit('invalid CA fingerprint in zero-touch package')
+# Emit shell-safe assignments (no secrets in argv of subsequent tools beyond env).
+def sh_quote(value):
+    return "'" + str(value).replace("'", "'\"'\"'") + "'"
+print('FRP_ALLOCATOR_URL=%s' % sh_quote(url))
+print('FRP_ALLOCATOR_CA_SHA256=%s' % sh_quote(ca))
+print('FRP_BOOTSTRAP_TICKET=%s' % sh_quote(ticket))
+print('FRP_ZERO_TOUCH=1')
+PY
+)"; then
+    echo "ERROR: invalid zero-touch package." >&2
+    frp_emit_failure_class ZERO_TOUCH_INPUT_INVALID
+    return 1
+  fi
+  eval "$decoded"
+  export FRP_ALLOCATOR_URL FRP_ALLOCATOR_CA_SHA256 FRP_BOOTSTRAP_TICKET FRP_ZERO_TOUCH
+  return 0
+}
+
 frp_zero_touch_require_inputs() {
   if [[ -z "${FRP_BOOTSTRAP_TICKET:-}" ]]; then
     echo "ERROR: zero-touch setup requires FRP_BOOTSTRAP_TICKET." >&2
@@ -3376,6 +3428,57 @@ frp_client_upgrade_validate_existing() {
   return 0
 }
 
+frp_client_require_server_compatible_for_upgrade() {
+  # Supported mixed-version policy: upgrade server first, then clients.
+  # Client candidate must not be newer than the live server project_version.
+  local state allocator_url origin health resp server_ver candidate_ver ca
+  state="$(frp_client_state_path)"
+  [[ -f "$state" ]] || return 0
+  allocator_url="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8")).get("allocator_url") or "")' "$state" 2>/dev/null || true)"
+  [[ -n "$allocator_url" ]] || return 0
+  origin="$(frp_allocator_origin_url "$allocator_url" 2>/dev/null)" || return 0
+  health="${origin}/healthz"
+  resp=""
+  ca="$(frp_client_path /etc/frp/allocator-ca.crt)"
+  if [[ -f "$ca" ]]; then
+    resp="$(python3 - "$health" "$ca" <<'PY' 2>/dev/null || true
+import ssl, sys, urllib.request
+url, ca = sys.argv[1], sys.argv[2]
+ctx = ssl.create_default_context(cafile=ca)
+with urllib.request.urlopen(url, context=ctx, timeout=5) as handle:
+    sys.stdout.write(handle.read().decode("utf-8", "replace"))
+PY
+)"
+  fi
+  [[ -n "$resp" ]] || return 0
+  server_ver="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("project_version") or "")' "$resp" 2>/dev/null || true)"
+  candidate_ver="${1:-}"
+  [[ -n "$server_ver" && -n "$candidate_ver" ]] || return 0
+  if python3 - "$server_ver" "$candidate_ver" <<'PY'
+import sys
+def parse(text):
+    parts = []
+    for piece in str(text).split('.'):
+        if not piece.isdigit():
+            return None
+        parts.append(int(piece))
+    return tuple(parts) if parts else None
+server = parse(sys.argv[1])
+candidate = parse(sys.argv[2])
+if server is None or candidate is None:
+    raise SystemExit(0)
+raise SystemExit(0 if candidate <= server else 1)
+PY
+  then
+    return 0
+  fi
+  echo "ERROR: SERVER_VERSION_TOO_OLD" >&2
+  echo "Server project version ${server_ver} is older than client candidate ${candidate_ver}." >&2
+  echo "Upgrade the server first, then upgrade clients." >&2
+  frp_emit_failure_class SERVER_VERSION_TOO_OLD
+  return 1
+}
+
 frp_client_upgrade_validate_staged() {
   local staged="$1" rel mode src dest
   while IFS=: read -r rel mode src; do
@@ -3706,6 +3809,11 @@ frp_client_apply_upgrade() {
   PROJECT_VERSION="$target"
   frp_client_upgrade_source_version "$source"
   PROJECT_VERSION="$target"
+
+  # Mixed-version policy: server first. Block Client N against Server N-1.
+  if [[ "${FRP_CLIENT_SKIP_SERVER_VERSION_GATE:-}" != "1" ]]; then
+    frp_client_require_server_compatible_for_upgrade "$target" || return 1
+  fi
 
   target_channel_out="$candidate_channel"
   target_ref_out="$candidate_ref"
