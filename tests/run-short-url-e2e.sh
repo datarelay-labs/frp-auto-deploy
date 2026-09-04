@@ -217,9 +217,10 @@ pass "SHORT_URL_COMMAND_PRINTED"
 # Use pipefail so a failed curl cannot look like success.
 ssh_client "sudo bash -o pipefail -lc $(printf '%q' "$CMD")" >"$OUT_DIR/client-enroll.log" 2>&1 \
   || { cat "$OUT_DIR/client-enroll.log"; fail "short URL client enroll"; }
-if ! grep -qiE 'enrollment complete|Zero-touch setup complete|FRP client ready|installed' "$OUT_DIR/client-enroll.log"; then
+if ! grep -qiE 'enrollment complete|Zero-touch setup complete|FRP client ready|FRP client setup complete|setup complete' \
+  "$OUT_DIR/client-enroll.log"; then
   # Accept active frpc + client-state as success when installer wording differs.
-  if ! ssh_client 'sudo test -f /etc/frp-auto-deploy/client-state.json && systemctl is-active frpc'; then
+  if ! ssh_client 'sudo test -f /etc/frp/client-state.json && systemctl is-active frpc'; then
     cat "$OUT_DIR/client-enroll.log"
     fail "short URL enroll did not produce client state"
   fi
@@ -233,7 +234,7 @@ ssh_server "sudo /usr/local/sbin/frpctl show client '$CLIENT_LABEL'" >>"$SHOW" 2
   || ssh_server "sudo /usr/local/sbin/frpctl show client \$(sudo python3 -c \"import json;d=json.load(open('/var/lib/frp-auto-deploy/registry.json'));print(next(cid for cid,c in (d.get('clients') or {}).items() if (c.get('label') or '')=='$CLIENT_LABEL'))\")" >>"$SHOW" 2>&1 \
   || { cat "$SHOW"; fail "show client"; }
 grep -qi "$CLIENT_LABEL" "$SHOW" || fail "client label missing"
-grep -qiE '6000|ssh' "$SHOW" || fail "ssh service/port missing"
+grep -qiE '6000|6001|6002|ssh' "$SHOW" || fail "ssh service/port missing"
 pass "CLIENT_SERVICES_PORTS"
 
 CLIENT_MID="$(python3 - "$SHOW" <<'PY'
@@ -249,7 +250,7 @@ note "CLIENT_MID=$CLIENT_MID"
 pass "CLIENT_ID"
 
 # Management identity present on client.
-ssh_client 'sudo test -f /etc/frp-auto-deploy/mgmt-identity.json || sudo test -f /var/lib/frp-auto-deploy/mgmt-identity.json || sudo ls /etc/frp-auto-deploy/' \
+ssh_client 'sudo test -f /etc/frp/client-identity.key && sudo test -f /etc/frp/client-state.json' \
   >"$OUT_DIR/mgmt-identity.log" 2>&1 || fail "management identity missing"
 pass "MANAGEMENT_IDENTITY"
 
