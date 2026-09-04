@@ -40,7 +40,7 @@ def coerce_port(value):
 
 
 def cfg_public_host(cfg):
-    for key in ('public_host', 'public_ip'):
+    for key in ('public_ip', 'public_host'):
         value = cfg.get(key)
         if value is not None and str(value).strip():
             return str(value).strip()
@@ -454,7 +454,7 @@ def print_manual(cfg, record, ttl, public_host, control_public, allocator, ca_fp
         print('Set the client installer URL, then re-run this command:')
         print(
             '  sudo frp-set-client-installer-url '
-            'https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/bootstrap-client.sh'
+            'https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.1/dist/bootstrap-client.sh'
         )
         if not allocator:
             print()

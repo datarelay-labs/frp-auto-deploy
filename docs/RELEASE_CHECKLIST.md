@@ -24,8 +24,9 @@ release candidate or stable tag. Real-environment policy and evidence live in
 **Authoritative classification** is the Gate classification table in
 `docs/RELEASE_VALIDATION.md`.
 
-For stable **2.1.0**, the required real gates are the Ubuntu 24.04 x86_64
-single-443 topology recorded PASS in that file. The following remain
+For stable **2.1.1**, the required real gates remain the Ubuntu 24.04 x86_64
+single-443 topology recorded PASS for 2.1.0 in that file, plus automated gates
+in this checklist. The following remain
 **RECOMMENDED / NOT_TESTED** and must **not** be advertised as field-validated:
 
 - Rocky Linux 9 real VM / SELinux Enforcing
@@ -46,23 +47,25 @@ Do not convert Docker, LXD, or QEMU TCG into `REAL_VM=PASS`.
 - [ ] Do **not** claim Rocky/Alma SELinux, Amazon Linux real VM, ARM64 systemd,
   or OpenSSL 1.0.2 real TLS unless those columns are PASS
 
-For **2.1.0**, the required real gates that were chosen for this tag (Ubuntu
+For **2.1.1**, the required real gates chosen for the prior 2.1.0 tag (Ubuntu
 24.04 x86_64, direct public-IP server, enterprise-restricted client, single-443
-HTTPS/WSS/SSH, reboot recovery) are recorded PASS in
+HTTPS/WSS/SSH, reboot recovery) remain the field baseline recorded PASS in
 `docs/RELEASE_VALIDATION.md`. Remaining recommended gates stay `NOT_TESTED`.
+Re-confirm Zero-touch / enrollment installer URLs resolve to immutable
+`v2.1.1` after server project update.
 
-## After OCI acceptance: 2.1.1
+## After OCI acceptance: next stable after 2.1.1
 
-Do **not** tag the current `PROJECT_VERSION=2.1.0` `main` tree as `v2.1.1`.
+Do **not** tag a tree whose `PROJECT_VERSION` does not match the intended tag.
 `./scripts/validate-release-tag.sh` rejects that mismatch automatically.
 
-A dedicated release commit must, in order:
+This branch prepares **2.1.1**. A dedicated release commit must, in order:
 
 1. Set `PROJECT_VERSION=2.1.1` in `VERSION` and `lib/frp-common.sh` default
 2. Set `release-manifest.json` `channel=stable` and `git_ref=v2.1.1`
 3. Rebuild bundles and regenerate `SHA256SUMS`
 4. Run all automated gates in this checklist
-5. Only then create the immutable `v2.1.1` tag
+5. Only then create the immutable `v2.1.1` tag (operator step; not automated here)
 
-Until that commit exists, `main` may continue to report `PROJECT_VERSION=2.1.0`
-with `channel=dev` / `source_ref=main` during OCI acceptance.
+For a later release (for example 2.1.2), repeat the same sequence with the new
+version. Do not move frozen tags such as `v2.1.0` or `v2.1.1` after publication.

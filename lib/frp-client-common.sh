@@ -12,7 +12,7 @@ FRP_CLIENT_BACKUP_KEEP="${FRP_CLIENT_BACKUP_KEEP:-5}"
 FRP_CLIENT_UPGRADE_BACKUP_KEEP="${FRP_CLIENT_UPGRADE_BACKUP_KEEP:-5}"
 
 # Defaults match VERSION. A sibling VERSION file overrides project/FRP versions.
-PROJECT_VERSION="${PROJECT_VERSION:-2.1.0}"
+PROJECT_VERSION="${PROJECT_VERSION:-2.1.1}"
 FRP_VERSION="${FRP_VERSION:-0.70.1}"
 _FRP_CLIENT_COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${_FRP_CLIENT_COMMON_DIR}/../VERSION" ]]; then
@@ -1452,13 +1452,14 @@ PY
 }
 
 frp_write_client_state() {
-  python3 - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$FRP_CLIENT_STATE_SCHEMA" "$8" "${9:-tcp}" <<'PY'
+  python3 - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$FRP_CLIENT_STATE_SCHEMA" "$8" "${9:-tcp}" "${10:-}" <<'PY'
 import json, os, sys, tempfile
 from pathlib import Path
 dest, allocator_url, server, server_port, hostname, machine_id, host_id = sys.argv[1:8]
 schema = int(sys.argv[8])
 services_raw = json.loads(Path(sys.argv[9]).read_text(encoding='utf-8'))
 transport = str(sys.argv[10] if len(sys.argv) > 10 else 'tcp').strip().lower() or 'tcp'
+public_hostname = str(sys.argv[11] if len(sys.argv) > 11 else '').strip()
 if transport not in ('tcp', 'wss'):
     raise SystemExit('ERROR: unsupported FRP transport')
 services = {}
@@ -1501,6 +1502,8 @@ state = {
         rec.get('enabled', True) is not False for rec in services.values()
     ),
 }
+if public_hostname:
+    state['public_hostname'] = public_hostname
 dest = Path(dest)
 dest.parent.mkdir(parents=True, exist_ok=True)
 fd, tmp = tempfile.mkstemp(prefix=dest.name + '.', suffix='.tmp', dir=str(dest.parent))
@@ -1807,10 +1810,14 @@ PY
 
 render_access_info() {
   local dest="$1" server="$2" services_json_file="$3"
-  python3 - "$dest" "$server" "$services_json_file" <<'PY'
+  local public_hostname="${4:-}"
+  if [[ -z "$public_hostname" && -f "$services_json_file" ]]; then
+    public_hostname="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); print(d.get("public_hostname","") if isinstance(d,dict) else "")' "$services_json_file" 2>/dev/null || true)"
+  fi
+  python3 - "$dest" "$server" "$services_json_file" "$public_hostname" <<'PY'
 import json,sys
 from pathlib import Path
-dest, server, svc_path = sys.argv[1:4]
+dest, server, svc_path, alias = sys.argv[1:5]
 raw = json.loads(Path(svc_path).read_text(encoding='utf-8'))
 if isinstance(raw, dict) and 'services' in raw:
     services = []
@@ -1818,13 +1825,35 @@ if isinstance(raw, dict) and 'services' in raw:
         rec = dict(item)
         rec['id'] = rec.get('id') or sid
         services.append(rec)
+    if not alias:
+        alias = str(raw.get('public_hostname') or '')
 else:
     services = raw
 lines = [f'FRP Server: {server}', '', 'Services:', '']
 def clean(value, limit=253):
     text = str(value or '')
     return ''.join(' ' if ord(c) < 32 or 127 <= ord(c) <= 159 else c for c in text)[:limit].strip()
+def is_ipv6(host):
+    text = str(host or '')
+    if text.startswith('[') and text.endswith(']'):
+        text = text[1:-1]
+    try:
+        import ipaddress
+        return isinstance(ipaddress.ip_address(text), ipaddress.IPv6Address)
+    except Exception:
+        return False
+def fmt_host(host):
+    host = clean(host)
+    if is_ipv6(host) and not (host.startswith('[') and host.endswith(']')):
+        return '[' + host + ']'
+    return host
+def host_port(host, port):
+    return f'{fmt_host(host)}:{port}'
+def http_url(scheme, host, port):
+    return f'{scheme}://{host_port(host, port)}'
 server = clean(server)
+alias = clean(alias)
+https_guidance_shown = False
 for item in services:
     if item.get('enabled', True) is False:
         continue
@@ -1836,23 +1865,58 @@ for item in services:
     remote_port = item.get('remote_port')
     lines.append(sid if name == sid else f'{sid} ({name})')
     lines.append(f'  Target : {local_ip}:{local_port}')
-    lines.append(f'  Public : {server}:{remote_port}')
+    preferred = alias if alias and alias != server else ''
+    if preferred:
+        lines.append(f'  Public : {host_port(preferred, remote_port)}')
+        lines.append(f'  Fallback public : {host_port(server, remote_port)}')
+    else:
+        lines.append(f'  Public : {host_port(server, remote_port)}')
     if preset == 'ssh':
         user = clean(item.get('ssh_user'), 32)
         if user:
             lines.append('  Connect:')
-            lines.append(f'    ssh -p {remote_port} {user}@{server}')
+            if preferred:
+                lines.append('    Preferred:')
+                lines.append(f'      ssh -p {remote_port} {user}@{preferred}')
+                lines.append('    Fallback:')
+                lines.append(f'      ssh -p {remote_port} {user}@{server}')
+            else:
+                lines.append(f'    ssh -p {remote_port} {user}@{server}')
         else:
             lines.append('  SSH user: legacy / unspecified')
     elif preset == 'http':
         lines.append('  URL:')
-        lines.append(f'    http://{server}:{remote_port}')
+        if preferred:
+            lines.append('    Preferred:')
+            lines.append(f'      {http_url("http", preferred, remote_port)}')
+            lines.append('    Fallback:')
+            lines.append(f'      {http_url("http", server, remote_port)}')
+        else:
+            lines.append(f'    {http_url("http", server, remote_port)}')
     elif preset == 'https':
         lines.append('  URL:')
-        lines.append(f'    https://{server}:{remote_port}')
+        if preferred:
+            lines.append('    Preferred:')
+            lines.append(f'      {http_url("https", preferred, remote_port)}')
+            lines.append('    Fallback:')
+            lines.append(f'      {http_url("https", server, remote_port)}')
+        else:
+            lines.append(f'    {http_url("https", server, remote_port)}')
+        if preferred and not https_guidance_shown:
+            lines.append('  Note:')
+            lines.append('    TLS is passed through to the target HTTPS service.')
+            lines.append(f'    To avoid certificate warnings, the target service certificate')
+            lines.append(f'    must be valid for {preferred}.')
+            https_guidance_shown = True
     else:
         lines.append('  Connect:')
-        lines.append(f'    {server}:{remote_port}')
+        if preferred:
+            lines.append('    Preferred:')
+            lines.append(f'      {host_port(preferred, remote_port)}')
+            lines.append('    Fallback:')
+            lines.append(f'      {host_port(server, remote_port)}')
+        else:
+            lines.append(f'    {host_port(server, remote_port)}')
     lines.append('')
 path = Path(dest)
 path.parent.mkdir(parents=True, exist_ok=True)
@@ -2140,6 +2204,124 @@ PY
   return 0
 }
 
+frp_client_reconcile_released_services() {
+  local path allocator_url machine_id hostname_value request timestamp signature nonce response curl_err py key_path mac
+  path="$(frp_client_state_path)"
+  [[ -f "$path" ]] || return 0
+  if [[ "${FRP_SKIP_CONNECTIVITY_CHECK:-}" == "1" ]]; then
+    return 0
+  fi
+  if ! python3 - "$path" <<'PY'
+import json, sys
+from pathlib import Path
+state = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+services = state.get('services') or {}
+if not any(isinstance(rec, dict) and rec.get('enabled', True) is False for rec in services.values()):
+    raise SystemExit(1)
+PY
+  then
+    return 0
+  fi
+
+  if [[ -n "${FRP_CLIENT_RECONCILE_REGISTRY_IDS:-}" ]]; then
+    REGISTRY_IDS="$FRP_CLIENT_RECONCILE_REGISTRY_IDS" STATE_PATH="$path" python3 - <<'PY'
+import json, os, sys
+from pathlib import Path
+state = json.loads(Path(os.environ['STATE_PATH']).read_text(encoding='utf-8'))
+ids = set(json.loads(os.environ['REGISTRY_IDS']))
+services = state.get('services') or {}
+for sid in list(services.keys()):
+    rec = services.get(sid) or {}
+    if rec.get('enabled', True) is False and sid not in ids:
+        services.pop(sid, None)
+state['services'] = services
+Path(os.environ['STATE_PATH']).write_text(json.dumps(state, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+PY
+    return 0
+  fi
+
+  if [[ "$(frp_identity_status)" != enrolled ]]; then
+    return 0
+  fi
+
+  allocator_url="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8")).get("allocator_url") or "")' "$path")"
+  machine_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8")).get("machine_id") or "")' "$path")"
+  hostname_value="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8")).get("hostname") or "")' "$path")"
+  [[ -n "$allocator_url" && -n "$machine_id" ]] || return 0
+
+  request="$(python3 - "$machine_id" "$hostname_value" <<'PY'
+import json, sys
+print(json.dumps({
+  'machine_id': sys.argv[1],
+  'hostname': sys.argv[2],
+}, separators=(',', ':')))
+PY
+)"
+  timestamp="$(date +%s)"
+  py="$(frp_mgmt_auth_py)" || return 0
+  key_path="$(frp_client_identity_key_path)" || return 0
+  nonce="$(python3 - "$py" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location('frp_mgmt_auth', sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+print(mod.new_nonce())
+PY
+)"
+  signature="$(BODY="$request" python3 - "$py" "$key_path" "$machine_id" "$timestamp" "$nonce" <<'PY'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location('frp_mgmt_auth', sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+key, machine_id, ts, nonce = sys.argv[2:6]
+body = os.environ['BODY']
+message = mod.signed_message(machine_id, body, ts, nonce)
+sys.stdout.write(mod.sign_message(key, message))
+PY
+)"
+  curl_err="$(mktemp)"
+  if ! response="$(frp_allocator_curl \
+    -X POST \
+    -H 'Content-Type: application/json' \
+    -H 'X-Mgmt-Auth: 1' \
+    -H 'X-Mgmt-Reconcile: 1' \
+    -H "X-Timestamp: ${timestamp}" \
+    -H "X-Mgmt-Nonce: ${nonce}" \
+    -H "X-Mgmt-Signature: ${signature}" \
+    --data "$request" \
+    "$allocator_url" 2>"$curl_err")"; then
+    rm -f "$curl_err"
+    return 0
+  fi
+  rm -f "$curl_err"
+  mac="$(frp_identity_load_mac)" || return 0
+  if ! REGISTRY_IDS="$response" STATE_PATH="$path" MGMT_MAC_KEY="$mac" python3 - <<'PY'
+import hashlib,hmac,json,os,sys
+from pathlib import Path
+secret=os.environ['MGMT_MAC_KEY']
+d=json.loads(os.environ['REGISTRY_IDS'])
+if isinstance(d, dict) and d.get('error'):
+    raise SystemExit(0)
+received=d.pop('response_hmac',None)
+canonical=json.dumps(d,sort_keys=True,separators=(',',':'),ensure_ascii=False)
+expected=hmac.new(secret.encode(),canonical.encode(),hashlib.sha256).hexdigest()
+if not received or not hmac.compare_digest(received,expected):
+    raise SystemExit(0)
+ids=set(str(x) for x in (d.get('registry_service_ids') or []))
+state=json.loads(Path(os.environ['STATE_PATH']).read_text(encoding='utf-8'))
+services=state.get('services') or {}
+for sid in list(services.keys()):
+    rec=services.get(sid) or {}
+    if rec.get('enabled', True) is False and sid not in ids:
+        services.pop(sid, None)
+state['services']=services
+Path(os.environ['STATE_PATH']).write_text(json.dumps(state, indent=2, sort_keys=True)+'\n', encoding='utf-8')
+PY
+  then
+    return 0
+  fi
+}
+
 frp_enroll_services() {
   local allocator_url="$1" enroll_id="$2" enroll_secret="$3"
   local machine_id="$4" hostname_value="$5" services_file="$6"
@@ -2298,6 +2480,9 @@ meta={
     'frp_transport': transport,
     'token_ciphertext': '',
 }
+alias=str(d.get('public_hostname') or '').strip()
+if alias:
+    meta['public_hostname']=alias
 Path(os.environ['META_FILE']).write_text(json.dumps(meta)+'\n', encoding='utf-8')
 PY
     then
@@ -2363,6 +2548,9 @@ meta={
     'token_ciphertext': token,
     'mgmt_status': str(d.get('mgmt_status') or ''),
 }
+alias=str(d.get('public_hostname') or '').strip()
+if alias:
+    meta['public_hostname']=alias
 Path(os.environ['META_FILE']).write_text(json.dumps(meta)+'\n', encoding='utf-8')
 PY
   if [[ -n "$pubkey_pem" ]]; then
@@ -2550,11 +2738,14 @@ import json, sys
 from pathlib import Path
 cand = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
 cur = json.loads(Path(sys.argv[2]).read_text(encoding='utf-8'))
-for key in ('allocator_url', 'frp_server', 'frp_server_port', 'frp_transport', 'hostname', 'machine_id', 'host_id', 'schema_version'):
+for key in ('allocator_url', 'frp_server', 'frp_server_port', 'frp_transport', 'hostname', 'machine_id', 'host_id', 'schema_version', 'public_hostname'):
     if key in cur and key not in cand:
         cand[key] = cur[key]
     elif key in cur:
         cand.setdefault(key, cur.get(key))
+# Drop stale public_hostname when the candidate explicitly cleared it.
+if 'public_hostname' in cand and not str(cand.get('public_hostname') or '').strip():
+    cand.pop('public_hostname', None)
 for sid, rec in (cand.get('services') or {}).items():
     prev = (cur.get('services') or {}).get(sid) or {}
     if rec.get('remote_port') in (None, '') and prev.get('remote_port') not in (None, ''):

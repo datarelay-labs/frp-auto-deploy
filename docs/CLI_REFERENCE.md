@@ -85,7 +85,13 @@ Server:
 set client <ID> label <value>
 set client <ID> note <value>
 set client <ID> tag <key> <value>
+set installer-url <url>
+set server hostname <fqdn>
 ```
+
+`set server hostname` configures an optional DNS alias for published-service
+access. It does not change FRP control (`frp_server` / `serverAddr`), CLIENT ID,
+public ports, or the CA. DNS records are managed outside FRP Auto Deploy.
 
 The backend still accepts `--tag key=value`. The parser converts
 `tag <key> <value>` to that form. Quoted values work
@@ -111,10 +117,12 @@ not release the server reservation.
 unset client <ID> label
 unset client <ID> note
 unset client <ID> tag <key>
+unset server hostname
 ```
 
-Removes administrator metadata only. Display label falls back to hostname.
-Does not change identity, hostname, machine-id, ports, or enrollment.
+Removes administrator metadata only (or the optional public hostname). Display
+label falls back to hostname. Does not change identity, machine-id, ports, or
+enrollment. Unsetting the public hostname falls back to Public IP access.
 
 ## create / add
 

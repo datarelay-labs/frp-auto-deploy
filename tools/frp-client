@@ -277,6 +277,10 @@ PY
 frp_client_list() {
   local path
   path="$(frp_client_state_path)"
+  # Reconcile disabled services against the server registry. After
+  # `frpctl release service`, the reservation is removed server-side but
+  # the client local state can retain a stale disabled entry until we check.
+  frp_client_reconcile_released_services || true
   frp_load_client_state "$path"
   frp_print_state_services "$path"
 }
@@ -659,6 +663,11 @@ transport=str(meta.get('frp_transport') or s.get('frp_transport') or 'tcp').stri
 if transport not in ('tcp', 'wss'):
     raise SystemExit('ERROR: allocator returned an unsupported FRP transport')
 s['frp_transport']=transport
+alias=str(meta.get('public_hostname') or '').strip()
+if alias:
+    s['public_hostname']=alias
+else:
+    s.pop('public_hostname', None)
 p.write_text(json.dumps(s, indent=2, sort_keys=True)+'\n')
 PY
   if ! frp_merge_ports_into_state "$candidate" "$allocated"; then
@@ -730,7 +739,7 @@ PY
     fi
     return 1
   fi
-  render_access_info "$tmp_access" "$server" "$enabled_list"
+  render_access_info "$tmp_access" "$server" "$candidate"
   frp_copy_state "$candidate" "$tmp_state"
   frp_state_has_secrets "$tmp_state" || {
     echo "ERROR: refusing to write client-state containing secrets" >&2

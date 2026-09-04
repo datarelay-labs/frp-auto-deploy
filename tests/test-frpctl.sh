@@ -198,7 +198,7 @@ for cmd in frp-client frp-clients frp-client-info frp-client-set frp-create-clie
   frp-release-client frp-release-service frp-revoke-client \
   frp-server-status frp-update frp-project-update frp-backup frp-restore \
   frp-enrollments frp-enroll-bulk frp-enrollment-revoke frp-upstream \
-  frp-set-client-installer-url; do
+  frp-set-client-installer-url frp-server-set; do
   [[ -e "$ROOT/tools/$cmd" ]] || fail "missing command $cmd"
 done
 pass "EXISTING_COMMANDS_PRESERVED"

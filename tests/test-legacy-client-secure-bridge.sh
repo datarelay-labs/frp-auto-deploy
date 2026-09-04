@@ -196,8 +196,8 @@ import json, sys
 from pathlib import Path
 data = json.loads(Path(sys.argv[1]).read_text())
 assert data.get("project_version") == sys.argv[2]
-assert data.get("channel") == "dev"
-assert data.get("git_ref") == "main"
+assert data.get("channel") == "stable"
+assert data.get("git_ref") == "v%s" % sys.argv[2]
 PY
 pass "CLIENT_BUNDLE_CONTAINS_RELEASE_MANIFEST"
 pass "REAL_GENERATED_CLIENT_BUNDLE"
@@ -211,7 +211,7 @@ pass "REAL_GENERATED_CLIENT_BUNDLE"
 . "$ROOT/lib/frp-client-common.sh"
 
 VALID_META="$(frp_validate_release_source_metadata "$ROOT")" || fail "valid source metadata"
-[[ "$VALID_META" == $'2.1.0\tdev\tmain' ]] || fail "valid metadata triple: $VALID_META"
+[[ "$VALID_META" == $'2.1.1\tstable\tv2.1.1' ]] || fail "valid metadata triple: $VALID_META"
 pass "CLIENT_CANDIDATE_METADATA_VALID"
 
 BADCH="$WORKDIR/bad-channel"
@@ -223,7 +223,7 @@ import json, sys
 from pathlib import Path
 p = Path(sys.argv[1])
 d = json.loads(p.read_text())
-d["channel"] = "stable"
+d["channel"] = "dev"
 p.write_text(json.dumps(d) + "\n")
 PY
 if frp_validate_release_source_metadata "$BADCH" >/dev/null 2>"$WORKDIR/bad-channel.err"; then
@@ -231,18 +231,18 @@ if frp_validate_release_source_metadata "$BADCH" >/dev/null 2>"$WORKDIR/bad-chan
 fi
 grep -qi 'channel/ref disagreement\|channel mismatch' "$WORKDIR/bad-channel.err" ||
   fail "channel disagreement message"
-if FRP_EXPECTED_RELEASE_CHANNEL=stable \
-  frp_validate_release_source_metadata "$ROOT" >/dev/null 2>"$WORKDIR/expected-stable.err"; then
-  fail "expected stable accepted a dev candidate"
+if FRP_EXPECTED_RELEASE_CHANNEL=dev \
+  frp_validate_release_source_metadata "$ROOT" >/dev/null 2>"$WORKDIR/expected-dev.err"; then
+  fail "expected dev accepted a stable candidate"
 fi
-grep -qi 'channel mismatch' "$WORKDIR/expected-stable.err" || fail "expected channel mismatch"
+grep -qi 'channel mismatch' "$WORKDIR/expected-dev.err" || fail "expected channel mismatch"
 pass "CLIENT_CANDIDATE_METADATA_CHANNEL_MISMATCH"
 
 BADREF="$WORKDIR/bad-ref"
 mkdir -p "$BADREF"
 cp "$ROOT/VERSION" "$BADREF/VERSION"
 cp "$ROOT/release-manifest.json" "$BADREF/release-manifest.json"
-if FRP_EXPECTED_RELEASE_CHANNEL=dev FRP_EXPECTED_SOURCE_REF="v${PROJECT_VERSION}" \
+if FRP_EXPECTED_RELEASE_CHANNEL=stable FRP_EXPECTED_SOURCE_REF=main \
   frp_validate_release_source_metadata "$ROOT" >/dev/null 2>"$WORKDIR/bad-ref.err"; then
   fail "expected ref mismatch accepted"
 fi
@@ -348,6 +348,23 @@ assert_version_unchanged "$LEGACY" "$WORKDIR/legacy.before"
 # ---------------------------------------------------------------------------
 # Verified bridges against the real generated bundle
 # ---------------------------------------------------------------------------
+# Dev-channel candidate (repository tree may already be a stable RC).
+DEV_SRC="$WORKDIR/dev-src"
+cp -a "$ROOT/." "$DEV_SRC/"
+rm -rf "$DEV_SRC/.git" "$DEV_SRC/dist"
+python3 - "$DEV_SRC/release-manifest.json" <<'PY'
+import json, sys
+from pathlib import Path
+p = Path(sys.argv[1])
+d = json.loads(p.read_text())
+d["channel"] = "dev"
+d["git_ref"] = "main"
+p.write_text(json.dumps(d, indent=2) + "\n")
+PY
+python3 "$DEV_SRC/scripts/build-bundles.py" >/dev/null
+DEV_BUNDLE="$DEV_SRC/dist/bootstrap-client.sh"
+DEV_BUNDLE_SHA="$(sha "$DEV_BUNDLE")"
+
 BUNDLE_SHA="$(sha "$BUNDLE")"
 DEV_TREE="$WORKDIR/legacy-dev-bridge"
 write_runtime_fixture "$DEV_TREE"
@@ -361,15 +378,15 @@ export FRP_CLIENT_HOOK_LOG="$WORKDIR/dev-bridge.hooks"
 : >"$FRP_CLIENT_HOOK_LOG"
 if ! FRP_CLIENT_TEST_ROOT="$DEV_TREE" FRP_SKIP_SYSTEMD=1 FRP_SKIP_DOWNLOAD=1 \
   FRP_RELEASE_CHANNEL=dev FRP_EXPECTED_SOURCE_REF=main \
-  FRP_BUNDLE_SHA256="$BUNDLE_SHA" FRP_BUNDLE_FILE="$BUNDLE" \
-  bash "$BUNDLE" --upgrade >"$WORKDIR/dev-bridge.out" 2>"$WORKDIR/dev-bridge.err"; then
+  FRP_BUNDLE_SHA256="$DEV_BUNDLE_SHA" FRP_BUNDLE_FILE="$DEV_BUNDLE" \
+  bash "$DEV_BUNDLE" --upgrade >"$WORKDIR/dev-bridge.out" 2>"$WORKDIR/dev-bridge.err"; then
   cat "$WORKDIR/dev-bridge.out" "$WORKDIR/dev-bridge.err" >&2
   fail "verified dev/main bridge"
 fi
 assert_preserved_state "$DEV_TREE" "$WORKDIR/dev-bridge.before"
 grep -q 'RELEASE_CHANNEL=dev' "$DEV_TREE/etc/frp-auto-deploy/version" || fail "dev bridge channel"
 grep -q 'SOURCE_REF=main' "$DEV_TREE/etc/frp-auto-deploy/version" || fail "dev bridge ref"
-grep -q "BUNDLE_SHA256=$BUNDLE_SHA" "$DEV_TREE/etc/frp-auto-deploy/version" || fail "dev bridge sha"
+grep -q "BUNDLE_SHA256=$DEV_BUNDLE_SHA" "$DEV_TREE/etc/frp-auto-deploy/version" || fail "dev bridge sha"
 grep -q "PROJECT_VERSION=${PROJECT_VERSION}" "$DEV_TREE/etc/frp-auto-deploy/version" || fail "dev bridge version"
 grep -q "FRP_VERSION=${FRP_VERSION}" "$DEV_TREE/etc/frp-auto-deploy/version" || fail "dev bridge frp"
 if grep -Eq '^(enroll|bootstrap_redeem|restart)$' "$FRP_CLIENT_HOOK_LOG"; then
@@ -429,8 +446,8 @@ pass "STABLE_STAYS_STABLE"
 # Expected constraints reject a contradictory candidate.
 if FRP_CLIENT_TEST_ROOT="$LEGACY" FRP_SKIP_SYSTEMD=1 FRP_SKIP_DOWNLOAD=1 \
   FRP_RELEASE_CHANNEL=stable FRP_EXPECTED_SOURCE_REF="v${PROJECT_VERSION}" \
-  FRP_BUNDLE_SHA256="$BUNDLE_SHA" FRP_BUNDLE_FILE="$BUNDLE" \
-  bash "$BUNDLE" --upgrade >"$WORKDIR/wrong-line.out" 2>"$WORKDIR/wrong-line.err"; then
+  FRP_BUNDLE_SHA256="$DEV_BUNDLE_SHA" FRP_BUNDLE_FILE="$DEV_BUNDLE" \
+  bash "$DEV_BUNDLE" --upgrade >"$WORKDIR/wrong-line.out" 2>"$WORKDIR/wrong-line.err"; then
   fail "expected stable accepted a dev bundle"
 fi
 grep -Eqi 'channel mismatch|source ref mismatch' "$WORKDIR/wrong-line.err" || fail "wrong-line message"
@@ -465,15 +482,15 @@ pass "BUG_STATE_STABLE_V210_UNKNOWN_SHA"
 
 if ! FRP_CLIENT_TEST_ROOT="$BUG" FRP_SKIP_SYSTEMD=1 FRP_SKIP_DOWNLOAD=1 \
   FRP_RELEASE_CHANNEL=dev FRP_EXPECTED_SOURCE_REF=main \
-  FRP_BUNDLE_SHA256="$BUNDLE_SHA" FRP_BUNDLE_FILE="$BUNDLE" \
-  bash "$BUNDLE" --upgrade >"$WORKDIR/bug-recover.out" 2>"$WORKDIR/bug-recover.err"; then
+  FRP_BUNDLE_SHA256="$DEV_BUNDLE_SHA" FRP_BUNDLE_FILE="$DEV_BUNDLE" \
+  bash "$DEV_BUNDLE" --upgrade >"$WORKDIR/bug-recover.out" 2>"$WORKDIR/bug-recover.err"; then
   cat "$WORKDIR/bug-recover.out" "$WORKDIR/bug-recover.err" >&2
   fail "explicit verified dev recovery"
 fi
 assert_preserved_state "$BUG" "$WORKDIR/bug.before"
 grep -q 'RELEASE_CHANNEL=dev' "$BUG/etc/frp-auto-deploy/version" || fail "recovery channel"
 grep -q 'SOURCE_REF=main' "$BUG/etc/frp-auto-deploy/version" || fail "recovery ref"
-grep -q "BUNDLE_SHA256=$BUNDLE_SHA" "$BUG/etc/frp-auto-deploy/version" || fail "recovery sha"
+grep -q "BUNDLE_SHA256=$DEV_BUNDLE_SHA" "$BUG/etc/frp-auto-deploy/version" || fail "recovery sha"
 if grep -Eq '^(enroll|bootstrap_redeem|restart)$' "$FRP_CLIENT_HOOK_LOG"; then
   fail "recovery contacted allocator or restarted"
 fi
@@ -482,7 +499,7 @@ pass "BUG_STATE_EXPLICIT_DEV_RECOVERY"
 # Environment disappearance must not erase persisted identity.
 unset FRP_RELEASE_CHANNEL FRP_EXPECTED_SOURCE_REF FRP_BUNDLE_SHA256 FRP_BUNDLE_FILE || true
 grep -q 'RELEASE_CHANNEL=dev' "$BUG/etc/frp-auto-deploy/version" || fail "identity lost after env unset"
-grep -q "BUNDLE_SHA256=$BUNDLE_SHA" "$BUG/etc/frp-auto-deploy/version" || fail "sha lost after env unset"
+grep -q "BUNDLE_SHA256=$DEV_BUNDLE_SHA" "$BUG/etc/frp-auto-deploy/version" || fail "sha lost after env unset"
 
 # ---------------------------------------------------------------------------
 # Same-version build identity + --check contract
@@ -500,7 +517,7 @@ EOF
 if ! FRP_CLIENT_TEST_ROOT="$MODERN" FRP_SKIP_SYSTEMD=1 FRP_SKIP_DOWNLOAD=1 \
   FRP_RELEASE_CHANNEL=dev FRP_EXPECTED_SOURCE_REF=main \
   FRP_BUNDLE_SHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-  bash "$BUNDLE" --upgrade >"$WORKDIR/modern-install.out" 2>"$WORKDIR/modern-install.err"; then
+  bash "$DEV_BUNDLE" --upgrade >"$WORKDIR/modern-install.out" 2>"$WORKDIR/modern-install.err"; then
   cat "$WORKDIR/modern-install.out" "$WORKDIR/modern-install.err" >&2
   fail "modern fixture tool install"
 fi
@@ -512,7 +529,7 @@ export FRP_CLIENT_LIB="$ROOT/lib/frp-client-common.sh"
 export FRP_CLIENT_HOOK_LOG="$WORKDIR/modern.hooks"
 : >"$FRP_CLIENT_HOOK_LOG"
 
-if ! "$ROOT/tools/frp-client" update --source "$ROOT" --check \
+if ! "$ROOT/tools/frp-client" update --source "$DEV_SRC" --check \
   >"$WORKDIR/modern-check.out" 2>"$WORKDIR/modern-check.err"; then
   cat "$WORKDIR/modern-check.out" "$WORKDIR/modern-check.err" >&2
   fail "modern --check"
@@ -540,13 +557,13 @@ pass "SAME_VERSION_UNKNOWN_BUILD"
 # Same version + different verified SHA => persist the new verified identity.
 if ! FRP_CLIENT_TEST_ROOT="$MODERN" FRP_SKIP_SYSTEMD=1 FRP_SKIP_DOWNLOAD=1 \
   FRP_RELEASE_CHANNEL=dev FRP_EXPECTED_SOURCE_REF=main \
-  FRP_BUNDLE_SHA256="$BUNDLE_SHA" FRP_BUNDLE_FILE="$BUNDLE" \
-  bash "$BUNDLE" --upgrade >"$WORKDIR/diff-up.out" 2>"$WORKDIR/diff-up.err"; then
+  FRP_BUNDLE_SHA256="$DEV_BUNDLE_SHA" FRP_BUNDLE_FILE="$DEV_BUNDLE" \
+  bash "$DEV_BUNDLE" --upgrade >"$WORKDIR/diff-up.out" 2>"$WORKDIR/diff-up.err"; then
   cat "$WORKDIR/diff-up.out" "$WORKDIR/diff-up.err" >&2
   fail "same-version different build"
 fi
 assert_preserved_state "$MODERN" "$WORKDIR/modern.before"
-grep -q "BUNDLE_SHA256=$BUNDLE_SHA" "$MODERN/etc/frp-auto-deploy/version" || fail "different build sha not persisted"
+grep -q "BUNDLE_SHA256=$DEV_BUNDLE_SHA" "$MODERN/etc/frp-auto-deploy/version" || fail "different build sha not persisted"
 grep -q 'RELEASE_CHANNEL=dev' "$MODERN/etc/frp-auto-deploy/version" || fail "dev changed on different build"
 pass "SAME_VERSION_DIFFERENT_BUILD"
 
@@ -554,20 +571,20 @@ snapshot_preserved_state "$MODERN" "$WORKDIR/same.before"
 SAME_TOOL="$(sha "$MODERN/usr/local/bin/frpctl")"
 if ! FRP_CLIENT_TEST_ROOT="$MODERN" FRP_SKIP_SYSTEMD=1 FRP_SKIP_DOWNLOAD=1 \
   FRP_RELEASE_CHANNEL=dev FRP_EXPECTED_SOURCE_REF=main \
-  FRP_BUNDLE_SHA256="$BUNDLE_SHA" FRP_BUNDLE_FILE="$BUNDLE" \
-  bash "$BUNDLE" --upgrade --check >"$WORKDIR/same-check.out" 2>"$WORKDIR/same-check.err"; then
+  FRP_BUNDLE_SHA256="$DEV_BUNDLE_SHA" FRP_BUNDLE_FILE="$DEV_BUNDLE" \
+  bash "$DEV_BUNDLE" --upgrade --check >"$WORKDIR/same-check.out" 2>"$WORKDIR/same-check.err"; then
   fail "same-build --check"
 fi
-grep -q "Installed bundle SHA256   : ${BUNDLE_SHA}" "$WORKDIR/same-check.out" || fail "same-build installed sha"
-grep -q "Target bundle SHA256      : ${BUNDLE_SHA}" "$WORKDIR/same-check.out" || fail "same-build target sha"
+grep -q "Installed bundle SHA256   : ${DEV_BUNDLE_SHA}" "$WORKDIR/same-check.out" || fail "same-build installed sha"
+grep -q "Target bundle SHA256      : ${DEV_BUNDLE_SHA}" "$WORKDIR/same-check.out" || fail "same-build target sha"
 grep -q 'Update                    : not needed' "$WORKDIR/same-check.out" || fail "same-build should be not needed"
 assert_preserved_state "$MODERN" "$WORKDIR/same.before"
 [[ "$(sha "$MODERN/usr/local/bin/frpctl")" == "$SAME_TOOL" ]] || fail "same-build check mutated tools"
 
 if ! FRP_CLIENT_TEST_ROOT="$MODERN" FRP_SKIP_SYSTEMD=1 FRP_SKIP_DOWNLOAD=1 \
   FRP_RELEASE_CHANNEL=dev FRP_EXPECTED_SOURCE_REF=main \
-  FRP_BUNDLE_SHA256="$BUNDLE_SHA" FRP_BUNDLE_FILE="$BUNDLE" \
-  bash "$BUNDLE" --upgrade >"$WORKDIR/same-up.out" 2>"$WORKDIR/same-up.err"; then
+  FRP_BUNDLE_SHA256="$DEV_BUNDLE_SHA" FRP_BUNDLE_FILE="$DEV_BUNDLE" \
+  bash "$DEV_BUNDLE" --upgrade >"$WORKDIR/same-up.out" 2>"$WORKDIR/same-up.err"; then
   fail "same-build upgrade"
 fi
 grep -q 'Update                    : not needed' "$WORKDIR/same-up.out" || fail "same-build apply not needed"

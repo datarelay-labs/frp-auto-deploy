@@ -109,7 +109,7 @@ frp_u_rm_file "$(frp_u_path /usr/local/bin/frps)"
 for tool in frp-create-client frp-enrollments frp-enrollment-revoke frp-enroll-bulk \
   frp-clients frp-client-info frp-client-set frp-release-client \
   frp-release-service frp-revoke-client frp-set-client-installer-url \
-  frp-server-status frp-update frp-upstream frp-project-update frp-backup frp-restore; do
+  frp-server-set frp-server-status frp-update frp-upstream frp-project-update frp-backup frp-restore; do
   frp_u_rm_file "$(frp_u_path /usr/local/sbin/${tool})"
 done
 # Dual-role: keep /usr/local/bin/frpctl (client). Remove server sbin copy.

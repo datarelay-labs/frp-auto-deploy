@@ -953,7 +953,8 @@ def parse_frpc_proxies(text):
 
 
 def server_config_ports(cfg):
-    public_host = str(cfg.get('public_host') or cfg.get('public_ip') or '')
+    public_host = str(cfg.get('public_ip') or cfg.get('public_host') or '')
+    public_hostname = str(cfg.get('public_hostname') or '').strip()
     frp_pub = coerce_port(cfg.get('frp_control_public_port')) or coerce_port(cfg.get('control_port'))
     frp_listen = coerce_port(cfg.get('frp_control_listen_port')) or coerce_port(cfg.get('control_port'))
     alloc_pub = coerce_port(cfg.get('allocator_public_port'))
@@ -974,6 +975,8 @@ def server_config_ports(cfg):
     alloc_url = str(cfg.get('allocator_public_url') or '')
     return {
         'public_host': public_host,
+        'public_ip': public_host,
+        'public_hostname': public_hostname,
         'frp_public': frp_pub,
         'frp_listen': frp_listen,
         'alloc_public': alloc_pub,
@@ -1489,6 +1492,64 @@ def check_server(report, paths, facts, skip_network):
             else:
                 report.add('server_config', PASS, 'server config structure is valid', '', '', 'installation')
             report.display['server_ports'] = ports
+            # Optional public hostname DNS alias (access only; never FAIL product).
+            alias = ports.get('public_hostname') or ''
+            if not alias:
+                report.add(
+                    'public_hostname_dns', NOT_APPLICABLE,
+                    'public hostname is not configured',
+                    '',
+                    '',
+                    'network',
+                )
+            else:
+                scfg = None
+                try:
+                    import importlib.util
+                    here = Path(__file__).resolve().parent
+                    candidates = [
+                        here / 'frp_server_config.py',
+                        Path('/usr/local/lib/frp-auto-deploy/frp_server_config.py'),
+                    ]
+                    root = os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
+                    if root:
+                        candidates.insert(1, Path(root) / 'usr/local/lib/frp-auto-deploy/frp_server_config.py')
+                    for path in candidates:
+                        if path.is_file():
+                            spec = importlib.util.spec_from_file_location('frp_server_config', str(path))
+                            scfg = importlib.util.module_from_spec(spec)
+                            spec.loader.exec_module(scfg)
+                            break
+                except Exception:
+                    scfg = None
+                if scfg is None:
+                    report.add(
+                        'public_hostname_dns', INFO,
+                        'public hostname is configured; DNS helper unavailable',
+                        alias,
+                        '',
+                        'network',
+                    )
+                else:
+                    assessment = scfg.assess_dns(alias, ports.get('public_ip') or ports.get('public_host') or '')
+                    status_map = {
+                        'NOT_CONFIGURED': NOT_APPLICABLE,
+                        'PENDING': WARN,
+                        'READY': PASS,
+                        'MISMATCH': WARN,
+                    }
+                    dns_status = status_map.get(assessment.get('status'), WARN)
+                    detail_bits = [alias, assessment.get('status') or '']
+                    addrs = assessment.get('addresses') or []
+                    if addrs:
+                        detail_bits.append('resolved=' + ','.join(addrs[:8]))
+                    report.add(
+                        'public_hostname_dns', dns_status,
+                        assessment.get('message') or 'public hostname DNS check',
+                        '; '.join(x for x in detail_bits if x),
+                        'create or correct the external DNS record; FRP continues using the Public IP',
+                        'network',
+                    )
             # Public vs listen difference is intentional (P2.8). Never FAIL for that.
             if ports['frp_public'] and ports['frp_listen'] and ports['frp_public'] != ports['frp_listen']:
                 report.add(

@@ -379,11 +379,20 @@ def encrypt_token(token, secret):
 
 
 def cfg_public_host(cfg):
-    for key in ('public_host', 'public_ip'):
+    """FRP control host: public_ip preferred, then legacy public_host."""
+    for key in ('public_ip', 'public_host'):
         value = cfg.get(key)
         if value is not None and str(value).strip():
             return str(value).strip()
     raise RuntimeError('public_host is not configured')
+
+
+def cfg_public_hostname(cfg):
+    value = cfg.get('public_hostname')
+    if value is None:
+        return ''
+    text = str(value).strip()
+    return text
 
 
 def cfg_frp_control_public_port(cfg):
@@ -1116,6 +1125,74 @@ class Allocator:
             return None, None, 'invalid signature'
         return record, path, None
 
+    def reconcile_client_registry(self, machine_id, headers, body, peer_host=None):
+        registry_service_ids = []
+        response_mac_key = None
+        pending_nonce = None
+        try:
+            with LOCK:
+                with self.registry_lock():
+                    state = self.load_registry()
+                    client = (state.get('clients') or {}).get(machine_id)
+                    error, _now, pending_nonce = self.verify_mgmt_against_client(
+                        client, machine_id, headers, body
+                    )
+                    if error:
+                        return 403, api_error(error, classify_auth_error(error))
+                    if not isinstance(client, dict):
+                        return 403, api_error('unknown client identity', 'AUTH_FAILED')
+
+                    services = client.get('services') or {}
+                    if not isinstance(services, dict):
+                        services = {}
+                    registry_service_ids = sorted(str(sid) for sid in services.keys())
+
+                    if pending_nonce:
+                        nonce_error = self.commit_nonce(
+                            machine_id, pending_nonce, int(time.time())
+                        )
+                        if nonce_error:
+                            return 403, api_error(
+                                nonce_error, classify_auth_error(nonce_error)
+                            )
+
+                    response_mac_key = client.get('mgmt_mac_key')
+        except RegistrySchemaError as exc:
+            print('allocator registry error: %s' % exc, flush=True)
+            return 500, api_error(
+                'registry schema is invalid', 'REGISTRY_INVALID'
+            )
+        except OSError as exc:
+            print('allocator persist error: %s' % exc, flush=True)
+            return 500, api_error(
+                'failed to persist registry', 'SERVER_MUTATION_FAILED'
+            )
+        except RuntimeError as exc:
+            print('allocator runtime error: %s' % exc, flush=True)
+            return 500, api_error(
+                'internal server error', 'SERVER_MUTATION_FAILED'
+            )
+
+        if not response_mac_key:
+            return 500, api_error(
+                'management response authentication is not available',
+                'SERVER_MUTATION_FAILED',
+            )
+
+        response_payload = {
+            'frp_server': cfg_public_host(self.cfg),
+            'frp_server_port': cfg_frp_control_public_port(self.cfg),
+            'frp_transport': cfg_frp_transport(self.cfg),
+            'registry_service_ids': registry_service_ids,
+        }
+        alias = cfg_public_hostname(self.cfg)
+        if alias:
+            response_payload['public_hostname'] = alias
+        response_payload['response_hmac'] = MGMT.hmac_hex(
+            response_mac_key, canonical_json(response_payload)
+        )
+        return 200, response_payload
+
     def enroll(self, enrollment_id, timestamp, signature, body, headers=None, peer_host=None):
         headers = headers or {}
         identity_auth = str(headers.get('X-Mgmt-Auth') or '').strip() == '1'
@@ -1147,6 +1224,9 @@ class Allocator:
             hostname = CREG.validate_hostname(hostname)
         except ValueError:
             return 400, api_error('invalid hostname', 'AUTH_FAILED')
+
+        if identity_auth and str(headers.get('X-Mgmt-Reconcile') or '').strip() == '1':
+            return self.reconcile_client_registry(machine_id, headers, body, peer_host)
 
         try:
             requested = normalize_services(payload.get('services'))
@@ -1333,6 +1413,9 @@ class Allocator:
             'frp_transport': cfg_frp_transport(self.cfg),
             'services': allocated,
         }
+        alias = cfg_public_hostname(self.cfg)
+        if alias:
+            response_payload['public_hostname'] = alias
         if identity_auth:
             mac_secret = response_mac_key
             if not mac_secret:

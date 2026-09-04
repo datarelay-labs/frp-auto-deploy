@@ -2,9 +2,17 @@
 
 `frp-auto-deploy` supports two server deployment modes. Direct mode is the
 default and matches 2.0.0. Enterprise single-443 is optional. Project version
-**2.1.0** is the current stable release.
+**2.1.1** is the current stable release.
 
 Published service ports stay **TCP/6000-6098** (1:1) in both modes.
+
+**Public IP** is the default and primary infrastructure endpoint used for FRP
+control and the default allocator URL. An optional **public hostname** may be
+configured as a user-facing DNS alias for published services (SSH/HTTP/HTTPS/
+custom TCP). Setting or unsetting that hostname does not change Direct or
+single-443 control paths, frontend proxy configuration, or CA identity. DNS
+records are managed outside FRP Auto Deploy. HTTPS published services remain
+TCP passthrough.
 
 The addresses `203.0.113.10` and `192.0.2.50` are documentation-only (RFC 5737).
 
@@ -90,7 +98,7 @@ The official bootstrap URL is unchanged:
 
 ```bash
 curl -fsSL \
-https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.0/dist/bootstrap-server.sh \
+https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.1/dist/bootstrap-server.sh \
 | sudo bash
 ```
 

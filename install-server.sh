@@ -23,6 +23,7 @@ for f in \
   "$BASE_DIR/lib/frp_audit.py" \
   "$BASE_DIR/lib/frp_project_files.py" \
   "$BASE_DIR/lib/frp_control_locks.py" \
+  "$BASE_DIR/lib/frp_server_config.py" \
   "$BASE_DIR/lib/server-project-files.manifest" \
   "$BASE_DIR/lib/frp-doctor-common.sh" \
   "$BASE_DIR/lib/frp_doctor.py" \
@@ -40,6 +41,7 @@ for f in \
   "$BASE_DIR/tools/frp-revoke-client" \
   "$BASE_DIR/tools/frp-client-set" \
   "$BASE_DIR/tools/frp-set-client-installer-url" \
+  "$BASE_DIR/tools/frp-server-set" \
   "$BASE_DIR/tools/frp-server-status" \
   "$BASE_DIR/tools/frp-project-update" \
   "$BASE_DIR/tools/frp-backup" \
@@ -473,6 +475,37 @@ frp_valid_public_host() {
   return 0
 }
 
+frp_valid_public_ip_literal() {
+  local value="${1:-}"
+  python3 - "$value" <<'PY'
+import ipaddress, sys
+text = (sys.argv[1] or '').strip()
+if text.startswith('[') and text.endswith(']'):
+    text = text[1:-1]
+try:
+    ipaddress.ip_address(text)
+except ValueError:
+    raise SystemExit(1)
+raise SystemExit(0)
+PY
+}
+
+frp_valid_public_hostname() {
+  local value="${1:-}"
+  [[ -n "$value" ]] || return 0
+  python3 - "$BASE_DIR/lib/frp_server_config.py" "$value" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location('frp_server_config', sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+try:
+    mod.validate_public_hostname(sys.argv[2], required=True)
+except Exception:
+    raise SystemExit(1)
+raise SystemExit(0)
+PY
+}
+
 frp_has_tty() {
   [[ -e /dev/tty && -r /dev/tty && -w /dev/tty ]] || return 1
   { true </dev/tty >/dev/tty; } 2>/dev/null || return 1
@@ -659,6 +692,7 @@ print('EXISTING_SERVER_CONFIG=1')
 mapping = {
     'public_host': 'EXISTING_PUBLIC_IP',
     'public_ip': 'EXISTING_PUBLIC_IP',
+    'public_hostname': 'EXISTING_PUBLIC_HOSTNAME',
     'control_port': 'EXISTING_CONTROL_PORT',
     'frp_control_public_port': 'EXISTING_CONTROL_PUBLIC_PORT',
     'frp_control_listen_port': 'EXISTING_CONTROL_LISTEN_PORT',
@@ -670,9 +704,10 @@ mapping = {
     'client_installer_url': 'EXISTING_CLIENT_INSTALLER_URL',
     'deployment_mode': 'EXISTING_DEPLOYMENT_MODE',
 }
-# public_host wins over public_ip when both exist.
+# public_ip is the control endpoint; public_host is a legacy synonym.
+# Prefer public_ip when both exist so a stale public_host cannot override IP.
 order = [
-    'public_ip', 'public_host',
+    'public_host', 'public_ip', 'public_hostname',
     'control_port', 'frp_control_public_port', 'frp_control_listen_port',
     'port_start', 'port_end',
     'listen_port', 'allocator_listen_port', 'allocator_public_port',
@@ -735,6 +770,7 @@ resolve_server_settings() {
 
   FRP_PUBLIC_IP="${FRP_PUBLIC_IP:-${EXISTING_PUBLIC_IP:-}}"
   FRP_PUBLIC_HOST="${FRP_PUBLIC_HOST:-$FRP_PUBLIC_IP}"
+  FRP_PUBLIC_HOSTNAME="${FRP_PUBLIC_HOSTNAME:-${EXISTING_PUBLIC_HOSTNAME:-}}"
   FRP_INTERNAL_IP="${FRP_INTERNAL_IP:-}"
   FRP_PORT_START="${FRP_PORT_START:-${EXISTING_PORT_START:-}}"
   FRP_PORT_END="${FRP_PORT_END:-${EXISTING_PORT_END:-}}"
@@ -779,15 +815,46 @@ resolve_server_settings() {
 
   if [[ -z "$FRP_PUBLIC_IP" ]]; then
     if frp_has_tty; then
-      prompt "Public hostname or IP" "$detected_public" FRP_PUBLIC_IP
+      prompt "Public IP" "$detected_public" FRP_PUBLIC_IP
     fi
   fi
-  require_value FRP_PUBLIC_IP "Public hostname or IP (FRP_PUBLIC_HOST or FRP_PUBLIC_IP)"
+  require_value FRP_PUBLIC_IP "Public IP (FRP_PUBLIC_IP or FRP_PUBLIC_HOST)"
   if ! frp_valid_public_host "$FRP_PUBLIC_IP"; then
-    echo "ERROR: Public hostname or IP contains invalid characters" >&2
+    echo "ERROR: Public IP contains invalid characters" >&2
     exit 1
   fi
+  # Fresh installs require an IP literal. Existing deployments may still use a
+  # legacy hostname as the control endpoint; do not break reinstall/upgrade.
+  if [[ "${EXISTING_SERVER_CONFIG:-}" != "1" ]]; then
+    if ! frp_valid_public_ip_literal "$FRP_PUBLIC_IP"; then
+      echo "ERROR: Public IP must be an IPv4 or IPv6 address" >&2
+      echo "Optional DNS aliases are configured separately as Public DNS hostname." >&2
+      exit 1
+    fi
+  fi
   FRP_PUBLIC_HOST="$FRP_PUBLIC_IP"
+
+  if [[ -z "${FRP_PUBLIC_HOSTNAME}" ]]; then
+    if frp_has_tty && [[ "${EXISTING_SERVER_CONFIG:-}" != "1" ]]; then
+      echo
+      echo "Optional DNS name pointing to this server's public IP."
+      echo
+      echo "Example:"
+      echo "  frp.example.com"
+      echo
+      echo "Press Enter to use the public IP only."
+      echo
+      echo "FRP Auto Deploy does not create or manage DNS records."
+      prompt "Public DNS hostname [optional]" "" FRP_PUBLIC_HOSTNAME
+    fi
+  fi
+  if [[ -n "${FRP_PUBLIC_HOSTNAME}" ]]; then
+    if ! frp_valid_public_hostname "$FRP_PUBLIC_HOSTNAME"; then
+      echo "ERROR: Public DNS hostname is invalid" >&2
+      echo "Use a bare DNS name such as frp.example.com (no scheme, port, or path)." >&2
+      exit 1
+    fi
+  fi
 
   local internal_default="${FRP_INTERNAL_IP:-${detected_internal:-}}"
   prompt "Internal FRP server IP (display only)" "$internal_default" FRP_INTERNAL_IP
@@ -1007,12 +1074,14 @@ write_server_config() {
     "$FRP_ALLOCATOR_LISTEN_PORT" \
     "$FRP_ALLOCATOR_PUBLIC_URL" \
     "$CLIENT_INSTALLER_URL" \
-    "$pki" <<'PY'
+    "$pki" \
+    "${FRP_PUBLIC_HOSTNAME:-}" <<'PY'
 import json, os, sys, tempfile
 from pathlib import Path
 path = Path(sys.argv[1])
 pki = sys.argv[11]
 host = sys.argv[2]
+hostname = (sys.argv[12] if len(sys.argv) > 12 else '').strip()
 cfg = {
     'public_host': host,
     'public_ip': host,
@@ -1038,6 +1107,8 @@ cfg = {
     'tls_server_cert': pki.rstrip('/') + '/server.crt',
     'tls_server_key': pki.rstrip('/') + '/server.key',
 }
+if hostname:
+    cfg['public_hostname'] = hostname
 payload = json.dumps(cfg, indent=2, sort_keys=True) + '\n'
 path.parent.mkdir(parents=True, exist_ok=True)
 fd, tmp = tempfile.mkstemp(prefix=path.name + '.', suffix='.tmp', dir=str(path.parent))
@@ -1901,7 +1972,8 @@ frp_server_main() {
 Project version   : ${PROJECT_VERSION}
 FRP version       : ${FRP_VERSION}
 Deployment mode   : ${FRP_DEPLOYMENT_MODE}
-Public host       : ${FRP_PUBLIC_HOST}
+Public IP         : ${FRP_PUBLIC_IP}
+Public hostname   : ${FRP_PUBLIC_HOSTNAME:-not configured}
 FRP control public: TCP/${FRP_CONTROL_PUBLIC_PORT}
 FRP transport     : ${FRP_TRANSPORT}
 FRP control listen: TCP/${FRP_CONTROL_LISTEN_PORT} (${FRP_CONTROL_BIND_ADDR})

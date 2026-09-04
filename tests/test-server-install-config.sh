@@ -5,6 +5,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
+export FRP_SERVER_TEST_ROOT="$WORKDIR/isolated-root"
+mkdir -p "$FRP_SERVER_TEST_ROOT/etc/frp-auto-deploy"
 
 pass() { echo "PASS $1"; }
 fail() { echo "FAIL $1" >&2; exit 1; }
@@ -229,6 +231,9 @@ Path(sys.argv[1]).write_text(json.dumps({
 }, indent=2, sort_keys=True) + "\n")
 PY
 reset_env
+# Pin stable so this assertion is independent of any host-persisted
+# /etc/frp-auto-deploy/version RELEASE_CHANNEL (dev vs stable).
+export FRP_RELEASE_CHANNEL=stable
 export FRP_SERVER_CONFIG="$EXISTING_LEGACY"
 load_existing_server_config
 resolve_server_settings
@@ -297,6 +302,7 @@ Path(sys.argv[1]).write_text(json.dumps({
 }, indent=2, sort_keys=True) + "\n")
 PY
 reset_env
+export FRP_RELEASE_CHANNEL=stable
 export FRP_SERVER_CONFIG="$EXISTING_EMPTY"
 load_existing_server_config
 resolve_server_settings
