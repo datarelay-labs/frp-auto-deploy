@@ -32,11 +32,13 @@ expect_id() {
 expect_id ubuntu ubuntu
 expect_id ubuntu24 ubuntu
 expect_id rocky rocky
+expect_id rocky8 rocky
 expect_id almalinux almalinux
 expect_id amazonlinux amzn
 expect_id amazonlinux2 amzn
 pass "DISTRO_UBUNTU"
 pass "DISTRO_ROCKY"
+pass "DISTRO_ROCKY8"
 pass "DISTRO_ALMA"
 pass "DISTRO_AMAZON_2023"
 pass "DISTRO_AMAZON_2"
