@@ -5,6 +5,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 export PYTHONDONTWRITEBYTECODE=1
+# Leaked interactive/debug roots divert update-pending.json via frp_txn_marker_path
+# precedence and produce false rollback-marker failures across the suite.
+unset FRP_UPDATE_ROOT FRP_DEPLOY_TEST_ROOT FRP_SERVER_TEST_ROOT \
+  FRP_CLIENT_TEST_ROOT FRP_UNINSTALL_TEST_ROOT FRP_ROLE_TEST_ROOT || true
 
 echo "=== shell syntax ==="
 git ls-files '*.sh' | xargs -r bash -n

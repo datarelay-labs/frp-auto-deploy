@@ -3,6 +3,10 @@
 # Isolated test roots only. Does not touch live FRP systems.
 set -euo pipefail
 
+# Ignore leaked roots from prior debug sessions; they divert txn markers.
+unset FRP_UPDATE_ROOT FRP_DEPLOY_TEST_ROOT FRP_SERVER_TEST_ROOT \
+  FRP_CLIENT_TEST_ROOT FRP_UNINSTALL_TEST_ROOT FRP_ROLE_TEST_ROOT || true
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../lib/frp-common.sh
 . "$ROOT/lib/frp-common.sh"

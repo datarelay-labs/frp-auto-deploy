@@ -2,6 +2,10 @@
 # Safe existing-client upgrade, version tracking, and rollback.
 set -euo pipefail
 
+# Ignore leaked roots from prior debug sessions; they divert txn markers.
+unset FRP_UPDATE_ROOT FRP_DEPLOY_TEST_ROOT FRP_SERVER_TEST_ROOT \
+  FRP_CLIENT_TEST_ROOT FRP_UNINSTALL_TEST_ROOT FRP_ROLE_TEST_ROOT || true
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKDIR="$(mktemp -d)"
 ALLOC_PID=""
@@ -434,6 +438,7 @@ fi
 unset FRP_CLIENT_UPGRADE_HOOK_FAIL FRP_CLIENT_UPGRADE_HOOK_ROLLBACK_FAIL
 grep -q 'UPDATE_ROLLBACK_FAILED' "$WORKDIR/rollback-failure.out" "$WORKDIR/rollback-failure.err" || fail "rollback failure class"
 grep -q 'RECOVERY_REQUIRED' "$WORKDIR/rollback-failure.out" "$WORKDIR/rollback-failure.err" || fail "rollback recovery marker"
+[[ -f "$ROLL_FAIL/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "client rollback left no pending marker"
 pass "UPGRADE_ROLLBACK"
 pass "NO_PARTIAL_TOOL_INSTALL"
 pass "CLIENT_STATE_UNCHANGED_ON_FAILURE"
@@ -443,6 +448,7 @@ pass "PARTIAL_INSTALL_ROLLBACK"
 pass "POST_VERIFY_ROLLBACK"
 pass "BUILD_INFO_WRITE_ROLLBACK"
 pass "ROLLBACK_FAILURE_CLASS"
+pass "CLIENT_UPDATE_ROLLBACK_FAILURE"
 
 UNB="$WORKDIR/unbound"
 write_client_fixture "$UNB" 1 1
@@ -455,7 +461,5 @@ unset FRP_CLIENT_UPGRADE_HOOK_FAIL
 grep -q 'UPGRADE_ROLLBACK=PASS' "$WORKDIR/client-unbound.out" "$WORKDIR/client-unbound.err" ||
   fail "client unexpected rollback"
 pass "CLIENT_UPDATE_UNEXPECTED_FAILURE_ROLLBACK"
-[[ -f "$ROLL_FAIL/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "client rollback left no pending marker"
-pass "CLIENT_UPDATE_ROLLBACK_FAILURE"
 
 echo "CLIENT_UPGRADE_TESTS=PASS"
