@@ -1,11 +1,12 @@
 # FRP Auto Deploy — Product Master Document
 
-> **Document role:** Product Charter + Product Specification + Architecture Principles + Roadmap  
-> **Repository:** `datarelay-labs/frp-auto-deploy`  
-> **Document status:** Master / Living Document  
-> **Last updated:** 2026-08-31  
-> **Current stable baseline:** Project 2.1.0  
-> **Pinned upstream FRP:** 0.70.1  
+> **Document role:** Product Charter + Product Specification + Architecture Principles + Roadmap
+> **Repository:** `datarelay-labs/frp-auto-deploy`
+> **Document status:** Master / Living Document
+> **Last updated:** 2026-09-04
+> **Current stable baseline:** Project 2.1.1
+> **Release HEAD:** `729fe31b69adae5e65bf9aaf45efe82d8deab867`
+> **Pinned upstream FRP:** 0.70.1
 > **Primary management interface:** `sudo frpctl`
 
 ---
@@ -1438,11 +1439,30 @@ Prometheus/Grafana/RMM 형태의 motion
 현재 repository 기준 stable baseline:
 
 ```text
-Project: 2.1.0
+Project: 2.1.1
 FRP:     0.70.1
+Release HEAD: 729fe31b69adae5e65bf9aaf45efe82d8deab867
 ```
 
-2.1.0의 주요 stable milestone:
+v2.1.1 release-validated platforms:
+
+- baseline Linux
+- Amazon Linux 2023
+- Rocky Linux 8.10
+
+Not v2.1.1 supported:
+
+- macOS Apple Silicon
+- Windows 10/11
+
+Target management scale:
+
+- 1–5 clients: extremely easy
+- 10–30 clients: comfortable
+- 30–50 clients: manageable with simple Group/Tag/Filter
+- 100–1000: not a product target
+
+2.1.1의 주요 stable milestone:
 
 - Secure HTTPS Enrollment
 - Project private CA
@@ -1994,19 +2014,21 @@ Group 단위 destructive bulk operation은 Group MVP에 포함하지 않는다.
 현재 제품 관점에서 가장 높은 우선순위는 다음이다.
 
 ```text
-1. Current main hardening 안정화
-2. Stable release baseline 정리
+1. Product upgrade safety + Zero-Touch command simplification (post-v2.1.1 hardening)
+2. Current main hardening 안정화
 3. Group Management MVP
 4. Dynamic Group / Filters
 5. Safe Group Operations
 6. 실제 사용 요구 기반 추가 플랫폼
 ```
 
-즉 현 시점에서 가장 중요한 다음 제품 기능은:
+Zero-Touch short-command note:
 
-> **Fleet-style Client Group Management**
+- Ideal `curl https://<server>/i/<ticket> | sudo bash` is blocked by the private-CA trust model without insecure TLS.
+- Current short form uses a publicly trusted immutable installer plus one opaque `zt1.` package (allocator URL + CA pin + bootstrap ticket).
+- Legacy long `env FRP_*=...` Zero-Touch commands remain supported.
 
-이다.
+즉 현 시점에서 Group MVP는 upgrade safety와 Zero-Touch 단순화가 닫힌 뒤에 착수한다.
 
 ---
 
