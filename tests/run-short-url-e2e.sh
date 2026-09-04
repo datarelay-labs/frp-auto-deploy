@@ -255,9 +255,29 @@ ssh_client 'sudo test -f /etc/frp/client-identity.key && sudo test -f /etc/frp/c
 pass "MANAGEMENT_IDENTITY"
 
 # Reboot/reconnect check (client).
-ssh_client 'sudo reboot' >/dev/null 2>&1 || true
-for i in $(seq 1 36); do
+# Wait for SSH to drop after reboot is issued, then wait for it to return.
+ssh_client 'sudo nohup bash -c "sleep 1; reboot" >/dev/null 2>&1 &' >/dev/null 2>&1 || true
+down=0
+for _ in $(seq 1 60); do
+  if ! ssh_client 'true' >/dev/null 2>&1; then
+    down=1
+    break
+  fi
+  sleep 2
+done
+[[ "$down" == "1" ]] || note "WARN: SSH did not drop after reboot request"
+up=0
+for _ in $(seq 1 90); do
   if ssh_client 'true' >/dev/null 2>&1; then
+    up=1
+    break
+  fi
+  sleep 5
+done
+[[ "$up" == "1" ]] || fail "client SSH did not return after reboot"
+# Give frpc a moment after sshd is back.
+for _ in $(seq 1 24); do
+  if ssh_client 'systemctl is-active frpc' >/dev/null 2>&1; then
     break
   fi
   sleep 5
