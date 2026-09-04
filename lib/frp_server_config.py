@@ -6,6 +6,10 @@ access_host   — user-facing published-service endpoint (public_hostname or con
 
 public_hostname is an optional DNS alias only. It must never become the default
 FRP control destination, allocator URL host, or PKI identity by itself.
+
+bootstrap_hostname is a separate optional DNS name used only for the publicly
+trusted Zero-Touch short URL entrypoint (operator reverse proxy). It must not
+be overloaded onto public_hostname or FRP control identity.
 """
 from __future__ import annotations
 
@@ -108,6 +112,16 @@ def public_hostname(cfg):
         return validate_public_hostname(cfg.get('public_hostname') or '', required=False)
     except ConfigError:
         # Persisted invalid values should not crash readers; treat as unset.
+        return ''
+
+
+def bootstrap_hostname(cfg):
+    """Optional Zero-Touch public TLS bootstrap hostname (not public_hostname)."""
+    if not isinstance(cfg, dict):
+        return ''
+    try:
+        return validate_public_hostname(cfg.get('bootstrap_hostname') or '', required=False)
+    except ConfigError:
         return ''
 
 
@@ -310,6 +324,21 @@ def set_public_hostname(cfg, hostname):
         cfg.pop('public_hostname', None)
         return previous
     cfg['public_hostname'] = validate_public_hostname(text, required=True)
+    return previous
+
+
+def set_bootstrap_hostname(cfg, hostname):
+    """Mutate cfg in place: set or clear bootstrap_hostname. Returns previous value.
+
+    Does not create DNS records, issue certificates, open firewall ports, or
+    configure ACME. Operator owns public TLS termination for this name.
+    """
+    previous = _strip(cfg.get('bootstrap_hostname') or '')
+    text = _strip(hostname)
+    if not text:
+        cfg.pop('bootstrap_hostname', None)
+        return previous
+    cfg['bootstrap_hostname'] = validate_public_hostname(text, required=True)
     return previous
 
 

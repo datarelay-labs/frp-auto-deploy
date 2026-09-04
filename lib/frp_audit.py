@@ -33,6 +33,10 @@ SECRET_VALUE_RE = re.compile(
 )
 
 
+def _redact_short_url_paths(text):
+    return re.sub(r'(/i/)[^/?\s#]+', r'\1<redacted>', str(text), flags=re.IGNORECASE)
+
+
 class AuditError(Exception):
     pass
 
@@ -75,7 +79,7 @@ def _redact(value):
         return [_redact(item) for item in value]
     if value is None or isinstance(value, (int, float, bool)):
         return value
-    text = str(value)
+    text = _redact_short_url_paths(str(value))
     if SECRET_VALUE_RE.search(text):
         return "[REDACTED]"
     return text

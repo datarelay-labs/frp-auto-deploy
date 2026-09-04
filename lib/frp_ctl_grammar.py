@@ -452,9 +452,11 @@ def _unset_help(role):
         "  unset client <ID> label\n"
         "  unset client <ID> note\n"
         "  unset client <ID> tag <key>\n"
-        "  unset server hostname\n\n"
+        "  unset server hostname\n"
+        "  unset server bootstrap-hostname\n\n"
         "unset removes metadata only. It does not release ports or revoke identity.\n"
         "unset server hostname falls back to Public IP access.\n"
+        "unset server bootstrap-hostname falls back to zt1 Zero-Touch commands.\n"
     )
 
 
@@ -632,7 +634,23 @@ def context_help(tokens, role, names=None, clients=None):
         if tokens[1] == "server":
             if len(tokens) == 2:
                 return _fmt_available(
-                    [("hostname", "Optional public DNS hostname for published services")]
+                    [
+                        ("hostname", "Optional public DNS hostname for published services"),
+                        ("bootstrap-hostname", "Optional Zero-Touch public TLS bootstrap hostname"),
+                    ]
+                )
+            if tokens[2] == "bootstrap-hostname":
+                return (
+                    "Usage:\n"
+                    "  set server bootstrap-hostname <fqdn>\n\n"
+                    "Purpose:\n"
+                    "  Set the publicly trusted Zero-Touch short URL hostname.\n"
+                    "  FRP Auto Deploy does not create DNS or issue certificates.\n"
+                    "  Operator terminates public TLS on a reverse proxy.\n\n"
+                    "Example:\n"
+                    "  set server bootstrap-hostname bootstrap.example.com\n\n"
+                    "Remove:\n"
+                    "  unset server bootstrap-hostname\n"
                 )
             return (
                 "Usage:\n"
@@ -655,7 +673,11 @@ def context_help(tokens, role, names=None, clients=None):
                 ]
             )
         if tokens[1] == "server":
-            return "Usage:\n  unset server hostname\n"
+            return (
+                "Usage:\n"
+                "  unset server hostname\n"
+                "  unset server bootstrap-hostname\n"
+            )
         if len(tokens) <= 2:
             return _context_client_list(names, clients)
         return (
@@ -1019,33 +1041,46 @@ def _match_set(tokens, role, names=None):
     if resource == "server":
         if not server:
             return {"status": "role", "need": "server", "command": "set server"}
+        server_settings = ["hostname", "bootstrap-hostname"]
         if len(tokens) < 3:
             return incomplete(
                 "Missing server setting.",
-                ["set server hostname <fqdn>"],
-                ["hostname"],
+                [
+                    "set server hostname <fqdn>",
+                    "set server bootstrap-hostname <fqdn>",
+                ],
+                server_settings,
                 tip="set server ?",
             )
-        if tokens[2] != "hostname":
+        if tokens[2] not in server_settings:
             return incomplete(
                 "Unknown server setting.",
-                ["set server hostname <fqdn>"],
-                ["hostname"],
+                [
+                    "set server hostname <fqdn>",
+                    "set server bootstrap-hostname <fqdn>",
+                ],
+                server_settings,
             )
         if len(tokens) < 4:
             return incomplete(
                 "Missing hostname.",
-                ["set server hostname <fqdn>"],
-                tip="set server hostname ?",
+                ["set server %s <fqdn>" % tokens[2]],
+                tip="set server %s ?" % tokens[2],
             )
         if len(tokens) > 4:
             return {
                 "status": "error",
                 "message": "Too many arguments. Quote values that contain spaces.",
             }
+        if tokens[2] == "hostname":
+            return {
+                "status": "ok",
+                "action": "set_server_hostname",
+                "value": tokens[3],
+            }
         return {
             "status": "ok",
-            "action": "set_server_hostname",
+            "action": "set_server_bootstrap_hostname",
             "value": tokens[3],
         }
     return incomplete("Unknown set resource.", ["set <resource> ..."], avail)
@@ -1066,22 +1101,24 @@ def _match_unset(tokens, role, names=None):
         if len(tokens) < 3:
             return incomplete(
                 "Missing server setting.",
-                ["unset server hostname"],
-                ["hostname"],
+                ["unset server hostname", "unset server bootstrap-hostname"],
+                ["hostname", "bootstrap-hostname"],
                 tip="unset server ?",
             )
-        if tokens[2] != "hostname":
+        if tokens[2] not in ("hostname", "bootstrap-hostname"):
             return incomplete(
                 "Unknown server setting.",
-                ["unset server hostname"],
-                ["hostname"],
+                ["unset server hostname", "unset server bootstrap-hostname"],
+                ["hostname", "bootstrap-hostname"],
             )
         if len(tokens) > 3:
             return {
                 "status": "error",
                 "message": "Too many arguments.",
             }
-        return {"status": "ok", "action": "unset_server_hostname"}
+        if tokens[2] == "hostname":
+            return {"status": "ok", "action": "unset_server_hostname"}
+        return {"status": "ok", "action": "unset_server_bootstrap_hostname"}
     if tokens[1] != "client":
         return incomplete(
             "Unknown unset resource.",
@@ -1333,7 +1370,10 @@ def _tab_desc_map(line, role, names=None, clients=None):
         return rows, "named"
     if verb == "set" and len(filled) >= 2 and filled[1] == "server":
         if len(filled) == 2:
-            return {"hostname": "Optional public DNS hostname"}, "named"
+            return {
+                "hostname": "Optional public DNS hostname for published services",
+                "bootstrap-hostname": "Optional Zero-Touch public TLS bootstrap hostname",
+            }, "named"
     if verb == "set" and len(filled) >= 2 and filled[1] == "client":
         if len(filled) == 2:
             return {}, "clients"
@@ -1350,7 +1390,10 @@ def _tab_desc_map(line, role, names=None, clients=None):
         }, "named"
     if verb == "unset" and len(filled) >= 2 and filled[1] == "server":
         if len(filled) == 2:
-            return {"hostname": "Remove public DNS hostname"}, "named"
+            return {
+                "hostname": "Remove public DNS hostname",
+                "bootstrap-hostname": "Remove Zero-Touch bootstrap hostname",
+            }, "named"
     if verb == "unset" and len(filled) >= 2 and filled[1] == "client":
         if len(filled) == 2:
             return {}, "clients"
@@ -1479,7 +1522,7 @@ def _canonical_completion(tokens, trailing, role, names, services, local_service
                 return _filter(["label", "note", "tag"], prefix)
         if filled[1] == "server" and server:
             if len(filled) == 2:
-                return _filter(["hostname"], prefix)
+                return _filter(["hostname", "bootstrap-hostname"], prefix)
         if filled[1] == "service" and client:
             if len(filled) == 2:
                 return _filter(local_services, prefix)
@@ -1491,7 +1534,7 @@ def _canonical_completion(tokens, trailing, role, names, services, local_service
             return _filter(_unset_resources(role), prefix)
         if filled[1] == "server" and server:
             if len(filled) == 2:
-                return _filter(["hostname"], prefix)
+                return _filter(["hostname", "bootstrap-hostname"], prefix)
         if filled[1] == "client":
             if len(filled) == 2:
                 return _filter(names, prefix)

@@ -105,59 +105,41 @@ def shell_quote(value):
     return quoted
 
 
+def load_zero_touch():
+    return load_module(
+        'frp_zero_touch',
+        'lib/frp_zero_touch.py',
+        '/usr/local/lib/frp-auto-deploy/frp_zero_touch.py',
+    )
+
+
+_ZT = None
+
+
+def _zt():
+    global _ZT
+    if _ZT is None:
+        _ZT = load_zero_touch()
+    return _ZT
+
+
 ZERO_TOUCH_PACKAGE_PREFIX = 'zt1'
 
 
 def encode_zero_touch_package(allocator_url, ca_sha256, ticket):
-    """Encode opaque short-command package for trusted public installer bootstrap.
-
-    The package carries allocator URL, CA pin, and bootstrap ticket so the
-    operator can paste a short `curl | sudo bash -s -- <package>` command
-    without putting configuration in a URL and without insecure TLS (-k).
-    The public installer HTTPS endpoint provides the first trust root; the
-    package then pins the project CA for allocator enrollment.
-    """
-    import base64
-
-    payload = {
-        'v': 1,
-        'u': str(allocator_url or '').strip(),
-        'c': str(ca_sha256 or '').strip().lower(),
-        't': str(ticket or '').strip(),
-    }
-    if not payload['u'].lower().startswith('https://') or not payload['c'] or not payload['t']:
-        raise ValueError('incomplete zero-touch package')
-    if len(payload['c']) != 64 or any(ch not in '0123456789abcdef' for ch in payload['c']):
-        raise ValueError('invalid CA fingerprint in zero-touch package')
-    raw = json.dumps(payload, separators=(',', ':'), sort_keys=True).encode('utf-8')
-    token = base64.urlsafe_b64encode(raw).decode('ascii').rstrip('=')
-    return '%s.%s' % (ZERO_TOUCH_PACKAGE_PREFIX, token)
+    """Encode opaque short-command package for trusted public installer bootstrap."""
+    zt = _zt()
+    if zt is None:
+        raise ValueError('zero-touch helper is unavailable')
+    return zt.encode_zero_touch_package(allocator_url, ca_sha256, ticket)
 
 
 def decode_zero_touch_package(package):
     """Decode zt1.* package into allocator URL, CA SHA256, and bootstrap ticket."""
-    import base64
-
-    text = str(package or '').strip()
-    parts = text.split('.', 1)
-    if len(parts) != 2 or parts[0] != ZERO_TOUCH_PACKAGE_PREFIX or not parts[1]:
-        raise ValueError('invalid zero-touch package')
-    padded = parts[1] + ('=' * (-len(parts[1]) % 4))
-    try:
-        raw = base64.urlsafe_b64decode(padded.encode('ascii'))
-        payload = json.loads(raw.decode('utf-8'))
-    except Exception as exc:
-        raise ValueError('invalid zero-touch package') from exc
-    if not isinstance(payload, dict) or int(payload.get('v') or 0) != 1:
-        raise ValueError('unsupported zero-touch package version')
-    url = str(payload.get('u') or '').strip()
-    ca = str(payload.get('c') or '').strip().lower()
-    ticket = str(payload.get('t') or '').strip()
-    if not url.lower().startswith('https://') or len(ca) != 64 or not ticket:
-        raise ValueError('incomplete zero-touch package')
-    if any(ch not in '0123456789abcdef' for ch in ca):
-        raise ValueError('invalid CA fingerprint in zero-touch package')
-    return url, ca, ticket
+    zt = _zt()
+    if zt is None:
+        raise ValueError('zero-touch helper is unavailable')
+    return zt.decode_zero_touch_package(package)
 
 
 def reject_control_chars(label, value):
@@ -517,25 +499,35 @@ def print_manual(cfg, record, ttl, public_host, control_public, allocator, ca_fp
     print()
 
 
-def print_one_line(ticket, ttl, note, public_host, control_public, allocator, ca_fp, installer, ssh_user, ssh_port, client_name='', management_only=False, ticket_id='', legacy_env=False):
+def print_one_line(ticket, ttl, note, public_host, control_public, allocator, ca_fp, installer, ssh_user, ssh_port, client_name='', management_only=False, ticket_id='', legacy_env=False, bootstrap_hostname=''):
     tracking_id = str(ticket_id or '').strip()
     if not tracking_id and ticket:
         parts = str(ticket).split('.')
         if len(parts) >= 2:
             tracking_id = parts[1]
 
-    # Prefer short opaque-package form. The public installer URL is the
-    # TLS-trusted bootstrap locator; the package carries allocator pin + ticket.
-    # Ideal /i/<ticket> on the project-CA endpoint is blocked without -k.
+    # Prefer ideal short URL when bootstrap_hostname is configured (Option B).
+    # Otherwise keep the v2.1.2 zt1 opaque-package transitional command.
     command = ''
-    try:
-        package = encode_zero_touch_package(allocator, ca_fp, ticket)
-        command = 'curl -fsSL %s | sudo bash -s -- %s' % (
-            shell_quote(installer),
-            shell_quote(package),
-        )
-    except ValueError:
-        legacy_env = True
+    bootstrap_host = str(bootstrap_hostname or '').strip().lower()
+    if bootstrap_host and not legacy_env:
+        try:
+            zt = _zt()
+            if zt is None:
+                raise ValueError('zero-touch helper is unavailable')
+            command = zt.short_url_command(bootstrap_host, ticket)
+        except ValueError:
+            command = ''
+
+    if not command:
+        try:
+            package = encode_zero_touch_package(allocator, ca_fp, ticket)
+            command = 'curl -fsSL %s | sudo bash -s -- %s' % (
+                shell_quote(installer),
+                shell_quote(package),
+            )
+        except ValueError:
+            legacy_env = True
 
     if legacy_env or not command:
         env_parts = [
@@ -557,6 +549,7 @@ def print_one_line(ticket, ttl, note, public_host, control_public, allocator, ca
 
     print()
     print('Zero-touch client command')
+    print('=========================')
     print()
     print('This command contains a short-lived one-time bootstrap ticket.')
     print('Treat the command as sensitive until it expires or is used.')
@@ -573,6 +566,8 @@ def print_one_line(ticket, ttl, note, public_host, control_public, allocator, ca
         print('Note: %s' % note)
     if public_host and control_public:
         print('FRP Server: %s:%s' % (public_host, control_public))
+    if bootstrap_host and '/i/' in command:
+        print('Bootstrap host: %s' % bootstrap_host)
     print()
     print('Send that single line to the remote user. They paste it and press Enter.')
     print('No Enrollment Code prompt or FRP configuration is required.')
@@ -733,6 +728,7 @@ def main(argv=None):
         client_name=client_name,
         management_only=not services,
         ticket_id=str((ticket_record or {}).get('id') or ''),
+        bootstrap_hostname=str(cfg.get('bootstrap_hostname') or '').strip(),
     )
     try:
         here = Path(__file__).resolve()
