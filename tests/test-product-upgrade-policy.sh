@@ -54,4 +54,17 @@ print("OK")
 PY
 pass "ALLOCATOR_VERSION_HELPERS"
 
+python3 - "$ROOT/lib/frp-client-common.sh" <<'PY' || fail "version gate CA path"
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text()
+start = text.index('frp_client_require_server_compatible_for_upgrade()')
+end = text.index('\n}', start)
+body = text[start:end]
+if '/etc/frp-auto-deploy/allocator-ca.crt' not in body:
+    raise SystemExit('missing canonical CA path in version gate')
+print('OK')
+PY
+pass "VERSION_GATE_CA_PATH"
+
 echo "PRODUCT_UPGRADE_POLICY_TEST=PASS"

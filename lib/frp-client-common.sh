@@ -12,7 +12,7 @@ FRP_CLIENT_BACKUP_KEEP="${FRP_CLIENT_BACKUP_KEEP:-5}"
 FRP_CLIENT_UPGRADE_BACKUP_KEEP="${FRP_CLIENT_UPGRADE_BACKUP_KEEP:-5}"
 
 # Defaults match VERSION. A sibling VERSION file overrides project/FRP versions.
-PROJECT_VERSION="${PROJECT_VERSION:-2.1.1}"
+PROJECT_VERSION="${PROJECT_VERSION:-2.1.2}"
 FRP_VERSION="${FRP_VERSION:-0.70.1}"
 _FRP_CLIENT_COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${_FRP_CLIENT_COMMON_DIR}/../VERSION" ]]; then
@@ -3439,7 +3439,10 @@ frp_client_require_server_compatible_for_upgrade() {
   origin="$(frp_allocator_origin_url "$allocator_url" 2>/dev/null)" || return 0
   health="${origin}/healthz"
   resp=""
-  ca="$(frp_client_path /etc/frp/allocator-ca.crt)"
+  ca="$(frp_client_path /etc/frp-auto-deploy/allocator-ca.crt)"
+  if [[ ! -f "$ca" ]]; then
+    ca="$(frp_client_path /etc/frp/allocator-ca.crt)"
+  fi
   if [[ -f "$ca" ]]; then
     resp="$(python3 - "$health" "$ca" <<'PY' 2>/dev/null || true
 import ssl, sys, urllib.request

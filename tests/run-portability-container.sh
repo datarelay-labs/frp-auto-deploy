@@ -41,6 +41,7 @@ fi
 
 FRP_DEPENDENCY_ROLE=server
 ensure_dependencies
+frp_prefer_newer_python || true
 frp_require_python
 echo "CONTAINER_PYTHON=$(python3 -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')"
 if command -v openssl >/dev/null 2>&1; then
