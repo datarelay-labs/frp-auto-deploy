@@ -10,7 +10,7 @@ fail() { echo "FAIL $1" >&2; exit 1; }
 
 # shellcheck disable=SC1091
 . "$ROOT/VERSION"
-[[ "$PROJECT_VERSION" == "2.1.1" ]] || fail "VERSION project is $PROJECT_VERSION"
+[[ "$PROJECT_VERSION" == "2.1.2" ]] || fail "VERSION project is $PROJECT_VERSION"
 [[ "$FRP_VERSION" == "0.70.1" ]] || fail "VERSION FRP is $FRP_VERSION"
 pass "VERSION_FILE"
 
@@ -147,11 +147,11 @@ pass "REAL_ACCEPTANCE_RECORDED"
 
 chmod +x "$ROOT/scripts/validate-release-tag.sh"
 TMPERR="$(mktemp)"
-if "$ROOT/scripts/validate-release-tag.sh" v2.1.2 >/dev/null 2>"$TMPERR"; then
+if "$ROOT/scripts/validate-release-tag.sh" v2.1.3 >/dev/null 2>"$TMPERR"; then
   rm -f "$TMPERR"
-  fail "v2.1.2 must not validate against PROJECT_VERSION=2.1.1"
+  fail "v2.1.3 must not validate against PROJECT_VERSION=${PROJECT_VERSION}"
 fi
-grep -q 'PROJECT_VERSION=2.1.1' "$TMPERR" || fail "tag mismatch diagnostic"
+grep -q "PROJECT_VERSION=${PROJECT_VERSION}" "$TMPERR" || fail "tag mismatch diagnostic"
 rm -f "$TMPERR"
 "$ROOT/scripts/validate-release-tag.sh" "v${PROJECT_VERSION}" >/dev/null || fail "current VERSION tag should validate"
 grep -q 'Do \*\*not\*\* tag a tree whose `PROJECT_VERSION` does not match' docs/RELEASE_CHECKLIST.md ||

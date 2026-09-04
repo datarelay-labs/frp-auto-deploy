@@ -10,7 +10,7 @@ release candidate or stable tag. Real-environment policy and evidence live in
 - [ ] README, CHANGELOG, and `docs/SECURITY.md` match that version
 - [ ] Support matrix claims match evidence (no SELinux/real-VM overclaim)
 - [ ] `./tests/run-all.sh` PASS
-- [ ] `./tests/run-distro-matrix.sh` PASS (six vendor images)
+- [ ] `./tests/run-distro-matrix.sh` PASS (seven vendor images, including Rocky 8)
 - [ ] `./scripts/secret-scan.sh` PASS (includes forbidden real-IP literals)
 - [ ] `./scripts/build-bundles.sh` then `git diff --exit-code dist/`
 - [ ] `./scripts/verify-sha256sums.sh` PASS
@@ -24,14 +24,15 @@ release candidate or stable tag. Real-environment policy and evidence live in
 **Authoritative classification** is the Gate classification table in
 `docs/RELEASE_VALIDATION.md`.
 
-For stable **2.1.1**, the required real gates remain the Ubuntu 24.04 x86_64
-single-443 topology recorded PASS for 2.1.0 in that file, plus automated gates
-in this checklist. The following remain
+For stable **2.1.2**, the required real gates remain the Ubuntu 24.04 x86_64
+single-443 topology recorded PASS for 2.1.0/2.1.1 in that file, plus automated
+gates in this checklist, plus published-v2.1.1-to-candidate upgrade E2E on
+baseline Linux, Amazon Linux 2023, and Rocky Linux 8.10. The following remain
 **RECOMMENDED / NOT_TESTED** and must **not** be advertised as field-validated:
 
 - Rocky Linux 9 real VM / SELinux Enforcing
 - AlmaLinux 9 real VM / SELinux Enforcing
-- Amazon Linux 2023 / Amazon Linux 2 real VM
+- Amazon Linux 2023 / Amazon Linux 2 real VM (fresh install matrix beyond upgrade E2E)
 - Native ARM64 systemd
 - Real OpenSSL 1.0.2 TLS enrollment
 - Firewall DNAT / private FRP-server topology
@@ -47,25 +48,22 @@ Do not convert Docker, LXD, or QEMU TCG into `REAL_VM=PASS`.
 - [ ] Do **not** claim Rocky/Alma SELinux, Amazon Linux real VM, ARM64 systemd,
   or OpenSSL 1.0.2 real TLS unless those columns are PASS
 
-For **2.1.1**, the required real gates chosen for the prior 2.1.0 tag (Ubuntu
-24.04 x86_64, direct public-IP server, enterprise-restricted client, single-443
-HTTPS/WSS/SSH, reboot recovery) remain the field baseline recorded PASS in
-`docs/RELEASE_VALIDATION.md`. Remaining recommended gates stay `NOT_TESTED`.
-Re-confirm Zero-touch / enrollment installer URLs resolve to immutable
-`v2.1.1` after server project update.
+For **2.1.2**, keep published **v2.1.1** untouched. Re-confirm Zero-touch /
+enrollment installer URLs resolve to immutable `v2.1.2` after the tag exists.
+Do not claim ideal `/i/<ticket>` short URL completion while
+`ZERO_TOUCH_SHORT_URL_TRUST_MODEL=PENDING`.
 
-## After OCI acceptance: next stable after 2.1.1
+## Preparing the 2.1.2 immutable tag
 
 Do **not** tag a tree whose `PROJECT_VERSION` does not match the intended tag.
 `./scripts/validate-release-tag.sh` rejects that mismatch automatically.
 
-This branch prepares **2.1.1**. A dedicated release commit must, in order:
+This tree prepares **2.1.2**. A dedicated release commit must, in order:
 
-1. Set `PROJECT_VERSION=2.1.1` in `VERSION` and `lib/frp-common.sh` default
-2. Set `release-manifest.json` `channel=stable` and `git_ref=v2.1.1`
+1. Set `PROJECT_VERSION=2.1.2` in `VERSION` and `lib/frp-common.sh` default
+2. Set `release-manifest.json` `channel=stable` and `git_ref=v2.1.2`
 3. Rebuild bundles and regenerate `SHA256SUMS`
 4. Run all automated gates in this checklist
-5. Only then create the immutable `v2.1.1` tag (operator step; not automated here)
+5. Only then create the immutable `v2.1.2` tag (operator step; not automated here)
 
-For a later release (for example 2.1.2), repeat the same sequence with the new
-version. Do not move frozen tags such as `v2.1.0` or `v2.1.1` after publication.
+Do not move frozen tags such as `v2.1.0` or `v2.1.1` after publication.

@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.1.2 — 2026-09-04
+
+Maintenance release preparing the next immutable tag. FRP remains pinned at
+**0.70.1**. Published field installs stay on **v2.1.1** until `v2.1.2` is tagged.
+
+- Correctness hardening: last-service release keeps the Client record;
+  CLIENT ID selector precedence; bootstrap completion fail-closed
+- Upgrade safety: transactional server/client project update with rollback;
+  server-first mixed-version policy (`Server N + Client N-1` supported;
+  `Client N + Server N-1` blocked as `SERVER_VERSION_TOO_OLD` before mutation);
+  identity, CA, FRP token, ports, labels/notes/tags, and public_hostname
+  preservation
+- Backup/audit hardening: ticket/package redaction, audit rotation,
+  rotated audit inclusion in backup; same-version restore only
+  (cross-version restore fail-closed before mutation)
+- Release metadata completeness for official install/uninstall artifacts
+- Transitional shorter Zero-Touch: publicly trusted installer plus opaque
+  `zt1.` package (no insecure TLS). Ideal `/i/<ticket>` short URL trust model
+  remains pending
+- Rocky Linux 8 container regression coverage in the distro matrix
+
+### Compatibility
+
+Already enrolled 2.1.1 clients remain compatible during a server-first upgrade
+window. Do not upgrade clients ahead of the server.
+
 ## 2.1.1 — 2026-09-04
 
 Stable release. FRP remains pinned at **0.70.1**.
@@ -33,10 +59,6 @@ Stable release. FRP remains pinned at **0.70.1**.
 Already enrolled 2.1.0 clients remain compatible. After a server project update
 from 2.1.0, newly generated Zero-touch / enrollment installer commands use the
 `v2.1.1` bootstrap URL when the persisted URL was an official managed ref.
-
-## Unreleased (post-2.1.1 / main)
-
-_None yet._
 
 ## 2.1.0 — 2026-08-29
 

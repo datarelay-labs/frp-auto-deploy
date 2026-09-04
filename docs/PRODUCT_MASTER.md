@@ -4,10 +4,12 @@
 > **Repository:** `datarelay-labs/frp-auto-deploy`
 > **Document status:** Master / Living Document
 > **Last updated:** 2026-09-04
-> **Current stable baseline:** Project 2.1.1
-> **Release HEAD:** `729fe31b69adae5e65bf9aaf45efe82d8deab867`
+> **Current stable baseline:** Project 2.1.1 (published tag `v2.1.1`)
+> **Next project line:** 2.1.2 (this tree; tag not created yet)
+> **Release HEAD (published stable):** `729fe31b69adae5e65bf9aaf45efe82d8deab867`
 > **Pinned upstream FRP:** 0.70.1
 > **Primary management interface:** `sudo frpctl`
+> **ZERO_TOUCH_SHORT_URL_TRUST_MODEL:** PENDING
 
 ---
 
@@ -1436,13 +1438,26 @@ Prometheus/Grafana/RMM 형태의 motion
 
 ## Stable Baseline
 
-현재 repository 기준 stable baseline:
+현재 repository 기준:
 
 ```text
-Project: 2.1.1
-FRP:     0.70.1
-Release HEAD: 729fe31b69adae5e65bf9aaf45efe82d8deab867
+Published stable:     2.1.1 (tag v2.1.1)
+Next project line:    2.1.2 (candidate tree; tag not created)
+FRP:                  0.70.1
+Published Release HEAD: 729fe31b69adae5e65bf9aaf45efe82d8deab867
+ZERO_TOUCH_SHORT_URL_TRUST_MODEL: PENDING
 ```
+
+v2.1.2 focus (this tree):
+
+- correctness hardening
+- upgrade safety
+- backup/audit hardening
+- transitional shorter Zero-Touch (`zt1.` package; no insecure TLS)
+- FRP remains 0.70.1
+
+Ideal `/i/<ticket>` short URL is **not** complete. Trust-model decision remains
+pending (`ZERO_TOUCH_SHORT_URL_TRUST_MODEL=PENDING`).
 
 v2.1.1 release-validated platforms:
 
@@ -2014,21 +2029,21 @@ Group 단위 destructive bulk operation은 Group MVP에 포함하지 않는다.
 현재 제품 관점에서 가장 높은 우선순위는 다음이다.
 
 ```text
-1. Product upgrade safety + Zero-Touch command simplification (post-v2.1.1 hardening)
-2. Current main hardening 안정화
-3. Group Management MVP
-4. Dynamic Group / Filters
-5. Safe Group Operations
-6. 실제 사용 요구 기반 추가 플랫폼
+1. Close v2.1.2 candidate (hardening + upgrade E2E) then final release gate
+2. Group Management MVP
+3. Dynamic Group / Filters
+4. Safe Group Operations
+5. 실제 사용 요구 기반 추가 플랫폼
 ```
 
 Zero-Touch short-command note:
 
 - Ideal `curl https://<server>/i/<ticket> | sudo bash` is blocked by the private-CA trust model without insecure TLS.
-- Current short form uses a publicly trusted immutable installer plus one opaque `zt1.` package (allocator URL + CA pin + bootstrap ticket).
+- `ZERO_TOUCH_SHORT_URL_TRUST_MODEL=PENDING`
+- Current transitional short form uses a publicly trusted immutable installer plus one opaque `zt1.` package (allocator URL + CA pin + bootstrap ticket).
 - Legacy long `env FRP_*=...` Zero-Touch commands remain supported.
 
-즉 현 시점에서 Group MVP는 upgrade safety와 Zero-Touch 단순화가 닫힌 뒤에 착수한다.
+즉 현 시점에서 Group MVP는 v2.1.2 candidate closure 이후에 착수한다.
 
 ---
 
