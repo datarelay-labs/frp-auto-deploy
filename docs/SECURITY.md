@@ -75,6 +75,17 @@ A short-lived secret created on the server (`sudo frp-create-client`).
 
 - Default TTL: 10 minutes
 - Bound to the first machine (`machine-id`) that uses it
+- **One-time credential**: after the first successful enrollment (`used_at` set),
+  the code cannot be used as a fresh credential again
+- Exact lost-response retry is allowed only when the same machine, the same
+  management public key, and the same enabled service set are presented; the
+  server returns the already-committed allocation without rotating identity
+- Rejected: used code + different machine, used code + new management key,
+  used code + changed services / authority
+- Identity recovery or key rotation requires a **new** Enrollment Code issued
+  by an administrator (after `frp-revoke-client` when the old key must be blocked)
+- Ordinary service apply/update after enrollment uses the persistent management
+  identity (signed requests), not the Enrollment Code
 - Entered interactively on manual install; not placed on the command line
 - Not the FRP token
 - Enrollment requests/responses are HMAC-authenticated
