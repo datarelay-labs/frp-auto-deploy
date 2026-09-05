@@ -39,8 +39,11 @@ if [[ -z "${FRP_CLIENT_UPDATE_METADATA_URL:-}" ]]; then
 fi
 
 frp_client_path() {
-  local p
-  p="$(frp_platform_map_path "$1")"
+  local p="$1"
+  # frp-common.sh may be absent in older staged test fixtures; keep Linux identity.
+  if declare -F frp_platform_map_path >/dev/null 2>&1; then
+    p="$(frp_platform_map_path "$p")"
+  fi
   if [[ -n "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
     printf '%s' "${FRP_CLIENT_TEST_ROOT}${p}"
   else

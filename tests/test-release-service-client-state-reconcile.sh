@@ -10,6 +10,10 @@ trap 'rm -rf "$WORKDIR"' EXIT
 TREE="$WORKDIR/client-root"
 mkdir -p "$TREE/etc/frp" "$TREE/etc/frp-auto-deploy" "$TREE/usr/local/lib/frp-auto-deploy"
 cp "$ROOT/lib/frp-client-common.sh" "$TREE/usr/local/lib/frp-auto-deploy/frp-client-common.sh"
+cp "$ROOT/lib/frp-common.sh" "$TREE/usr/local/lib/frp-auto-deploy/frp-common.sh"
+if [[ -f "$ROOT/lib/frp-macos.sh" ]]; then
+  cp "$ROOT/lib/frp-macos.sh" "$TREE/usr/local/lib/frp-auto-deploy/frp-macos.sh"
+fi
 
 write_state() {
   local web_enabled="$1"

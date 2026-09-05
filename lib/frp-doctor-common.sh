@@ -50,8 +50,10 @@ frp_doctor_root() {
 }
 
 frp_doctor_fs() {
-  local p
-  p="$(frp_platform_map_path "$1")"
+  local p="$1"
+  if declare -F frp_platform_map_path >/dev/null 2>&1; then
+    p="$(frp_platform_map_path "$p")"
+  fi
   local root
   root="$(frp_doctor_root)"
   if [[ -n "$root" ]]; then
