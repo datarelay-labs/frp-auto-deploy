@@ -88,6 +88,36 @@ def load_allocator():
     )
 
 
+def load_enrollment_lifecycle():
+    return load_module(
+        'frp_enrollment_lifecycle',
+        'lib/frp_enrollment_lifecycle.py',
+        '/usr/local/lib/frp-auto-deploy/frp_enrollment_lifecycle.py',
+    )
+
+
+def run_enrollment_retention_cleanup(cfg):
+    lifecycle = load_enrollment_lifecycle()
+    if lifecycle is None:
+        return
+    try:
+        cleanup_cfg = dict(cfg)
+        cleanup_cfg['enrollments_dir'] = str(remap(cfg['enrollments_dir']))
+        cleanup_cfg['bootstrap_dir'] = str(
+            remap(cfg.get('bootstrap_dir') or str(Path(cfg['enrollments_dir']).parent / 'bootstrap'))
+        )
+        cleanup_cfg['registry_file'] = str(
+            remap(cfg.get('registry_file') or str(Path(cfg['enrollments_dir']).parent / 'registry.json'))
+        )
+        lifecycle.maybe_run_retention_cleanup(
+            cleanup_cfg,
+            force=True,
+            audit_emit=lifecycle.load_audit_emit(),
+        )
+    except Exception:
+        return
+
+
 def fingerprint_from_cert(path):
     pki = load_frp_pki()
     if pki is None:
@@ -642,6 +672,7 @@ def main(argv=None):
         record, _path = write_enrollment(
             enroll_dir, enrollment_id, secret, ttl, note, label=client_name
         )
+        run_enrollment_retention_cleanup(cfg)
         print_manual(cfg, record, ttl, public_host, control_public, allocator, ca_fp, installer)
         try:
             here = Path(__file__).resolve()
