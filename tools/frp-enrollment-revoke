@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Revoke an unused or bound enrollment (manual or zero-touch)."""
+"""Revoke an unused or bound enrollment (manual or zero-touch).
+
+Fail-closed pair semantics:
+  1. Invalidate the Enrollment Code (authorization-bearing credential) first.
+  2. Then revoke the paired bootstrap ticket, if any.
+
+If step 2 fails after step 1 succeeds, the redeem-derived credential is already
+unusable; the CLI reports an error for the partial pair state rather than
+claiming a clean revoke while the Enrollment Code remains valid.
+"""
 import argparse
 import fcntl
 import importlib.util
@@ -12,6 +21,11 @@ from pathlib import Path
 
 ROOT = os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
 CONFIG = Path(ROOT + '/etc/frp-auto-deploy/config.json')
+
+# Fault-injection hooks for regression tests (unset in production).
+HOOK_FAIL_BEFORE_ENROLLMENT = 'FRP_REVOKE_HOOK_FAIL_BEFORE_ENROLLMENT'
+HOOK_FAIL_AFTER_ENROLLMENT = 'FRP_REVOKE_HOOK_FAIL_AFTER_ENROLLMENT'
+HOOK_FAIL_BEFORE_TICKET = 'FRP_REVOKE_HOOK_FAIL_BEFORE_TICKET'
 
 
 def remap(path):
@@ -65,6 +79,11 @@ def find_bootstrap_by_enrollment(bootstrap_dir, enrollment_id):
     return None, None
 
 
+def _hook_or_raise(env_name, where):
+    if os.environ.get(env_name, '').strip() == '1':
+        raise OSError('simulated revoke failure at %s' % where)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description='Revoke an unused or bound enrollment (manual or zero-touch)'
@@ -86,39 +105,73 @@ def main(argv=None):
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
     revoked_id = target_id
+    enrollment_revoked = False
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
         ticket_path = bootstrap / (target_id + '.json')
         enroll_path = enrollments / (target_id + '.json')
         now = utc_now_iso()
 
+        # Resolve the pair first, then always invalidate Enrollment Code before
+        # the bootstrap ticket so a partial failure cannot leave a usable code.
+        ticket_rec = None
+        enroll_rec = None
+        paired_ticket_path = None
+        paired_enroll_path = None
+
         if ticket_path.is_file():
-            record = json.loads(ticket_path.read_text(encoding='utf-8'))
-            refuse_state(record, 'tickets')
-            record['revoked_at'] = now
-            atomic_write(ticket_path, record)
-            enrollment_id = str(record.get('enrollment_id') or '')
-            paired = enrollments / (enrollment_id + '.json') if enrollment_id else None
-            if paired is not None and paired.is_file():
-                enroll = json.loads(paired.read_text(encoding='utf-8'))
-                enroll['revoked_at'] = now
-                atomic_write(paired, enroll)
+            ticket_rec = json.loads(ticket_path.read_text(encoding='utf-8'))
+            refuse_state(ticket_rec, 'tickets')
+            enrollment_id = str(ticket_rec.get('enrollment_id') or '')
+            paired_enroll_path = (
+                enrollments / (enrollment_id + '.json') if enrollment_id else None
+            )
+            if paired_enroll_path is not None and paired_enroll_path.is_file():
+                enroll_rec = json.loads(paired_enroll_path.read_text(encoding='utf-8'))
             revoked_id = target_id
         elif enroll_path.is_file():
-            record = json.loads(enroll_path.read_text(encoding='utf-8'))
-            refuse_state(record, 'codes')
-            # If this enrollment is paired with a bootstrap ticket, revoke that
-            # ticket as the canonical zero-touch credential too.
-            paired_path, paired_rec = find_bootstrap_by_enrollment(bootstrap, target_id)
-            if paired_path is not None:
-                refuse_state(paired_rec, 'tickets')
-                paired_rec['revoked_at'] = now
-                atomic_write(paired_path, paired_rec)
-                revoked_id = str(paired_rec.get('id') or target_id)
-            record['revoked_at'] = now
-            atomic_write(enroll_path, record)
+            enroll_rec = json.loads(enroll_path.read_text(encoding='utf-8'))
+            refuse_state(enroll_rec, 'codes')
+            paired_ticket_path, ticket_rec = find_bootstrap_by_enrollment(bootstrap, target_id)
+            if paired_ticket_path is not None:
+                refuse_state(ticket_rec, 'tickets')
+                revoked_id = str(ticket_rec.get('id') or target_id)
+            paired_enroll_path = enroll_path
         else:
             raise SystemExit('ERROR: enrollment not found')
+
+        # Step 1: revoke Enrollment Code (authorization-bearing).
+        if enroll_rec is not None and paired_enroll_path is not None:
+            _hook_or_raise(HOOK_FAIL_BEFORE_ENROLLMENT, 'before-enrollment')
+            enroll_rec = dict(enroll_rec)
+            enroll_rec['revoked_at'] = now
+            atomic_write(paired_enroll_path, enroll_rec)
+            enrollment_revoked = True
+            _hook_or_raise(HOOK_FAIL_AFTER_ENROLLMENT, 'after-enrollment')
+
+        # Step 2: revoke bootstrap ticket (if present).
+        ticket_target = ticket_path if ticket_path.is_file() else paired_ticket_path
+        if ticket_rec is not None and ticket_target is not None:
+            _hook_or_raise(HOOK_FAIL_BEFORE_TICKET, 'before-ticket')
+            ticket_rec = dict(ticket_rec)
+            ticket_rec['revoked_at'] = now
+            try:
+                atomic_write(ticket_target, ticket_rec)
+            except OSError as exc:
+                if enrollment_revoked:
+                    raise SystemExit(
+                        'ERROR: Enrollment Code revoked but bootstrap ticket update failed: %s\n'
+                        'The enrollment credential is already unusable. Re-run revoke or '
+                        'inspect the bootstrap ticket manually.' % exc
+                    ) from exc
+                raise
+    except OSError as exc:
+        if enrollment_revoked:
+            raise SystemExit(
+                'ERROR: Enrollment Code revoked but revoke did not fully complete: %s\n'
+                'The enrollment credential is already unusable.' % exc
+            ) from exc
+        raise SystemExit('ERROR: revoke failed: %s' % exc) from exc
     finally:
         os.close(lock_fd)
     print('Revoked enrollment %s' % revoked_id)
