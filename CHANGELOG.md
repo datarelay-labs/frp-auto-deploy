@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Overnight integration candidate work brings the macOS Apple Silicon launchd
+  client, Windows amd64 hash-verified PowerShell `-File` bootstrap, and Manual
+  Group MVP together on `integration/morning-e2e-ready`
+- macOS, Windows, and Group MVP remain candidate-only and require morning human
+  Real E2E; this does not expand the v2.1.3 stable platform claim
+- Added the operator checklist in `docs/MORNING_E2E_CHECKLIST.md`, including
+  known macOS/Windows host/tunnel availability blockers
 - Enrollment retention hardening: terminal records (`expired`, `completed`,
   `revoked`) retained for `enrollment_retention_days` (default 30), then
   pair-aware automatic cleanup; `purge enrollment` / `purge enrollments
