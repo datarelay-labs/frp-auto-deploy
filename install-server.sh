@@ -37,6 +37,8 @@ for f in \
   "$BASE_DIR/tools/frp-enroll-bulk" \
   "$BASE_DIR/tools/frp-clients" \
   "$BASE_DIR/tools/frp-client-info" \
+  "$BASE_DIR/tools/frp-groups" \
+  "$BASE_DIR/tools/frp-group-set" \
   "$BASE_DIR/tools/frp-release-client" \
   "$BASE_DIR/tools/frp-release-service" \
   "$BASE_DIR/tools/frp-revoke-client" \
@@ -57,6 +59,7 @@ done
 . "$BASE_DIR/lib/frp-server-upgrade.sh"
 
 DEFAULT_CLIENT_INSTALLER_URL="$(frp_default_client_installer_url)"
+DEFAULT_WINDOWS_CLIENT_INSTALLER_URL="$(frp_default_windows_client_installer_url)"
 # Historical owner/repo, concatenated only to recognize the obsolete project URL.
 LEGACY_CLIENT_INSTALLER_OWNER='RickLee-kr'
 LEGACY_CLIENT_INSTALLER_REPO='frp-auto-deploy'
@@ -676,6 +679,7 @@ load_existing_server_config() {
   EXISTING_ALLOCATOR_LISTEN_PORT=""
   EXISTING_ALLOCATOR_URL=""
   EXISTING_CLIENT_INSTALLER_URL=""
+  EXISTING_WINDOWS_CLIENT_INSTALLER_URL=""
   EXISTING_DEPLOYMENT_MODE=""
   EXISTING_SERVER_CONFIG=""
   [[ -r "$path" ]] || return 0
@@ -704,6 +708,7 @@ mapping = {
     'allocator_listen_port': 'EXISTING_ALLOCATOR_LISTEN_PORT',
     'allocator_public_port': 'EXISTING_ALLOCATOR_PUBLIC_PORT',
     'client_installer_url': 'EXISTING_CLIENT_INSTALLER_URL',
+    'windows_client_installer_url': 'EXISTING_WINDOWS_CLIENT_INSTALLER_URL',
     'deployment_mode': 'EXISTING_DEPLOYMENT_MODE',
 }
 # public_ip is the control endpoint; public_host is a legacy synonym.
@@ -713,7 +718,7 @@ order = [
     'control_port', 'frp_control_public_port', 'frp_control_listen_port',
     'port_start', 'port_end',
     'listen_port', 'allocator_listen_port', 'allocator_public_port',
-    'client_installer_url',
+    'client_installer_url', 'windows_client_installer_url',
     'deployment_mode',
 ]
 seen = {}
@@ -779,6 +784,15 @@ resolve_server_settings() {
   FRP_PORT_END="${FRP_PORT_END:-${EXISTING_PORT_END:-}}"
   CLIENT_INSTALLER_URL="${FRP_CLIENT_INSTALLER_URL:-${EXISTING_CLIENT_INSTALLER_URL:-$DEFAULT_CLIENT_INSTALLER_URL}}"
   frp_migrate_legacy_client_installer_url
+  WINDOWS_CLIENT_INSTALLER_URL="${FRP_WINDOWS_CLIENT_INSTALLER_URL:-${EXISTING_WINDOWS_CLIENT_INSTALLER_URL:-$DEFAULT_WINDOWS_CLIENT_INSTALLER_URL}}"
+  if ! frp_validate_https_url "$CLIENT_INSTALLER_URL"; then
+    echo "ERROR: client_installer_url must be a valid https:// URL" >&2
+    exit 1
+  fi
+  if ! frp_validate_https_url "$WINDOWS_CLIENT_INSTALLER_URL"; then
+    echo "ERROR: windows_client_installer_url must be a valid https:// URL" >&2
+    exit 1
+  fi
   FRP_MODE_SWITCH=0
 
   # Public vs listen: dedicated vars win; a single legacy FRP_CONTROL_PORT or
@@ -1077,16 +1091,17 @@ write_server_config() {
     "$FRP_ALLOCATOR_LISTEN_PORT" \
     "$FRP_ALLOCATOR_PUBLIC_URL" \
     "$CLIENT_INSTALLER_URL" \
+    "$WINDOWS_CLIENT_INSTALLER_URL" \
     "$pki" \
     "${FRP_PUBLIC_HOSTNAME:-}" \
     "${FRP_BOOTSTRAP_HOSTNAME:-}" <<'PY'
 import json, os, sys, tempfile
 from pathlib import Path
 path = Path(sys.argv[1])
-pki = sys.argv[11]
+pki = sys.argv[12]
 host = sys.argv[2]
-hostname = (sys.argv[12] if len(sys.argv) > 12 else '').strip()
-bootstrap_hostname = (sys.argv[13] if len(sys.argv) > 13 else '').strip()
+hostname = (sys.argv[13] if len(sys.argv) > 13 else '').strip()
+bootstrap_hostname = (sys.argv[14] if len(sys.argv) > 14 else '').strip()
 cfg = {
     'public_host': host,
     'public_ip': host,
@@ -1109,6 +1124,7 @@ cfg = {
     'enrollment_retention_days': 30,
     'token_file': '/etc/frp/server_token',
     'client_installer_url': sys.argv[10],
+    'windows_client_installer_url': sys.argv[11],
     'tls_ca_cert': pki.rstrip('/') + '/ca.crt',
     'tls_server_cert': pki.rstrip('/') + '/server.crt',
     'tls_server_key': pki.rstrip('/') + '/server.key',

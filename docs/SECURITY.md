@@ -154,6 +154,15 @@ Lifecycle (unchanged binding rules):
 Treat the generated one-line command as sensitive until used, expired, or
 revoked.
 
+### Windows Short URL bootstrap
+
+The Windows Short URL appends `?platform=windows`. The returned PowerShell
+bootstrap downloads both `SHA256SUMS` and `dist/bootstrap-client.ps1`, verifies
+the script with `Get-FileHash -Algorithm SHA256`, and only then executes it with
+`powershell.exe -File`. It never uses `irm | iex` or another download-and-execute
+pipeline. Windows support on `integration/morning-e2e-ready` remains a
+human-Real-E2E-pending candidate, not a stable platform claim.
+
 ## 6a. Enrollment retention and purge
 
 Terminal enrollment metadata (`expired`, `completed`, `revoked`) is retained on

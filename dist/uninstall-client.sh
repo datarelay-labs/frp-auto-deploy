@@ -6,9 +6,32 @@ if [[ ${EUID} -ne 0 && -z "${FRP_UNINSTALL_TEST_ROOT:-}" && -z "${FRP_CLIENT_TES
   exit 1
 fi
 
+_frp_u_here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for _frp_u_macos in \
+  "${_frp_u_here}/lib/frp-macos.sh" \
+  "${_frp_u_here}/frp-macos.sh" \
+  '/Library/Application Support/frp-auto-deploy/lib/frp-macos.sh'; do
+  if [[ -f "$_frp_u_macos" ]]; then
+    frp_is_darwin() { [[ "${FRP_TEST_UNAME_S:-$(uname -s)}" == Darwin ]]; }
+    frp_command_exists() { command -v "$1" >/dev/null 2>&1; }
+    frp_invoke() { local cmd="$1"; shift; command "$cmd" "$@"; }
+    # shellcheck disable=SC1090
+    . "$_frp_u_macos"
+    break
+  fi
+done
+unset _frp_u_macos
+
+frp_u_is_darwin() {
+  declare -F frp_is_darwin >/dev/null 2>&1 && frp_is_darwin
+}
+
 frp_u_path() {
   local p="$1"
   local root="${FRP_UNINSTALL_TEST_ROOT:-${FRP_CLIENT_TEST_ROOT:-}}"
+  if frp_u_is_darwin && declare -F frp_macos_map_path >/dev/null 2>&1; then
+    p="$(frp_macos_map_path "$p")"
+  fi
   if [[ -n "$root" ]]; then
     printf '%s' "${root}${p}"
   else
@@ -71,9 +94,14 @@ echo 'Server-side reservations remain.'
 echo 'Use an explicit server release command if ports should be freed.'
 echo
 
-if [[ "$SKIP_SYSTEMD" != "1" ]] && command -v systemctl >/dev/null 2>&1; then
-  systemctl stop frpc 2>/dev/null || true
-  systemctl disable frpc 2>/dev/null || true
+if [[ "$SKIP_SYSTEMD" != "1" ]]; then
+  if frp_u_is_darwin; then
+    frp_macos_launchd_set_enabled disable
+    frp_macos_launchd_bootout
+  elif command -v systemctl >/dev/null 2>&1; then
+    systemctl stop frpc 2>/dev/null || true
+    systemctl disable frpc 2>/dev/null || true
+  fi
 fi
 if [[ "$SKIP_SYSTEMD" != "1" ]]; then
   pkill -x frpc 2>/dev/null || true
@@ -87,6 +115,8 @@ frp_u_rm_file "$(frp_u_path /usr/local/bin/frpctl)"
 libdir="$(frp_u_path /usr/local/lib/frp-auto-deploy)"
 if [[ -d "$libdir" && ! -L "$libdir" ]]; then
   frp_u_rm_file "${libdir}/frp-client-common.sh"
+  frp_u_rm_file "${libdir}/frp-macos.sh"
+  frp_u_rm_file "${libdir}/com.datarelay.frp-auto-deploy.frpc.plist"
   if [[ ! -f "$(frp_u_path /etc/frp-auto-deploy/config.json)" ]]; then
     frp_u_rm_file "${libdir}/frp_mgmt_auth.py"
     frp_u_rm_file "${libdir}/frp-common.sh"
@@ -150,7 +180,7 @@ if [[ ! -f "$(frp_u_path /etc/frp-auto-deploy/config.json)" ]]; then
   rmdir "$(frp_u_path /etc/frp-auto-deploy)" 2>/dev/null || true
 fi
 
-if [[ "$SKIP_SYSTEMD" != "1" ]] && command -v systemctl >/dev/null 2>&1; then
+if [[ "$SKIP_SYSTEMD" != "1" ]] && ! frp_u_is_darwin && command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload
   systemctl reset-failed 2>/dev/null || true
 fi

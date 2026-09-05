@@ -12,7 +12,8 @@ frp_client_source_lib() {
   for cand in \
     "$here/lib/frp-client-common.sh" \
     "$here/../lib/frp-client-common.sh" \
-    /usr/local/lib/frp-auto-deploy/frp-client-common.sh
+    /usr/local/lib/frp-auto-deploy/frp-client-common.sh \
+    '/Library/Application Support/frp-auto-deploy/lib/frp-client-common.sh'
   do
     if [[ -f "$cand" ]]; then
       # shellcheck source=lib/frp-client-common.sh
@@ -148,8 +149,8 @@ frp_client_status() {
   local path
   path="$(frp_client_state_path)"
   frp_load_client_state "$path"
-  python3 - "$path" "$(frp_client_installed_frp_version)" "${FRP_CLIENT_TEST_ROOT:-}" "${FRP_SKIP_SYSTEMD:-}" "$(frp_identity_label)" "$(frp_client_installed_project_version)" "$(frp_client_installed_release_channel)" "$(frp_client_installed_source_ref)" "$(frp_client_installed_bundle_sha256)" <<'PY'
-import json, subprocess, sys
+  python3 - "$path" "$(frp_client_installed_frp_version)" "${FRP_CLIENT_TEST_ROOT:-}" "${FRP_SKIP_SYSTEMD:-}" "$(frp_identity_label)" "$(frp_client_installed_project_version)" "$(frp_client_installed_release_channel)" "$(frp_client_installed_source_ref)" "$(frp_client_installed_bundle_sha256)" "$(frp_client_service_status)" <<'PY'
+import json, sys
 from pathlib import Path
 data = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
 tested = sys.argv[2]
@@ -162,15 +163,7 @@ bundle_sha256 = sys.argv[9]
 services = data.get('services') or {}
 enabled = sum(1 for s in services.values() if s.get('enabled', True) is not False)
 disabled = len(services) - enabled
-active = 'unknown'
-if test_root or skip_systemd == '1':
-    active = 'test'
-else:
-    try:
-        r = subprocess.run(['systemctl', 'is-active', 'frpc'], capture_output=True, text=True, timeout=3)
-        active = (r.stdout or r.stderr or 'unknown').strip() or 'unknown'
-    except Exception:
-        active = 'unknown'
+active = sys.argv[10]
 allocator = 'configured' if data.get('allocator_url') else 'missing'
 print('FRP Client')
 print('==========')
