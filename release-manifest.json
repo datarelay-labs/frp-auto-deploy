@@ -15,6 +15,7 @@
       "amd64_sha256": "333da23d1b9009d7c01638e9ba38cf4600f7d37d393f854e96ee1396adefa9a6",
       "arm64_sha256": "3990f396a9a490ee7f0e5f355287750ed41520064ed999eab443b5e9a78d773d",
       "darwin_arm64_sha256": "cfa733b5a261c1647edee3c1fc4133d2542989b28f5602e81d47fc821d25c55f",
+      "windows_amd64_sha256": "531f3cd3cc41c0b4f077b54fe6b7dd83c0ff727e7f0bf412a4c78fa279165de5",
       "websocket_path": "/~!frp"
     }
   },
@@ -32,7 +33,12 @@
     "bootstrap-client.sh": {
       "path": "dist/bootstrap-client.sh",
       "url_path": "dist/bootstrap-client.sh",
-      "sha256": "fa1c5524d130116ff57c1621ce5f3881caa3a6a4357b0687cb7e8af4284e2fd7"
+      "sha256": "62146e09c19007dbd53c7618667c80b1a5052eaacf4cbabe2d9d4a4e028f8b76"
+    },
+    "bootstrap-client.ps1": {
+      "path": "dist/bootstrap-client.ps1",
+      "url_path": "dist/bootstrap-client.ps1",
+      "sha256": "0b8fcdde52d5a96fb77e40058e10f3ddfac1f798d80e384c50681dabbe97b44a"
     },
     "bootstrap-server.sh": {
       "path": "dist/bootstrap-server.sh",

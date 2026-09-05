@@ -216,6 +216,10 @@ frp_default_client_installer_url() {
   frp_github_raw_url dist/bootstrap-client.sh
 }
 
+frp_default_windows_client_installer_url() {
+  frp_github_raw_url dist/bootstrap-client.ps1
+}
+
 frp_default_client_update_url() {
   frp_github_raw_url dist/bootstrap-client.sh
 }
