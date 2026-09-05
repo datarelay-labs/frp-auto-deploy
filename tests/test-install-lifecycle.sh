@@ -233,7 +233,7 @@ assert cfg.get('deployment_mode')=='direct'
 assert cfg.get('frp_transport')=='tcp'
 assert cfg.get('listen_host')=='0.0.0.0'
 PY
-[[ ! -f "$SRV/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "stale txn marker after success"
+[[ ! -f "$SRV/var/lib/frp-auto-deploy/server-update-pending.json" ]] || fail "stale txn marker after success"
 pass "SERVER_FRESH_INSTALL"
 pass "DIRECT_MODE_REGRESSION"
 pass "TEMP_FILE_SECURITY"
@@ -739,12 +739,12 @@ pass "DEPENDENCY_INSTALL_FAILURE"
 # Interrupted install: marker present, retry succeeds.
 export FRP_SERVER_TEST_ROOT="$SRV"
 mkdir -p "$SRV/var/lib/frp-auto-deploy"
-echo '{"operation":"install","phase":"systemd-apply"}' >"$SRV/var/lib/frp-auto-deploy/update-pending.json"
+echo '{"operation":"install","phase":"systemd-apply"}' >"$SRV/var/lib/frp-auto-deploy/server-update-pending.json"
 if ! frp_server_main >"$WORKDIR/interrupt-install.out" 2>"$WORKDIR/interrupt-install.err"; then
   cat "$WORKDIR/interrupt-install.out" "$WORKDIR/interrupt-install.err" >&2
   fail "interrupted install retry"
 fi
-[[ ! -f "$SRV/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "marker left after retry"
+[[ ! -f "$SRV/var/lib/frp-auto-deploy/server-update-pending.json" ]] || fail "marker left after retry"
 [[ "$(frp_file_sha256 "$SRV/etc/frp/server_token")" == "$TOKEN_SHA" ]] || fail "token changed on interrupted retry"
 pass "INTERRUPTED_INSTALL_RECOVERY"
 
@@ -976,7 +976,7 @@ grep -q 'frpc restarted  : NO' "$WORKDIR/up170.out" || fail "no frpc restart"
 [[ "$(frp_file_sha256 "$UP/etc/frp-auto-deploy/allocator-ca.crt")" == "$CA_BEFORE" ]] || fail "client CA changed"
 [[ "$(frp_file_sha256 "$UP/etc/frp/client-identity.key")" == "$KEY_BEFORE" ]] || fail "identity changed"
 grep -q "PROJECT_VERSION=${PROJECT_VERSION}" "$UP/etc/frp-auto-deploy/version" || fail "version not ${PROJECT_VERSION}"
-[[ ! -f "$UP/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "txn marker left"
+[[ ! -f "$UP/var/lib/frp-auto-deploy/server-update-pending.json" ]] || fail "txn marker left"
 pass "PROJECT_UPDATE_ATOMIC"
 pass "CLIENT_CA_PRESERVED"
 pass "CLIENT_IDENTITY_PRESERVED"
@@ -1125,7 +1125,7 @@ INTU="$WORKDIR/upd-int"
 setup_update_tree "$INTU" "0.70.0"
 mkdir -p "$INTU/var/lib/frp-auto-deploy"
 echo '{"operation":"update","phase":"commit","previous_version":"0.70.0","candidate_version":"0.70.1"}' \
-  >"$INTU/var/lib/frp-auto-deploy/update-pending.json"
+  >"$INTU/var/lib/frp-auto-deploy/server-update-pending.json"
 # Next successful same-version (already current after we put 0.70.1? tree is 0.70.0)
 # Leave marker; running update to 0.70.1 should complete and clear marker.
 write_dummy_frps "$WORKDIR/frps-int" "0.70.1"
@@ -1140,7 +1140,7 @@ if ! env \
   cat "$WORKDIR/intu.out" "$WORKDIR/intu.err" >&2
   fail "interrupted update retry"
 fi
-[[ ! -f "$INTU/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "interrupted update left marker"
+[[ ! -f "$INTU/var/lib/frp-auto-deploy/server-update-pending.json" ]] || fail "interrupted update left marker"
 pass "INTERRUPTED_UPDATE_RECOVERY"
 
 # Backup retention

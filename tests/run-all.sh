@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 export PYTHONDONTWRITEBYTECODE=1
-# Leaked interactive/debug roots divert update-pending.json via frp_txn_marker_path
+# Leaked interactive/debug roots divert role-specific txn markers via frp_txn_marker_path
 # precedence and produce false rollback-marker failures across the suite.
 unset FRP_UPDATE_ROOT FRP_DEPLOY_TEST_ROOT FRP_SERVER_TEST_ROOT \
   FRP_CLIENT_TEST_ROOT FRP_UNINSTALL_TEST_ROOT FRP_ROLE_TEST_ROOT || true
@@ -42,6 +42,8 @@ python3 tests/test-mgmt-identity.py
 ./tests/test-pending-enrollments.sh
 ./tests/test-show-enrollments.sh
 ./tests/test-enrollment-retention.sh
+python3 tests/test-core-correctness-p1.py
+./tests/test-core-correctness-lifecycle.sh
 ./tests/test-cli-hardening.sh
 ./tests/test-enroll-bulk.sh
 ./tests/test-zero-service-client.sh

@@ -114,7 +114,9 @@ def _recovery_for_operation(operation, role):
             return 'sudo frpctl update' + extra
         return 'sudo frpctl frp-update' + extra
     return (
-        'inspect /var/lib/frp-auto-deploy/update-pending.json operation=%s and re-run the matching command' % (op or 'unknown')
+        'inspect the pending transaction marker (server-update-pending.json / '
+        'client-update-pending.json / legacy update-pending.json) operation=%s '
+        'and re-run the matching command' % (op or 'unknown')
         + extra
     )
 
@@ -1214,55 +1216,94 @@ def check_versions(report, paths, facts):
 
 
 def check_pending(report, paths):
-    update_marker = '/var/lib/frp-auto-deploy/update-pending.json'
+    markers = (
+        ('/var/lib/frp-auto-deploy/server-update-pending.json', 'server', 'pending_server_transaction'),
+        ('/var/lib/frp-auto-deploy/client-update-pending.json', 'client', 'pending_client_transaction'),
+        ('/var/lib/frp-auto-deploy/update-pending.json', 'legacy', 'pending_transaction'),
+    )
     apply_marker = '/etc/frp/apply-pending.json'
     found = False
-    if paths.is_file(update_marker):
+    pending_display = []
+
+    def _summary_for(kind, operation):
+        op = str(operation or '').strip()
+        if kind == 'client':
+            if op in ('client-update', 'update', ''):
+                return 'interrupted client update is pending'
+            return 'interrupted client-role transaction is pending'
+        if kind == 'server':
+            if op == 'project-update':
+                return 'interrupted project update is pending'
+            if op in ('frp-update',):
+                return 'interrupted FRP binary update is pending'
+            if op == 'install':
+                return 'interrupted install is pending'
+            if op == 'restore':
+                return 'interrupted restore is pending'
+            return 'interrupted server-role transaction is pending'
+        # legacy shared marker — classify by operation only; do not treat
+        # client-update as a server project-update interruption.
+        if op == 'project-update':
+            return 'interrupted project update is pending (legacy marker)'
+        if op in ('frp-update',):
+            return 'interrupted FRP binary update is pending (legacy marker)'
+        if op in ('client-update',):
+            return 'interrupted client update is pending (legacy marker)'
+        if op == 'install':
+            return 'interrupted install is pending (legacy marker)'
+        if op == 'restore':
+            return 'interrupted restore is pending (legacy marker)'
+        if op in ('update',):
+            return 'interrupted lifecycle transaction is pending (legacy marker)'
+        return 'interrupted lifecycle transaction is pending (legacy marker)'
+
+    for update_marker, kind, check_id in markers:
+        if not paths.is_file(update_marker):
+            continue
         found = True
         data, err = load_json_path(paths, update_marker)
         if err:
             report.add(
-                'pending_transaction', FAIL,
-                'update pending marker is unreadable',
+                check_id, FAIL,
+                '%s pending marker is unreadable' % kind,
                 err,
-                'inspect /var/lib/frp-auto-deploy/update-pending.json. %s' % MARKER_NOTE,
+                'inspect %s. %s' % (update_marker, MARKER_NOTE),
+                'state',
+            )
+            continue
+        phase = str((data or {}).get('phase') or 'unknown')
+        operation = str((data or {}).get('operation') or '')
+        failure = str((data or {}).get('failure_class') or (data or {}).get('FAILURE_CLASS') or '')
+        recovery = _recovery_for_operation(operation, report.role)
+        detail = 'marker=%s phase=%s operation=%s' % (update_marker, phase, operation)
+        if failure:
+            detail += ' failure_class=%s' % failure
+        if phase in ('complete', 'cleanup', 'done'):
+            report.add(
+                check_id, WARN,
+                '%s pending marker is still present after a completed-looking phase' % kind,
+                detail,
+                recovery,
                 'state',
             )
         else:
-            phase = str((data or {}).get('phase') or 'unknown')
-            operation = str((data or {}).get('operation') or '')
-            failure = str((data or {}).get('failure_class') or (data or {}).get('FAILURE_CLASS') or '')
-            recovery = _recovery_for_operation(operation, report.role)
-            if phase in ('complete', 'cleanup', 'done'):
-                report.add(
-                    'pending_transaction', WARN,
-                    'update pending marker is still present after a completed-looking phase',
-                    'phase=%s operation=%s' % (phase, operation),
-                    recovery,
-                    'state',
-                )
-            else:
-                detail = 'phase=%s operation=%s' % (phase, operation)
-                if failure:
-                    detail += ' failure_class=%s' % failure
-                if operation == 'project-update':
-                    summary = 'interrupted project update is pending'
-                elif operation in ('frp-update',):
-                    summary = 'interrupted FRP binary update is pending'
-                elif operation in ('client-update', 'update') and report.role in ('client', 'partial_client'):
-                    summary = 'interrupted client update is pending'
-                elif operation == 'install':
-                    summary = 'interrupted install is pending'
-                else:
-                    summary = 'interrupted lifecycle transaction is pending'
-                report.add(
-                    'pending_transaction', FAIL,
-                    summary,
-                    detail,
-                    recovery,
-                    'state',
-                )
-            report.display['pending_update'] = {'phase': phase, 'operation': operation, 'failure_class': failure}
+            report.add(
+                check_id, FAIL,
+                _summary_for(kind, operation),
+                detail,
+                recovery,
+                'state',
+            )
+        pending_display.append({
+            'kind': kind,
+            'path': update_marker,
+            'phase': phase,
+            'operation': operation,
+            'failure_class': failure,
+        })
+    if pending_display:
+        report.display['pending_update'] = pending_display[0]
+        report.display['pending_updates'] = pending_display
     if paths.is_file(apply_marker):
         found = True
         data, err = load_json_path(paths, apply_marker)

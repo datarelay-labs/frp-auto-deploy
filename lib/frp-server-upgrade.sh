@@ -2,6 +2,16 @@
 # Safe, non-interactive management-software upgrade for an installed server.
 
 FRP_SERVER_UPGRADE_BACKUP_KEEP="${FRP_SERVER_UPGRADE_BACKUP_KEEP:-5}"
+# Any Python module imported by the allocator must be listed here so project
+# updates and install restarts pick up runtime helper changes.
+FRP_ALLOCATOR_RUNTIME_HELPERS=(
+  frp_mgmt_auth.py
+  frp_pki.py
+  frp_client_registry.py
+  frp_enrollment_lifecycle.py
+  frp_zero_touch.py
+  frp_audit.py
+)
 _FRP_UPGRADE_MUTATION_STARTED=0
 _FRP_UPGRADE_ROLLBACK_DONE=0
 _FRP_UPGRADE_ROLLBACK_RC=0
@@ -409,7 +419,7 @@ frp_server_upgrade_rollback() {
     _FRP_UPGRADE_IN_ROLLBACK=0
     return 1
   fi
-  frp_txn_clear
+  frp_txn_clear server
   echo "LIVE_PROJECT_FILES_RESTORED=YES"
   echo "PENDING_MARKER_CLEARED=YES"
   echo "UPGRADE_ROLLBACK=PASS"
@@ -432,6 +442,10 @@ frp_server_apply_project_upgrade() {
   _FRP_UPGRADE_ROLLBACK_DONE=0
   _FRP_UPGRADE_ROLLBACK_RC=0
   _FRP_UPGRADE_IN_ROLLBACK=0
+
+  # Server project-update owns the server transaction marker only.
+  FRP_TXN_ROLE=server
+  export FRP_TXN_ROLE
 
   [[ -d "$source" ]] || { echo "ERROR: update source directory is required" >&2; return 1; }
   if [[ ${EUID} -ne 0 && -z "${FRP_SERVER_TEST_ROOT:-}" ]]; then
@@ -522,6 +536,10 @@ frp_server_apply_project_upgrade() {
     return 0
   fi
 
+  # Before mutation: adopt legacy shared marker into the server path when
+  # unambiguous. Never inspect or clear the client marker.
+  frp_txn_adopt_legacy_marker server || return 1
+
   frp_acquire_server_lock || return 1
   trap 'frp_release_server_lock; rm -rf "'"$staged"'"' RETURN
   preserved_before="$(frp_server_upgrade_preserved_digest)"
@@ -534,7 +552,8 @@ frp_server_apply_project_upgrade() {
   frp_server_upgrade_changed "$staged" etc/systemd/system/frps.service && restart_frps=1
   frp_server_upgrade_changed "$staged" etc/systemd/system/frp-port-allocator.service && restart_alloc=1
   frp_server_upgrade_changed "$staged" usr/local/lib/frp-auto-deploy/frp-port-allocator.py && restart_alloc=1
-  for rel in frp_mgmt_auth.py frp_pki.py frp_client_registry.py; do
+  # Any Python module imported by the allocator must be listed in FRP_ALLOCATOR_RUNTIME_HELPERS.
+  for rel in "${FRP_ALLOCATOR_RUNTIME_HELPERS[@]}"; do
     frp_server_upgrade_changed "$staged" "usr/local/lib/frp-auto-deploy/${rel}" && restart_alloc=1
   done
   if frp_server_upgrade_is_single443; then
@@ -624,7 +643,7 @@ frp_server_apply_project_upgrade() {
     return 1
   fi
   _FRP_UPGRADE_MUTATION_STARTED=0
-  frp_txn_clear
+  frp_txn_clear server
   FRP_INSTALL_SNAPSHOT=""
   frp_audit_emit project_update.completed
   echo "Server project update completed successfully."

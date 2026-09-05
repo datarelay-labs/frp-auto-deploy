@@ -55,8 +55,12 @@ frp_parse_known_release_channel() {
 }
 
 frp_txn_field() {
-  local field="$1" marker
-  marker="$(frp_txn_marker_path)"
+  local field="$1" marker role="${FRP_TXN_ROLE:-}"
+  if [[ -z "$role" ]]; then
+    return 0
+  fi
+  frp_txn_adopt_legacy_marker "$role" 2>/dev/null || true
+  marker="$(frp_txn_marker_path "$role")" || return 0
   [[ -f "$marker" ]] || return 0
   python3 - "$marker" "$field" <<'PY'
 import json, sys
@@ -79,6 +83,7 @@ frp_resolve_project_update_identity() {
   # Sets FRP_RESOLVED_RELEASE_CHANNEL and FRP_RESOLVED_SOURCE_REF.
   # Never silently defaults an unknown install to stable.
   local txn_ch txn_ref persisted persisted_ref
+  local server_marker
   FRP_RESOLVED_RELEASE_CHANNEL=""
   FRP_RESOLVED_SOURCE_REF=""
   if [[ -n "${FRP_RELEASE_CHANNEL:-}" ]]; then
@@ -93,6 +98,9 @@ frp_resolve_project_update_identity() {
     fi
     return 0
   fi
+  # Project-update identity recovery reads the server transaction marker only.
+  FRP_TXN_ROLE=server
+  export FRP_TXN_ROLE
   txn_ch="$(frp_txn_field release_channel)"
   txn_ref="$(frp_txn_field source_ref)"
   if [[ -n "$txn_ch" || -n "$txn_ref" ]]; then
@@ -117,7 +125,8 @@ frp_resolve_project_update_identity() {
     fi
     return 0
   fi
-  if [[ -f "$(frp_txn_marker_path)" ]]; then
+  server_marker="$(frp_txn_marker_path server)"
+  if [[ -f "$server_marker" ]] || [[ -f "$(frp_txn_legacy_marker_path)" ]]; then
     echo "ERROR: pending transaction does not identify a safe release line." >&2
     echo "Set FRP_RELEASE_CHANNEL=dev or FRP_RELEASE_CHANNEL=stable explicitly." >&2
     return 1
@@ -1382,6 +1391,33 @@ PY
 }
 
 frp_txn_marker_path() {
+  # Role-specific transaction markers prevent dual-role collision.
+  # Optional arg / FRP_TXN_ROLE: server | client
+  # Legacy shared update-pending.json is adopted explicitly; never guessed.
+  local role="${1:-${FRP_TXN_ROLE:-}}"
+  local root="${FRP_UPDATE_ROOT:-${FRP_DEPLOY_TEST_ROOT:-${FRP_SERVER_TEST_ROOT:-${FRP_CLIENT_TEST_ROOT:-${FRP_UNINSTALL_TEST_ROOT:-}}}}}"
+  local base dir
+  case "$role" in
+    server) base="server-update-pending.json" ;;
+    client) base="client-update-pending.json" ;;
+    "")
+      echo "ERROR: transaction marker role is required (server|client)" >&2
+      return 1
+      ;;
+    *)
+      echo "ERROR: unknown transaction marker role: $role" >&2
+      return 1
+      ;;
+  esac
+  if [[ -n "$root" ]]; then
+    dir="${root}/var/lib/frp-auto-deploy"
+  else
+    dir=/var/lib/frp-auto-deploy
+  fi
+  printf '%s/%s' "$dir" "$base"
+}
+
+frp_txn_legacy_marker_path() {
   local root="${FRP_UPDATE_ROOT:-${FRP_DEPLOY_TEST_ROOT:-${FRP_SERVER_TEST_ROOT:-${FRP_CLIENT_TEST_ROOT:-${FRP_UNINSTALL_TEST_ROOT:-}}}}}"
   if [[ -n "$root" ]]; then
     printf '%s' "${root}/var/lib/frp-auto-deploy/update-pending.json"
@@ -1390,10 +1426,73 @@ frp_txn_marker_path() {
   fi
 }
 
+frp_txn_role_for_operation() {
+  case "$1" in
+    install|project-update|frp-update) printf 'server' ;;
+    client-update) printf 'client' ;;
+    *) return 1 ;;
+  esac
+}
+
+frp_txn_adopt_legacy_marker() {
+  # Move legacy update-pending.json into the role-specific path when the
+  # operation field unambiguously identifies the role. Fail closed otherwise.
+  local role="${1:-${FRP_TXN_ROLE:-}}"
+  local legacy target op
+  [[ -n "$role" ]] || return 1
+  legacy="$(frp_txn_legacy_marker_path)"
+  [[ -f "$legacy" ]] || return 0
+  target="$(frp_txn_marker_path "$role")" || return 1
+  if [[ -f "$target" ]]; then
+    echo "ERROR: both legacy and role-specific transaction markers exist; refusing to guess." >&2
+    echo "FAILURE_CLASS=TXN_MARKER_AMBIGUOUS" >&2
+    return 1
+  fi
+  op="$(python3 - "$legacy" <<'PY'
+import json, sys
+from pathlib import Path
+try:
+    data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(0)
+print(str(data.get("operation") or "").strip())
+PY
+)"
+  case "$op" in
+    install|project-update|frp-update)
+      if [[ "$role" != "server" ]]; then
+        echo "ERROR: legacy transaction marker belongs to the server role; refusing client recovery." >&2
+        echo "FAILURE_CLASS=TXN_MARKER_ROLE_MISMATCH" >&2
+        return 1
+      fi
+      ;;
+    client-update)
+      if [[ "$role" != "client" ]]; then
+        echo "ERROR: legacy transaction marker belongs to the client role; refusing server recovery." >&2
+        echo "FAILURE_CLASS=TXN_MARKER_ROLE_MISMATCH" >&2
+        return 1
+      fi
+      ;;
+    *)
+      echo "ERROR: legacy update-pending.json has ambiguous operation=${op:-unknown}; refusing to guess." >&2
+      echo "FAILURE_CLASS=TXN_MARKER_AMBIGUOUS" >&2
+      return 1
+      ;;
+  esac
+  mv -f "$legacy" "$target"
+}
+
 frp_txn_write() {
   local operation="$1" phase="$2" previous="${3:-}" candidate="${4:-}"
-  local marker dir tmp
-  marker="$(frp_txn_marker_path)"
+  local marker dir tmp role
+  if ! role="$(frp_txn_role_for_operation "$operation")"; then
+    echo "ERROR: unknown transaction operation: $operation" >&2
+    return 1
+  fi
+  FRP_TXN_ROLE="$role"
+  export FRP_TXN_ROLE
+  frp_txn_adopt_legacy_marker "$role" || return 1
+  marker="$(frp_txn_marker_path "$role")" || return 1
   dir="$(dirname "$marker")"
   mkdir -p "$dir"
   chmod 700 "$dir" 2>/dev/null || true
@@ -1435,9 +1534,38 @@ PY
 }
 
 frp_txn_clear() {
+  local role="${1:-${FRP_TXN_ROLE:-}}"
   local marker
-  marker="$(frp_txn_marker_path)"
+  if [[ -z "$role" ]]; then
+    echo "ERROR: transaction clear requires a role (server|client)" >&2
+    return 1
+  fi
+  marker="$(frp_txn_marker_path "$role")" || return 1
   rm -f "$marker"
+  # Never clear the other role's marker. Legacy shared marker is only removed
+  # when it unambiguously belongs to this role.
+  local legacy op
+  legacy="$(frp_txn_legacy_marker_path)"
+  if [[ -f "$legacy" ]]; then
+    op="$(python3 - "$legacy" <<'PY'
+import json, sys
+from pathlib import Path
+try:
+    data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(0)
+print(str(data.get("operation") or "").strip())
+PY
+)"
+    case "$op" in
+      install|project-update|frp-update)
+        [[ "$role" == "server" ]] && rm -f "$legacy"
+        ;;
+      client-update)
+        [[ "$role" == "client" ]] && rm -f "$legacy"
+        ;;
+    esac
+  fi
 }
 
 frp_audit_emit() {

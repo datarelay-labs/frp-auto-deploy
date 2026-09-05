@@ -123,8 +123,8 @@ PY
 run_local() {
   local tree="$1"
   shift
-  # Candidate tree is the stable release line; resolve identity explicitly.
-  env FRP_SERVER_TEST_ROOT="$tree" FRP_RELEASE_CHANNEL=stable \
+  # Working-tree source is channel=dev / git_ref=main.
+  env FRP_SERVER_TEST_ROOT="$tree" FRP_RELEASE_CHANNEL=dev \
     "$UPDATE" --source "$ROOT" "$@"
 }
 
@@ -186,7 +186,7 @@ for phase in validate install verify; do
   setup_tree "$tree"
   cp "$tree/usr/local/lib/frp-auto-deploy/frp-port-allocator.py" "$WORKDIR/$phase.before"
   before="$(state_digest "$tree")"
-  if env FRP_SERVER_TEST_ROOT="$tree" FRP_SERVER_UPGRADE_HOOK_FAIL="$phase" \
+  if env FRP_RELEASE_CHANNEL=dev FRP_SERVER_TEST_ROOT="$tree" FRP_SERVER_UPGRADE_HOOK_FAIL="$phase" \
     "$UPDATE" --source "$ROOT" >"$WORKDIR/$phase.out" 2>"$WORKDIR/$phase.err"; then
     fail "$phase failure should fail"
   fi
@@ -260,7 +260,7 @@ REMOTE="$WORKDIR/remote"
 setup_tree "$REMOTE"
 REMOTE_BEFORE="$(state_digest "$REMOTE")"
 env PATH="$MOCKBIN:$PATH" FRP_TEST_FIXTURE="$FIX" FRP_SERVER_TEST_ROOT="$REMOTE" \
-  FRP_RELEASE_CHANNEL=stable \
+  FRP_RELEASE_CHANNEL=dev \
   FRP_SERVER_PROJECT_SHA256SUMS_URL=https://fixture.invalid/SHA256SUMS \
   FRP_SERVER_PROJECT_UPDATE_URL=https://fixture.invalid/bootstrap-server.sh \
   "$UPDATE" >"$WORKDIR/remote.out"
@@ -274,7 +274,7 @@ printf '\n# tampered\n' >>"$FIX/bootstrap-server.sh"
 TAMPER="$WORKDIR/tamper"
 setup_tree "$TAMPER"
 if env PATH="$MOCKBIN:$PATH" FRP_TEST_FIXTURE="$FIX" FRP_SERVER_TEST_ROOT="$TAMPER" \
-  FRP_RELEASE_CHANNEL=stable \
+  FRP_RELEASE_CHANNEL=dev \
   FRP_SERVER_PROJECT_SHA256SUMS_URL=https://fixture.invalid/SHA256SUMS \
   FRP_SERVER_PROJECT_UPDATE_URL=https://fixture.invalid/bootstrap-server.sh \
   "$UPDATE" >"$WORKDIR/tamper.out" 2>"$WORKDIR/tamper.err"; then
@@ -298,7 +298,7 @@ printf '%s  dist/other.sh\n' "$(printf other | sha256sum | awk '{print $1}')" >"
 MISSING="$WORKDIR/missing-sha"
 setup_tree "$MISSING"
 if env PATH="$MOCKBIN:$PATH" FRP_TEST_FIXTURE="$FIX" FRP_SERVER_TEST_ROOT="$MISSING" \
-  FRP_RELEASE_CHANNEL=stable \
+  FRP_RELEASE_CHANNEL=dev \
   FRP_SERVER_PROJECT_SHA256SUMS_URL=https://fixture.invalid/SHA256SUMS \
   FRP_SERVER_PROJECT_UPDATE_URL=https://fixture.invalid/bootstrap-server.sh \
   "$UPDATE" >"$WORKDIR/missing-sha.out" 2>"$WORKDIR/missing-sha.err"; then
@@ -315,6 +315,7 @@ MINENV_OUT="$WORKDIR/minenv.out"
 if ! env -i \
   PATH="$PATH" HOME="${HOME:-/tmp}" TMPDIR="${TMPDIR:-/tmp}" \
   FRP_SERVER_TEST_ROOT="$MINENV" \
+  FRP_RELEASE_CHANNEL=dev \
   "$UPDATE" --source "$ROOT" --check >"$MINENV_OUT" 2>"$WORKDIR/minenv.err"; then
   fail "minimal-env --check"
 fi
@@ -358,14 +359,14 @@ pass "PERSISTED_RUNTIME_CONFIG_LOADER_VALUES"
 # Unexpected post-mutation abort must roll back and clear the marker only after verify.
 UNBOUND="$WORKDIR/unbound"
 setup_tree "$UNBOUND"
-if env FRP_SERVER_TEST_ROOT="$UNBOUND" FRP_SERVER_UPGRADE_HOOK_FAIL=unbound-after-install \
+if env FRP_RELEASE_CHANNEL=dev FRP_SERVER_TEST_ROOT="$UNBOUND" FRP_SERVER_UPGRADE_HOOK_FAIL=unbound-after-install \
   "$UPDATE" --source "$ROOT" >"$WORKDIR/unbound.out" 2>"$WORKDIR/unbound.err"; then
   fail "unbound-after-install should fail"
 fi
 grep -q 'UPGRADE_ROLLBACK=PASS' "$WORKDIR/unbound.out" "$WORKDIR/unbound.err" || fail "unbound rollback"
 grep -q 'LIVE_PROJECT_FILES_RESTORED=YES' "$WORKDIR/unbound.out" "$WORKDIR/unbound.err" || fail "unbound files restored"
 grep -q 'PENDING_MARKER_CLEARED=YES' "$WORKDIR/unbound.out" "$WORKDIR/unbound.err" || fail "unbound marker cleared"
-[[ ! -f "$UNBOUND/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "unbound left pending marker"
+[[ ! -f "$UNBOUND/var/lib/frp-auto-deploy/server-update-pending.json" ]] || fail "unbound left pending marker"
 cmp "$UNBOUND/usr/local/lib/frp-auto-deploy/frp-port-allocator.py" \
   <(printf 'old allocator\n') >/dev/null || fail "unbound did not restore first replaced file"
 pass "UNEXPECTED_POST_MUTATION_ABORT"
@@ -374,7 +375,7 @@ pass "ROLLBACK_FILE_RESTORE"
 # Rollback systemd/health failures must not print a false PASS or clear the marker.
 HEALTHFAIL="$WORKDIR/healthfail"
 setup_tree "$HEALTHFAIL"
-if env FRP_SERVER_TEST_ROOT="$HEALTHFAIL" FRP_SERVER_UPGRADE_HOOK_FAIL=install \
+if env FRP_RELEASE_CHANNEL=dev FRP_SERVER_TEST_ROOT="$HEALTHFAIL" FRP_SERVER_UPGRADE_HOOK_FAIL=install \
   FRP_SERVER_UPGRADE_HOOK_ROLLBACK_HEALTH=1 \
   "$UPDATE" --source "$ROOT" >"$WORKDIR/healthfail.out" 2>"$WORKDIR/healthfail.err"; then
   fail "rollback-health should fail the update"
@@ -382,7 +383,7 @@ fi
 grep -q 'UPGRADE_ROLLBACK=FAIL' "$WORKDIR/healthfail.out" "$WORKDIR/healthfail.err" || fail "health rollback fail marker"
 grep -q 'RECOVERY_REQUIRED=YES' "$WORKDIR/healthfail.out" "$WORKDIR/healthfail.err" || fail "health recovery required"
 grep -q 'PENDING_MARKER_CLEARED=NO' "$WORKDIR/healthfail.out" "$WORKDIR/healthfail.err" || fail "health pending preserved"
-[[ -f "$HEALTHFAIL/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "health pending missing"
+[[ -f "$HEALTHFAIL/var/lib/frp-auto-deploy/server-update-pending.json" ]] || fail "health pending missing"
 if grep -q 'UPGRADE_ROLLBACK=PASS' "$WORKDIR/healthfail.out" "$WORKDIR/healthfail.err"; then
   fail "false rollback PASS"
 fi
@@ -392,32 +393,32 @@ pass "NO_FALSE_ROLLBACK_PASS"
 
 SYSROLL="$WORKDIR/sysroll"
 setup_tree "$SYSROLL"
-if env FRP_SERVER_TEST_ROOT="$SYSROLL" FRP_SERVER_UPGRADE_HOOK_FAIL=install \
+if env FRP_RELEASE_CHANNEL=dev FRP_SERVER_TEST_ROOT="$SYSROLL" FRP_SERVER_UPGRADE_HOOK_FAIL=install \
   FRP_SERVER_UPGRADE_HOOK_ROLLBACK_SYSTEMD=1 \
   "$UPDATE" --source "$ROOT" >"$WORKDIR/sysroll.out" 2>"$WORKDIR/sysroll.err"; then
   fail "rollback-systemd should fail"
 fi
 grep -q 'UPGRADE_ROLLBACK=FAIL' "$WORKDIR/sysroll.out" "$WORKDIR/sysroll.err" || fail "systemd rollback fail"
-[[ -f "$SYSROLL/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "systemd pending missing"
+[[ -f "$SYSROLL/var/lib/frp-auto-deploy/server-update-pending.json" ]] || fail "systemd pending missing"
 pass "ROLLBACK_SYSTEMD_FAILURE"
 
 # Transaction schema v2 records snapshot + release identity.
 TXN="$WORKDIR/txn"
 setup_tree "$TXN"
-if env FRP_SERVER_TEST_ROOT="$TXN" FRP_SERVER_UPGRADE_HOOK_FAIL=install \
+if env FRP_RELEASE_CHANNEL=dev FRP_SERVER_TEST_ROOT="$TXN" FRP_SERVER_UPGRADE_HOOK_FAIL=install \
   FRP_SERVER_UPGRADE_HOOK_ROLLBACK_HEALTH=1 \
   "$UPDATE" --source "$ROOT" >"$WORKDIR/txn.out" 2>"$WORKDIR/txn.err"; then
   fail "txn fixture should fail after writing marker"
 fi
-python3 - "$TXN/var/lib/frp-auto-deploy/update-pending.json" "$PROJECT_VERSION" <<'PY'
+python3 - "$TXN/var/lib/frp-auto-deploy/server-update-pending.json" "$PROJECT_VERSION" <<'PY'
 import json, sys
 from pathlib import Path
 data = json.loads(Path(sys.argv[1]).read_text())
-want_ref = "v%s" % sys.argv[2]
 assert data.get("schema_version") == 2
 assert data.get("operation") == "project-update"
-assert data.get("release_channel") == "stable"
-assert data.get("source_ref") == want_ref, data.get("source_ref")
+# Working-tree source is channel=dev / git_ref=main.
+assert data.get("release_channel") == "dev", data.get("release_channel")
+assert data.get("source_ref") == "main", data.get("source_ref")
 assert data.get("snapshot_path")
 assert data.get("mutation_started") is True
 assert Path(data["snapshot_path"]).is_dir()
@@ -433,7 +434,7 @@ setup_tree "$SCHEMA1"
 printf '{"operation":"project-update","phase":"commit","previous_version":"2.1.0","candidate_version":"2.1.0"}\n' \
   >"$SCHEMA1/var/lib/frp-auto-deploy/update-pending.json"
 # Keep persisted channel so --source can recover after schema-1 compat.
-if env FRP_SERVER_TEST_ROOT="$SCHEMA1" "$UPDATE" --source "$ROOT" --check \
+if env FRP_RELEASE_CHANNEL=dev FRP_SERVER_TEST_ROOT="$SCHEMA1" "$UPDATE" --source "$ROOT" --check \
   >"$WORKDIR/schema1.out" 2>"$WORKDIR/schema1.err"; then
   :
 else
@@ -459,13 +460,13 @@ pass "UNKNOWN_CHANNEL_NO_SILENT_STABLE_FALLBACK"
 PENDDEV="$WORKDIR/penddev"
 setup_tree "$PENDDEV"
 printf 'PROJECT_VERSION=2.1.0\nFRP_VERSION=0.70.1\n' >"$PENDDEV/etc/frp-auto-deploy/version"
-printf '{"schema_version":2,"operation":"project-update","phase":"commit","release_channel":"stable","source_ref":"v2.1.1","previous_version":"2.1.0","candidate_version":"2.1.1"}\n' \
+printf '{"schema_version":2,"operation":"project-update","phase":"commit","release_channel":"dev","source_ref":"main","previous_version":"2.1.0","candidate_version":"2.1.3"}\n' \
   >"$PENDDEV/var/lib/frp-auto-deploy/update-pending.json"
 env -u FRP_RELEASE_CHANNEL FRP_SERVER_TEST_ROOT="$PENDDEV" \
   "$UPDATE" --source "$ROOT" --check >"$WORKDIR/penddev.out" 2>"$WORKDIR/penddev.err" ||
-  fail "pending stable --check"
-grep -q 'Resolved release channel : stable' "$WORKDIR/penddev.out" || fail "pending stayed on stable"
-pass "PENDING_STABLE_RETRY_STAYS_STABLE"
+  fail "pending dev --check"
+grep -q 'Resolved release channel : dev' "$WORKDIR/penddev.out" || fail "pending stayed on dev"
+pass "PENDING_DEV_RETRY_STAYS_DEV"
 
 # Real OCI partial-state fixture: unknown version metadata + schema-1 pending + mixed files.
 OCI="$WORKDIR/oci"
@@ -501,12 +502,12 @@ if env -u FRP_RELEASE_CHANNEL FRP_SERVER_TEST_ROOT="$OCI" \
 fi
 pass "REAL_OCI_PARTIAL_STATE_FIXTURE"
 
-env FRP_RELEASE_CHANNEL=stable FRP_SERVER_TEST_ROOT="$OCI" \
+env FRP_RELEASE_CHANNEL=dev FRP_SERVER_TEST_ROOT="$OCI" \
   "$UPDATE" --source "$ROOT" >"$WORKDIR/oci.out" 2>"$WORKDIR/oci.err" || fail "OCI recovery"
 grep -q 'Server project update completed successfully' "$WORKDIR/oci.out" || fail "OCI success"
 [[ ! -f "$OCI/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "OCI pending remains"
-grep -q 'RELEASE_CHANNEL=stable' "$OCI/etc/frp-auto-deploy/version" || fail "OCI channel"
-grep -q "SOURCE_REF=v${PROJECT_VERSION}" "$OCI/etc/frp-auto-deploy/version" || fail "OCI source ref"
+grep -q 'RELEASE_CHANNEL=dev' "$OCI/etc/frp-auto-deploy/version" || fail "OCI channel"
+grep -q 'SOURCE_REF=main' "$OCI/etc/frp-auto-deploy/version" || fail "OCI source ref"
 cmp "$ROOT/tools/frp-backup" "$OCI/usr/local/sbin/frp-backup" >/dev/null || fail "OCI backup tool not reconciled"
 [[ "$(sha "$OCI/etc/frp/server_token")" == "$TOKEN_SHA" ]] || fail "OCI token changed"
 [[ "$(sha "$OCI/var/lib/frp-auto-deploy/registry.json")" == "$REG_SHA" ]] || fail "OCI registry changed"
@@ -528,13 +529,13 @@ pass "PARTIAL_STATE_RECOVERY"
 PENDCHECK="$WORKDIR/pendcheck"
 setup_tree "$PENDCHECK"
 printf '{"schema_version":2,"operation":"project-update","phase":"commit","release_channel":"stable","source_ref":"v2.1.1"}\n' \
-  >"$PENDCHECK/var/lib/frp-auto-deploy/update-pending.json"
+  >"$PENDCHECK/var/lib/frp-auto-deploy/server-update-pending.json"
 BEFORE_PEND="$(state_digest "$PENDCHECK")"
-BEFORE_MARK="$(sha "$PENDCHECK/var/lib/frp-auto-deploy/update-pending.json")"
-env FRP_SERVER_TEST_ROOT="$PENDCHECK" "$UPDATE" --source "$ROOT" --check \
+BEFORE_MARK="$(sha "$PENDCHECK/var/lib/frp-auto-deploy/server-update-pending.json")"
+env FRP_RELEASE_CHANNEL=dev FRP_SERVER_TEST_ROOT="$PENDCHECK" "$UPDATE" --source "$ROOT" --check \
   >"$WORKDIR/pendcheck.out" || fail "pending --check"
 [[ "$(state_digest "$PENDCHECK")" == "$BEFORE_PEND" ]] || fail "pending --check mutated"
-[[ "$(sha "$PENDCHECK/var/lib/frp-auto-deploy/update-pending.json")" == "$BEFORE_MARK" ]] ||
+[[ "$(sha "$PENDCHECK/var/lib/frp-auto-deploy/server-update-pending.json")" == "$BEFORE_MARK" ]] ||
   fail "pending --check wrote marker"
 pass "CHECK_ONLY_PENDING_READONLY"
 
@@ -559,9 +560,10 @@ write_identity() {
 run_verified() {
   local tree="$1"
   shift
+  # Working-tree source is channel=dev; explicit expected channel must match.
   env FRP_SERVER_TEST_ROOT="$tree" FRP_BUNDLE_SHA256="$OCI_CANDIDATE_SHA" \
     FRP_AUDIT_LOG="$tree/var/log/frp-auto-deploy/audit.jsonl" \
-    FRP_RELEASE_CHANNEL=stable \
+    FRP_RELEASE_CHANNEL=dev \
     "$UPDATE" --source "$ROOT" "$@"
 }
 
@@ -589,9 +591,9 @@ run_verified "$DIFF" --check >"$WORKDIR/diff-check.out" || fail "different-build
 grep -q "Installed bundle SHA256   : ${OCI_INSTALLED_SHA}" "$WORKDIR/diff-check.out" || fail "oci installed sha"
 grep -q "Target bundle SHA256      : ${OCI_CANDIDATE_SHA}" "$WORKDIR/diff-check.out" || fail "oci target sha"
 grep -q "Installed release channel : stable" "$WORKDIR/diff-check.out" || fail "oci installed channel"
-grep -q "Target release channel    : stable" "$WORKDIR/diff-check.out" || fail "oci target channel"
+grep -q "Target release channel    : dev" "$WORKDIR/diff-check.out" || fail "oci target channel"
 grep -q "Installed source ref      : v${PROJECT_VERSION}" "$WORKDIR/diff-check.out" || fail "oci installed ref"
-grep -q "Target source ref         : v${PROJECT_VERSION}" "$WORKDIR/diff-check.out" || fail "oci target ref"
+grep -q "Target source ref         : main" "$WORKDIR/diff-check.out" || fail "oci target ref"
 grep -q 'Update                    : available' "$WORKDIR/diff-check.out" || fail "different build should be available"
 grep -q 'State mutation             : NO' "$WORKDIR/diff-check.out" || fail "different-build check mutation"
 [[ "$(state_digest "$DIFF")" == "$DIFF_BEFORE" ]] || fail "different-build --check mutated state"
@@ -627,8 +629,8 @@ grep -q 'Same-version update : refreshed management files' "$WORKDIR/refresh.out
 grep -q "BUNDLE_SHA256=${OCI_CANDIDATE_SHA}" "$REFRESH/etc/frp-auto-deploy/version" || fail "verified sha not persisted"
 grep -q "PROJECT_VERSION=${PROJECT_VERSION}" "$REFRESH/etc/frp-auto-deploy/version" || fail "project version lost"
 grep -q 'FRP_VERSION=0.70.1' "$REFRESH/etc/frp-auto-deploy/version" || fail "frp version changed"
-grep -q 'RELEASE_CHANNEL=stable' "$REFRESH/etc/frp-auto-deploy/version" || fail "channel not preserved"
-grep -q "SOURCE_REF=v${PROJECT_VERSION}" "$REFRESH/etc/frp-auto-deploy/version" || fail "source ref not preserved"
+grep -q 'RELEASE_CHANNEL=dev' "$REFRESH/etc/frp-auto-deploy/version" || fail "channel not preserved"
+grep -q 'SOURCE_REF=main' "$REFRESH/etc/frp-auto-deploy/version" || fail "source ref not preserved"
 [[ "$(state_digest "$REFRESH")" == "$REFRESH_STATE" ]] || fail "oci refresh changed protected state"
 [[ "$(sha "$REFRESH/usr/local/bin/frps")" == "$REFRESH_FRP" ]] || fail "oci refresh changed frps"
 grep -q 'project_update.completed' "$REFRESH/var/log/frp-auto-deploy/audit.jsonl" || fail "refresh missing audit"
@@ -661,7 +663,7 @@ fi
 [[ "$(sha "$REFRESH/var/log/frp-auto-deploy/audit.jsonl")" == "$AUDIT_BEFORE" ]] || fail "second actual wrote audit"
 [[ "$(find "$REFRESH/var/lib/frp-auto-deploy/backups" -mindepth 1 -maxdepth 1 -type d | wc -l)" == "$BACKUP_COUNT" ]] ||
   fail "second actual created snapshot"
-[[ ! -f "$REFRESH/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "second actual left txn marker"
+[[ ! -f "$REFRESH/var/lib/frp-auto-deploy/server-update-pending.json" ]] || fail "second actual left txn marker"
 pass "SERVER_ACTUAL_SAME_BUILD_NO_MUTATION"
 
 echo "SERVER_PROJECT_UPDATE_TESTS=PASS"

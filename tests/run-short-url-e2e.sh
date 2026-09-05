@@ -58,8 +58,9 @@ ssh_server 'command -v cloudflared >/dev/null || (
 )' || fail "install cloudflared on server"
 
 # Refresh server project tools from this branch via stdin bootstrap upgrade.
+# Working-tree artifacts are channel=dev / git_ref=main.
 note "Updating server tools from local tree"
-ssh_server "sudo env FRP_CLIENT_INSTALLER_URL='$INSTALLER_URL' bash -s -- --upgrade" \
+ssh_server "sudo env FRP_RELEASE_CHANNEL=dev FRP_CLIENT_INSTALLER_URL='$INSTALLER_URL' bash -s -- --upgrade" \
   <"$ROOT/dist/bootstrap-server.sh" >"$OUT_DIR/server-upgrade.log" 2>&1 \
   || { cat "$OUT_DIR/server-upgrade.log"; fail "server upgrade"; }
 pass "SERVER_UPGRADE"

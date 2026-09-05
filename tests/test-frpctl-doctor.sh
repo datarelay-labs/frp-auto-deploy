@@ -640,32 +640,32 @@ pass "PENDING_APPLY"
 UPMARK="$WORKDIR/pending-update"
 cp -a "$SRV" "$UPMARK"
 echo '{"operation":"update","phase":"systemd-apply","failure_class":"SERVICE_START_FAILED"}' \
-  >"$UPMARK/var/lib/frp-auto-deploy/update-pending.json"
+  >"$UPMARK/var/lib/frp-auto-deploy/server-update-pending.json"
 run_json "$UPMARK" "$WORKDIR/upmark.json" || true
-[[ "$(check_status "$WORKDIR/upmark.json" pending_transaction)" == "FAIL" ]] || fail "pending update"
-[[ -f "$UPMARK/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "doctor deleted update marker"
+[[ "$(check_status "$WORKDIR/upmark.json" pending_server_transaction)" == "FAIL" ]] || fail "pending update"
+[[ -f "$UPMARK/var/lib/frp-auto-deploy/server-update-pending.json" ]] || fail "doctor deleted update marker"
 pass "PENDING_UPDATE"
 
 PROJMARK="$WORKDIR/pending-project"
 cp -a "$SRV" "$PROJMARK"
 echo '{"operation":"project-update","phase":"commit","failure_class":"HEALTH_CHECK_FAILED"}' \
-  >"$PROJMARK/var/lib/frp-auto-deploy/update-pending.json"
+  >"$PROJMARK/var/lib/frp-auto-deploy/server-update-pending.json"
 run_json "$PROJMARK" "$WORKDIR/projmark.json" || true
-[[ "$(check_status "$WORKDIR/projmark.json" pending_transaction)" == "FAIL" ]] || fail "project pending"
+[[ "$(check_status "$WORKDIR/projmark.json" pending_server_transaction)" == "FAIL" ]] || fail "project pending"
 grep -q 'frpctl project-update' "$WORKDIR/projmark.json" || fail "project-update guidance"
 if grep -q 'sudo frpctl update' "$WORKDIR/projmark.json" && ! grep -q 'frpctl project-update' "$WORKDIR/projmark.json"; then
   fail "generic update guidance for project-update"
 fi
-[[ -f "$PROJMARK/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "doctor deleted project marker"
+[[ -f "$PROJMARK/var/lib/frp-auto-deploy/server-update-pending.json" ]] || fail "doctor deleted project marker"
 pass "DOCTOR_PROJECT_UPDATE_GUIDANCE"
 
 FRPMARK="$WORKDIR/pending-frp"
 cp -a "$SRV" "$FRPMARK"
 echo '{"operation":"frp-update","phase":"commit"}' \
-  >"$FRPMARK/var/lib/frp-auto-deploy/update-pending.json"
+  >"$FRPMARK/var/lib/frp-auto-deploy/server-update-pending.json"
 run_json "$FRPMARK" "$WORKDIR/frpmark.json" || true
 grep -q 'frpctl frp-update' "$WORKDIR/frpmark.json" || fail "frp-update guidance"
-[[ -f "$FRPMARK/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "doctor deleted frp marker"
+[[ -f "$FRPMARK/var/lib/frp-auto-deploy/server-update-pending.json" ]] || fail "doctor deleted frp marker"
 pass "DOCTOR_FRP_UPDATE_GUIDANCE"
 
 # Version mismatch

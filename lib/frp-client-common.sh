@@ -3651,7 +3651,7 @@ frp_client_upgrade_rollback() {
     && frp_client_upgrade_verify_restored "$backup"; then
     echo "UPGRADE_ROLLBACK=PASS"
     frp_emit_failure_class "$failure_class"
-    frp_txn_clear
+    frp_txn_clear client
     _FRP_CLIENT_UPGRADE_ROLLBACK_RC=0
     _FRP_CLIENT_UPGRADE_ROLLBACK_DONE=1
     _FRP_CLIENT_UPGRADE_IN_ROLLBACK=0
@@ -3752,8 +3752,12 @@ frp_client_apply_upgrade() {
   _FRP_CLIENT_UPGRADE_IN_ROLLBACK=0
   _FRP_CLIENT_UPGRADE_MUTATION_STARTED=0
   _FRP_CLIENT_UPGRADE_SET_E=0
+  # Client upgrade owns the client transaction marker only.
+  FRP_TXN_ROLE=client
+  export FRP_TXN_ROLE
   frp_client_upgrade_validate_existing || return 1
-  if [[ -f "$(frp_txn_marker_path)" ]]; then
+  frp_txn_adopt_legacy_marker client || return 1
+  if [[ -f "$(frp_txn_marker_path client)" ]]; then
     echo "A previous software update was interrupted."
     local recovered=""
     recovered="$(frp_txn_field snapshot_path)"
@@ -3768,7 +3772,7 @@ frp_client_apply_upgrade() {
       return 1
     fi
     echo "Restored the previous management files from backup."
-    frp_txn_clear
+    frp_txn_clear client
   fi
 
   previous="$(frp_client_installed_project_version)"
@@ -3976,7 +3980,7 @@ frp_client_apply_upgrade() {
   if [[ "${_FRP_CLIENT_UPGRADE_SET_E:-0}" == "1" ]]; then
     set +E
   fi
-  frp_txn_clear
+  frp_txn_clear client
   frp_audit_emit client_update.completed
   echo
   echo "Upgrade complete."

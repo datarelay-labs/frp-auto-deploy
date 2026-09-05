@@ -33,6 +33,7 @@ for f in \
   "$BASE_DIR/tools/frp-create-client" \
   "$BASE_DIR/tools/frp-enrollments" \
   "$BASE_DIR/tools/frp-enrollment-revoke" \
+  "$BASE_DIR/tools/frp-enrollment-purge" \
   "$BASE_DIR/tools/frp-enroll-bulk" \
   "$BASE_DIR/tools/frp-clients" \
   "$BASE_DIR/tools/frp-client-info" \
@@ -1368,7 +1369,7 @@ frp_server_fail_after_mutation() {
     return 1
   fi
   frp_emit_failure_class "$class"
-  frp_txn_clear
+  frp_txn_clear server
   frp_server_end_tmp
   return 1
 }
@@ -1682,6 +1683,9 @@ frp_server_main() {
     echo "ERROR: run with sudo" >&2
     return 1
   fi
+  # Server install/reinstall owns the server transaction marker only.
+  FRP_TXN_ROLE=server
+  export FRP_TXN_ROLE
   if ! frp_acquire_server_lock; then
     return 1
   fi
@@ -1754,12 +1758,16 @@ frp_server_main() {
   fi
 
   local hash_frps_before hash_toml_before hash_unit_frps_before hash_unit_alloc_before
-  local hash_alloc_py_before hash_frontend_conf_before hash_unit_frontend_before
+  local hash_frontend_conf_before hash_unit_frontend_before
+  local hash_alloc_helpers_before=() alloc_helper_rel
   hash_frps_before="$(frp_file_sha256 "$(frp_server_fs /usr/local/bin/frps)")"
   hash_toml_before="$(frp_file_sha256 "$frps_toml")"
   hash_unit_frps_before="$(frp_file_sha256 "$unit_frps")"
   hash_unit_alloc_before="$(frp_file_sha256 "$unit_alloc")"
-  hash_alloc_py_before="$(frp_file_sha256 "${lib_dir}/frp-port-allocator.py")"
+  # Any Python module imported by the allocator must be listed in FRP_ALLOCATOR_RUNTIME_HELPERS.
+  for alloc_helper_rel in frp-port-allocator.py "${FRP_ALLOCATOR_RUNTIME_HELPERS[@]}"; do
+    hash_alloc_helpers_before+=("$(frp_file_sha256 "${lib_dir}/${alloc_helper_rel}")")
+  done
   hash_frontend_conf_before="$(frp_file_sha256 "$frontend_conf")"
   hash_unit_frontend_before="$(frp_file_sha256 "$unit_frontend")"
 
@@ -1775,7 +1783,7 @@ frp_server_main() {
 
   if ! frp_server_install_frp_binary; then
     frp_server_rollback_snapshot
-    frp_txn_clear
+    frp_txn_clear server
     frp_server_end_tmp
     return 1
   fi
@@ -1878,9 +1886,13 @@ frp_server_main() {
     if [[ "$(frp_file_sha256 "$unit_alloc")" != "$hash_unit_alloc_before" ]]; then
       need_alloc_restart=1
     fi
-    if [[ "$(frp_file_sha256 "${lib_dir}/frp-port-allocator.py")" != "$hash_alloc_py_before" ]]; then
-      need_alloc_restart=1
-    fi
+    local _alloc_idx=0
+    for alloc_helper_rel in frp-port-allocator.py "${FRP_ALLOCATOR_RUNTIME_HELPERS[@]}"; do
+      if [[ "$(frp_file_sha256 "${lib_dir}/${alloc_helper_rel}")" != "${hash_alloc_helpers_before[_alloc_idx]}" ]]; then
+        need_alloc_restart=1
+      fi
+      _alloc_idx=$((_alloc_idx + 1))
+    done
     if [[ "${PKI_ACTION:-}" == "reissued-server" || "${PKI_ACTION:-}" == "generated" ]]; then
       need_alloc_restart=1
       if frp_mode_is_single443; then
@@ -1965,7 +1977,7 @@ frp_server_main() {
 
   # Version metadata is written only after a successful install/reinstall.
   frp_write_version_file "$(frp_server_fs /etc/frp-auto-deploy/version)"
-  frp_txn_clear
+  frp_txn_clear server
   frp_prune_backup_dirs "$backups_dir" "$FRP_BACKUP_KEEP"
   frp_server_end_tmp
   FRP_INSTALL_SNAPSHOT=""

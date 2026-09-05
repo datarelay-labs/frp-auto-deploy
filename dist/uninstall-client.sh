@@ -123,7 +123,24 @@ if [[ -d "$etc_frp" ]]; then
 fi
 
 frp_u_rm_file "$(frp_u_path /etc/frp-auto-deploy/allocator-ca.crt)"
-frp_u_rm_file "$(frp_u_path /var/lib/frp-auto-deploy/update-pending.json)"
+# Client role owns client-update-pending.json only. Never remove the server marker.
+frp_u_rm_file "$(frp_u_path /var/lib/frp-auto-deploy/client-update-pending.json)"
+legacy_marker="$(frp_u_path /var/lib/frp-auto-deploy/update-pending.json)"
+if [[ -f "$legacy_marker" ]]; then
+  legacy_op="$(python3 - "$legacy_marker" <<'PY'
+import json, sys
+from pathlib import Path
+try:
+    data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(0)
+print(str(data.get("operation") or "").strip())
+PY
+)"
+  if [[ "$legacy_op" == "client-update" ]]; then
+    frp_u_rm_file "$legacy_marker"
+  fi
+fi
 frp_u_rm_file "$(frp_u_path /var/lib/frp-auto-deploy/client-draft.json)"
 frp_u_safe_rm_rf "$(frp_u_path /var/lib/frp-auto-deploy/client-upgrades)"
 

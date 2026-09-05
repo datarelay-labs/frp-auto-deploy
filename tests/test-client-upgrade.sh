@@ -438,7 +438,7 @@ fi
 unset FRP_CLIENT_UPGRADE_HOOK_FAIL FRP_CLIENT_UPGRADE_HOOK_ROLLBACK_FAIL
 grep -q 'UPDATE_ROLLBACK_FAILED' "$WORKDIR/rollback-failure.out" "$WORKDIR/rollback-failure.err" || fail "rollback failure class"
 grep -q 'RECOVERY_REQUIRED' "$WORKDIR/rollback-failure.out" "$WORKDIR/rollback-failure.err" || fail "rollback recovery marker"
-[[ -f "$ROLL_FAIL/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "client rollback left no pending marker"
+[[ -f "$ROLL_FAIL/var/lib/frp-auto-deploy/client-update-pending.json" ]] || fail "client rollback left no pending marker"
 pass "UPGRADE_ROLLBACK"
 pass "NO_PARTIAL_TOOL_INSTALL"
 pass "CLIENT_STATE_UNCHANGED_ON_FAILURE"

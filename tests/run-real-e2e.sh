@@ -369,7 +369,9 @@ create_zero_touch() {
     python3 - "$out" "$cmd_out" <<'PY'
 import re, sys
 text = open(sys.argv[1], encoding="utf-8").read()
-cmd = re.search(r"^curl -fsSL .* bash$", text, re.M)
+# Short URL: curl ... | sudo bash
+# zt1 fallback: curl ... | sudo bash -s -- 'zt1....'
+cmd = re.search(r"^curl -fsSL .*\| sudo bash(?: -s -- 'zt1\.[^']+')?$", text, re.M)
 if not cmd:
     raise SystemExit("missing one-line command")
 open(sys.argv[2], "w", encoding="utf-8").write(cmd.group(0) + "\n")
@@ -526,7 +528,7 @@ scenario_backup_repeat() {
     run_server "40-backup-$i" "sudo /usr/local/sbin/frpctl create backup /var/lib/frp-auto-deploy/backups/real-e2e-backup-$i.tar.gz" || fail_stop
     run_server "41-mutate-$i" "sudo /usr/local/sbin/frpctl set client '$CLIENT_MID_PREFIX' label mutated-label-$i && sudo /usr/local/sbin/frpctl set client '$CLIENT_MID_PREFIX' note 'mutated note $i' && sudo /usr/local/sbin/frpctl set client '$CLIENT_MID_PREFIX' tag env e2e$i && sudo /usr/local/sbin/frpctl show client '$CLIENT_MID_PREFIX'" || fail_stop
     run_local "42-restore-$i" bash -lc "cat '$ROOT/tools/frp-restore' | ssh ${SSH_OPTS[*]} '$SERVER_ALIAS' 'sudo tee /tmp/frp-restore >/dev/null && sudo chmod 755 /tmp/frp-restore'; cat '$ROOT/tools/frp-backup' | ssh ${SSH_OPTS[*]} '$SERVER_ALIAS' 'sudo tee /tmp/frp-backup >/dev/null && sudo chmod 755 /tmp/frp-backup'; ssh ${SSH_OPTS[*]} '$SERVER_ALIAS' 'sudo python3 /tmp/frp-restore /var/lib/frp-auto-deploy/backups/real-e2e-backup-$i.tar.gz'" || fail_stop
-    run_server "43-restore-verify-$i" "sudo /usr/local/sbin/frpctl show client '$CLIENT_MID_PREFIX'; echo ====; sudo /usr/local/sbin/frpctl doctor; echo ====; sudo test ! -f /var/lib/frp-auto-deploy/update-pending.json && echo PENDING_MARKER_CLEARED=YES; echo ====; sudo python3 -c \"import json; c=json.load(open('/etc/frp-auto-deploy/config.json')); print('public_hostname='+str(c.get('public_hostname') or ''))\"" || fail_stop
+    run_server "43-restore-verify-$i" "sudo /usr/local/sbin/frpctl show client '$CLIENT_MID_PREFIX'; echo ====; sudo /usr/local/sbin/frpctl doctor; echo ====; sudo test ! -f /var/lib/frp-auto-deploy/server-update-pending.json && sudo test ! -f /var/lib/frp-auto-deploy/client-update-pending.json && echo PENDING_MARKER_CLEARED=YES; echo ====; sudo python3 -c \"import json; c=json.load(open('/etc/frp-auto-deploy/config.json')); print('public_hostname='+str(c.get('public_hostname') or ''))\"" || fail_stop
     wait_external_ssh "44-restore-ssh-$i" || fail_stop
   done
 }
