@@ -174,8 +174,7 @@ bootstrap.example.com {
         path /ca.crt /bootstrap/redeem /enroll /healthz
     }
     # When access logging is enabled, skip or redact @short_url so the ticket
-    # never appears in operator logs. Example (Caddyfile log filter / separate
-    # logger that omits @short_url) — do not log the raw request URI for /i/.
+    # never appears in operator logs. Do not log the raw request URI for /i/.
     handle @allowed {
         reverse_proxy https://127.0.0.1:6099 {
             transport http {
@@ -229,7 +228,7 @@ REBOOT_RECONNECT=PASS
 INVALID_TLS_FAIL_CLOSED=PASS
 ZT1_FALLBACK=PASS
 TESTED_PRODUCTION_HEAD=091f9a99b5e8d648099da97457781bcd24980142
-CANDIDATE_HEAD=011c8aaa3be833ea411546002f1d4579953a7b86
+CANDIDATE_HEAD=40bc05967ebfd93c3723a8edff206967c4711c35
 EVIDENCE_REUSED_BY_CODE_EQUIVALENCE=YES
 EVIDENCE_DIRS=
   e2e-reports/short-url-e2e-20260904T153344Z (baseline-linux)
