@@ -108,6 +108,11 @@ existing Private CA allocator URL embedded in the bootstrap script.
 
 ### nginx example
 
+The `/i/<ticket>` path contains a short-lived credential. The copy/paste default
+below turns **off** access logging for that location so the raw URI never hits
+operator access logs. (Alternatively, an explicitly verified sanitized log
+format that rewrites `/i/...` to `/i/<redacted>` is acceptable.)
+
 ```nginx
 server {
     listen 443 ssl http2;
@@ -117,10 +122,9 @@ server {
     ssl_certificate     /etc/ssl/bootstrap.example.com/fullchain.pem;
     ssl_certificate_key /etc/ssl/bootstrap.example.com/privkey.pem;
 
-    # Prefer redacting /i/<ticket> in access logs.
-    # Example: map $request_uri $frp_safe_uri { ~^(/i/).+$ $1<redacted>; default $request_uri; }
-
     location ~ ^/i/[^/?#]+$ {
+        # Required default: do not log the raw /i/<ticket> credential URL.
+        access_log off;
         proxy_pass https://127.0.0.1:6099;
         proxy_ssl_verify off;   # upstream is project Private CA on loopback
         proxy_set_header Host $host;
@@ -157,12 +161,21 @@ server {
 
 ### Caddy example
 
+If the operator enables Caddy access logging, `/i/<ticket>` **must** be excluded
+or redacted. The complete short URL is a short-lived credential; raw URI logging
+at the operator edge defeats allocator-side redaction. FRP Auto Deploy does not
+manage the reverse proxy — access-log policy remains an operator responsibility.
+
 ```caddy
 bootstrap.example.com {
+    @short_url path_regexp i ^/i/[^/?#]+$
     @allowed {
         path_regexp i ^/i/[^/?#]+$
         path /ca.crt /bootstrap/redeem /enroll /healthz
     }
+    # When access logging is enabled, skip or redact @short_url so the ticket
+    # never appears in operator logs. Example (Caddyfile log filter / separate
+    # logger that omits @short_url) — do not log the raw request URI for /i/.
     handle @allowed {
         reverse_proxy https://127.0.0.1:6099 {
             transport http {
@@ -190,6 +203,41 @@ POST /enroll success     → completed_at (single-use)
 ```
 
 Treat `/i/<opaque-ticket>` as sensitive until used, expired, or revoked.
+
+## v2.1.3 Real E2E evidence
+
+Recorded Short URL Real E2E (public TLS via operator edge / cloudflared) against
+production-equivalent tree `091f9a99b5e8d648099da97457781bcd24980142`. Candidate
+`011c8aaa3be833ea411546002f1d4579953a7b86` differs only in tests, docs, version
+metadata, release metadata, and checksums — not Short URL production behavior.
+Evidence reused by code equivalence; Real E2E was not re-run solely for the
+metadata bump.
+
+```text
+RELEASE=2.1.3
+BASELINE_LINUX=PASS
+AMAZON_LINUX_2023=PASS
+ROCKY_LINUX_8_10=PASS
+PUBLIC_TLS_STOCK_OS_TRUST=PASS
+SHORT_URL_GENERATION=PASS
+ZERO_TOUCH_ENROLLMENT=PASS
+FIRST_MACHINE_BINDING=PASS (automated suite; not in Real E2E harness)
+TICKET_SINGLE_USE=PASS (automated suite; not in Real E2E harness)
+MULTI_SERVICE=PASS (automated suite; Real E2E used --ssh profile)
+MANAGEMENT_ONLY=PASS (automated suite; not in Real E2E harness)
+REBOOT_RECONNECT=PASS
+INVALID_TLS_FAIL_CLOSED=PASS
+ZT1_FALLBACK=PASS
+TESTED_PRODUCTION_HEAD=091f9a99b5e8d648099da97457781bcd24980142
+CANDIDATE_HEAD=011c8aaa3be833ea411546002f1d4579953a7b86
+EVIDENCE_REUSED_BY_CODE_EQUIVALENCE=YES
+EVIDENCE_DIRS=
+  e2e-reports/short-url-e2e-20260904T153344Z (baseline-linux)
+  e2e-reports/short-url-e2e-20260904T153050Z (amazon-linux-2023)
+  e2e-reports/short-url-e2e-20260904T153202Z (rocky-linux-8.10)
+```
+
+Unit/Docker suite PASS is not a substitute for the Real E2E platform rows above.
 
 ## single-443 note
 

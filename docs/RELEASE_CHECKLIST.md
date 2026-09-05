@@ -50,9 +50,11 @@ Do not convert Docker, LXD, or QEMU TCG into `REAL_VM=PASS`.
 
 For **2.1.3**, keep published **v2.1.2** untouched. Re-confirm Zero-touch /
 enrollment installer URLs resolve to immutable `v2.1.3` after the tag exists.
-Do not claim ideal `/i/<ticket>` short URL completion in a stable tag until
-`docs/ZERO_TOUCH_SHORT_URL.md` Real E2E gates are recorded for that release.
-Implementation lives behind optional `bootstrap_hostname` (Option B).
+Ideal `/i/<ticket>` short URL Real E2E evidence for **2.1.3** is recorded in
+`docs/ZERO_TOUCH_SHORT_URL.md` and summarized in `docs/RELEASE_VALIDATION.md`.
+Implementation lives behind optional `bootstrap_hostname` (Option B); `zt1`
+fallback remains when unset. `public_hostname` stays the published-service
+access alias and is not the bootstrap TLS hostname.
 
 ## Preparing the 2.1.3 immutable tag
 

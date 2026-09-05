@@ -716,14 +716,21 @@ Automated userspace/container portability is exercised on:
 | --- | --- |
 | Ubuntu 22.04 | PASS |
 | Ubuntu 24.04 | PASS |
+| Rocky Linux 8 | PASS |
 | Rocky Linux 9 | PASS |
 | AlmaLinux 9 | PASS |
 | Amazon Linux 2023 | PASS |
 | Amazon Linux 2 | PASS |
 
+Stable scope is **Linux/systemd**. macOS and Windows are **not** stable-supported
+in 2.1.3. Design target is a few to a few dozen systems (not 100+ fleet
+orchestration).
+
 Real-environment validation and container validation are **not the same claim**.
 For example, SELinux Enforcing, native ARM64 systemd, and some older OpenSSL
-environments have separate validation gates.
+environments have separate validation gates. Rocky Linux 8.10 is a
+release-validated Short URL Real E2E platform for 2.1.3 (see
+`docs/ZERO_TOUCH_SHORT_URL.md`); that is not a Rocky 9 SELinux claim.
 
 See [docs/RELEASE_VALIDATION.md](docs/RELEASE_VALIDATION.md) for the authoritative
 support/validation classification.
@@ -804,10 +811,11 @@ curl -fsSL \
 - No automatic cloud firewall, security group, UFW, firewalld, iptables, or
   external NAT configuration
 - No automatic SSH account, password, or SSH key management
-- Windows client automation is not included
+- Windows and macOS client automation are not stable-supported
 - Some real-VM / SELinux / ARM64 / older OpenSSL combinations remain separately
   classified in the validation matrix
 - Project bootstrap scripts are checksummed, not cryptographically signed
+- Designed for a few to a few dozen systems; not a 100+ fleet orchestration product
 
 ---
 
