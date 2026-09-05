@@ -173,7 +173,7 @@ from pathlib import Path
 bundle, rel, dest = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
 text = bundle.read_text()
 pat = re.compile(
-    r"base64 -d >\"\$TMP/" + re.escape(rel) + r"\" <<'B64'\n(.*?)\nB64",
+    r"(?:base64 -d|_frp_b64d) >\"\$TMP/" + re.escape(rel) + r"\" <<'B64'\n(.*?)\nB64",
     re.S,
 )
 match = pat.search(text)
