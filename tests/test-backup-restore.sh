@@ -297,7 +297,7 @@ if FRP_RESTORE_HOOK_HEALTH_FAIL=1 FRP_RESTORE_HOOK_ROLLBACK_HEALTH_FAIL=1 \
 fi
 grep -q 'RESTORE_ROLLBACK_FAILED' "$WORKDIR/rbhealth.stderr" || fail "RESTORE_ROLLBACK_FAILED"
 grep -q 'RECOVERY_REQUIRED' "$WORKDIR/rbhealth.stderr" || fail "restore recovery required"
-[[ -f "$HEALTH/var/lib/frp-auto-deploy/update-pending.json" ]] || fail "restore pending missing"
+[[ -f "$HEALTH/var/lib/frp-auto-deploy/server-update-pending.json" ]] || fail "restore pending missing"
 pass "RESTORE_ROLLBACK_FAILURE"
 
 echo "BACKUP_RESTORE_TEST=PASS"

@@ -79,7 +79,8 @@ if frp_verify_client_update_artifact "$GOOD"; then
 fi
 pass "UPDATE_SHA256_VERIFIED"
 
-# Working-tree manifest must match VERSION / channel / git_ref agreement.
+# Working-tree manifest on main is channel=dev / git_ref=main.
+# Tagged stable artifacts remain channel=stable / git_ref=vVERSION (STABLE_* above).
 python3 - "$ROOT/release-manifest.json" "$ROOT/VERSION" <<'PY' || fail "manifest channel/ref"
 import json, sys
 from pathlib import Path
@@ -91,13 +92,29 @@ for line in Path(sys.argv[2]).read_text().splitlines():
         values[k.strip()] = v.strip()
 project = values["PROJECT_VERSION"]
 assert data.get("project_version") == project, data.get("project_version")
-assert data.get("channel") == "stable", data.get("channel")
-assert data.get("git_ref") == "v%s" % project, data.get("git_ref")
+assert data.get("channel") == "dev", data.get("channel")
+assert data.get("git_ref") == "main", data.get("git_ref")
 assert "bootstrap-server.sh" in (data.get("artifacts") or {})
 server = data["artifacts"]["bootstrap-server.sh"]
 assert not server.get("sha256"), "server bundle hash must not live in the embedded manifest"
 PY
-pass "STABLE_MANIFEST_IDENTITY"
+pass "DEV_MAIN_WORKING_TREE_IDENTITY"
+
+# Source tree with channel=dev must validate as expected channel=dev ref=main.
+DEV_META="$(frp_validate_release_source_metadata "$ROOT" "main" "dev")" || fail "dev metadata validation"
+[[ "$DEV_META" == "${PROJECT_VERSION}"$'\tdev\tmain' ]] || fail "dev metadata triple: $DEV_META"
+pass "DEV_MAIN_ARTIFACT_IDENTITY"
+
+# STABLE_IMMUTABLE: tagged stable line still resolves to vPROJECT_VERSION (not main).
+unset FRP_RELEASE_CHANNEL || true
+export FRP_RELEASE_CHANNEL=stable
+[[ "$(frp_release_git_ref)" == "v${PROJECT_VERSION}" ]] || fail "stable immutable ref drifted"
+case "$(frp_default_client_installer_url)" in
+  *"/v${PROJECT_VERSION}/dist/"*) ;;
+  *'/main/'*) fail "stable immutable still points at main" ;;
+  *) fail "stable immutable URL unexpected" ;;
+esac
+pass "STABLE_IMMUTABLE"
 
 # Persist channel across installer re-runs and missing env.
 persist="$(mktemp -d)"

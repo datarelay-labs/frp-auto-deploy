@@ -196,8 +196,8 @@ import json, sys
 from pathlib import Path
 data = json.loads(Path(sys.argv[1]).read_text())
 assert data.get("project_version") == sys.argv[2]
-assert data.get("channel") == "stable"
-assert data.get("git_ref") == "v%s" % sys.argv[2]
+assert data.get("channel") == "dev"
+assert data.get("git_ref") == "main"
 PY
 pass "CLIENT_BUNDLE_CONTAINS_RELEASE_MANIFEST"
 pass "REAL_GENERATED_CLIENT_BUNDLE"
@@ -211,7 +211,7 @@ pass "REAL_GENERATED_CLIENT_BUNDLE"
 . "$ROOT/lib/frp-client-common.sh"
 
 VALID_META="$(frp_validate_release_source_metadata "$ROOT")" || fail "valid source metadata"
-[[ "$VALID_META" == "${PROJECT_VERSION}"$'\tstable\tv'"${PROJECT_VERSION}" ]] ||
+[[ "$VALID_META" == "${PROJECT_VERSION}"$'\tdev\tmain' ]] ||
   fail "valid metadata triple: $VALID_META"
 pass "CLIENT_CANDIDATE_METADATA_VALID"
 
@@ -224,7 +224,7 @@ import json, sys
 from pathlib import Path
 p = Path(sys.argv[1])
 d = json.loads(p.read_text())
-d["channel"] = "dev"
+d["channel"] = "stable"
 p.write_text(json.dumps(d) + "\n")
 PY
 if frp_validate_release_source_metadata "$BADCH" >/dev/null 2>"$WORKDIR/bad-channel.err"; then
@@ -232,18 +232,18 @@ if frp_validate_release_source_metadata "$BADCH" >/dev/null 2>"$WORKDIR/bad-chan
 fi
 grep -qi 'channel/ref disagreement\|channel mismatch' "$WORKDIR/bad-channel.err" ||
   fail "channel disagreement message"
-if FRP_EXPECTED_RELEASE_CHANNEL=dev \
-  frp_validate_release_source_metadata "$ROOT" >/dev/null 2>"$WORKDIR/expected-dev.err"; then
-  fail "expected dev accepted a stable candidate"
+if FRP_EXPECTED_RELEASE_CHANNEL=stable \
+  frp_validate_release_source_metadata "$ROOT" >/dev/null 2>"$WORKDIR/expected-stable.err"; then
+  fail "expected stable accepted a dev candidate"
 fi
-grep -qi 'channel mismatch' "$WORKDIR/expected-dev.err" || fail "expected channel mismatch"
+grep -qi 'channel mismatch' "$WORKDIR/expected-stable.err" || fail "expected channel mismatch"
 pass "CLIENT_CANDIDATE_METADATA_CHANNEL_MISMATCH"
 
 BADREF="$WORKDIR/bad-ref"
 mkdir -p "$BADREF"
 cp "$ROOT/VERSION" "$BADREF/VERSION"
 cp "$ROOT/release-manifest.json" "$BADREF/release-manifest.json"
-if FRP_EXPECTED_RELEASE_CHANNEL=stable FRP_EXPECTED_SOURCE_REF=main \
+if FRP_EXPECTED_RELEASE_CHANNEL=dev FRP_EXPECTED_SOURCE_REF="v${PROJECT_VERSION}" \
   frp_validate_release_source_metadata "$ROOT" >/dev/null 2>"$WORKDIR/bad-ref.err"; then
   fail "expected ref mismatch accepted"
 fi
