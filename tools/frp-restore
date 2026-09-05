@@ -364,7 +364,8 @@ def _audit_emit(event, **kwargs):
 
 
 def _write_txn(root: Path, snapshot: Path | None = None) -> None:
-    marker = root / "var/lib/frp-auto-deploy/update-pending.json"
+    # Restore is a server-role operation; use the server marker path.
+    marker = root / "var/lib/frp-auto-deploy/server-update-pending.json"
     marker.parent.mkdir(parents=True, exist_ok=True)
     record = {
         "schema_version": 2,
@@ -382,9 +383,19 @@ def _write_txn(root: Path, snapshot: Path | None = None) -> None:
 
 
 def _clear_txn(root: Path) -> None:
-    marker = root / "var/lib/frp-auto-deploy/update-pending.json"
+    marker = root / "var/lib/frp-auto-deploy/server-update-pending.json"
     if marker.is_file():
         marker.unlink()
+    # Clear legacy shared marker only when it is unambiguously a server restore.
+    legacy = root / "var/lib/frp-auto-deploy/update-pending.json"
+    if legacy.is_file():
+        try:
+            data = json.loads(legacy.read_text(encoding="utf-8"))
+            op = str(data.get("operation") or "").strip()
+        except Exception:
+            return
+        if op in ("restore", "install", "project-update", "frp-update"):
+            legacy.unlink()
 
 
 def _readiness_timeout() -> float:
