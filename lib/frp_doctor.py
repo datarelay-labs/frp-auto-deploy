@@ -1858,6 +1858,8 @@ def check_server(report, paths, facts, skip_network):
                 )
 
     bootstrap_abs = '/var/lib/frp-auto-deploy/bootstrap'
+    enrollments_abs = '/var/lib/frp-auto-deploy/enrollments'
+    retention_days = 30
     if cfg:
         configured = str(cfg.get('bootstrap_dir') or '').strip()
         enrollments = str(cfg.get('enrollments_dir') or '').strip()
@@ -1867,53 +1869,89 @@ def check_server(report, paths, facts, skip_network):
             parent = enrollments.rsplit('/', 1)[0]
             if parent:
                 bootstrap_abs = parent + '/bootstrap'
-    if paths.is_dir(bootstrap_abs):
-        now = int(time.time())
-        active = 0
-        expired = 0
+        if enrollments.startswith('/'):
+            enrollments_abs = enrollments
+    elc = None
+    for candidate in (
+        Path(__file__).resolve().parent / 'frp_enrollment_lifecycle.py',
+        Path('/usr/local/lib/frp-auto-deploy/frp_enrollment_lifecycle.py'),
+    ):
+        if candidate.is_file():
+            import importlib.util
+            spec = importlib.util.spec_from_file_location('frp_enrollment_lifecycle', str(candidate))
+            elc = importlib.util.module_from_spec(spec)
+            try:
+                spec.loader.exec_module(elc)
+            except Exception:
+                elc = None
+            break
+    if elc is not None and cfg:
         try:
-            for entry in sorted(paths.p(bootstrap_abs).glob('*.json')):
-                try:
-                    rec = json.loads(entry.read_text(encoding='utf-8'))
-                except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-                    expired += 1
-                    continue
-                if not isinstance(rec, dict):
-                    expired += 1
-                    continue
-                try:
-                    exp = int(rec.get('expires_at') or 0)
-                except (TypeError, ValueError):
-                    expired += 1
-                    continue
-                if exp >= now:
-                    active += 1
-                else:
-                    expired += 1
-        except OSError:
-            active = 0
-            expired = 0
-        if expired >= 50:
+            retention_days = elc.retention_days_from_config(cfg)
+        except Exception as exc:
             report.add(
-                'bootstrap_tickets', WARN,
-                'stale expired bootstrap ticket records were not cleaned up',
-                'active=%s expired=%s' % (active, expired),
-                'expired tickets are removed when a new ticket is created or redeemed; doctor does not delete them',
+                'enrollment_retention_config', WARN,
+                'enrollment_retention_days is invalid; using default 30',
+                str(exc),
+                'set enrollment_retention_days to an integer between 1 and 3650',
+                'config',
+            )
+            retention_days = 30
+    if paths.is_dir(bootstrap_abs) or paths.is_dir(enrollments_abs):
+        if elc is not None:
+            findings, status = elc.doctor_scan_enrollment_lifecycle(
+                enrollments_abs, bootstrap_abs, retention_days
+            )
+            report.add(
+                'enrollment_retention', INFO,
+                'enrollment retention policy: %s days' % status['retention_days'],
+                'active=%s terminal=%s eligible=%s' % (
+                    status['active'], status['terminal'], status['eligible'],
+                ),
+                '',
                 'state',
             )
+            severity = {
+                'invalid_pairing': FAIL,
+                'duplicate_pairing': FAIL,
+                'orphan_bootstrap_ticket': WARN,
+                'malformed_enrollment': WARN,
+                'malformed_terminal_timestamp': WARN,
+                'retention_overdue': WARN,
+            }
+            for kind, eid, detail in findings:
+                report.add(
+                    'enrollment_lifecycle_%s_%s' % (kind, eid),
+                    severity.get(kind, WARN),
+                    '%s: %s' % (kind.replace('_', ' '), detail),
+                    'id=%s' % eid,
+                    'doctor does not delete enrollment metadata',
+                    'state',
+                )
+            if not findings:
+                report.add(
+                    'enrollment_lifecycle', PASS,
+                    'enrollment lifecycle records are consistent',
+                    'retention_days=%s active=%s terminal=%s' % (
+                        retention_days, status['active'], status['terminal'],
+                    ),
+                    '',
+                    'state',
+                )
         else:
+            # Fallback when lifecycle helper is unavailable: keep a quiet INFO.
             report.add(
                 'bootstrap_tickets', INFO,
-                'active unexpired bootstrap tickets: %s' % active,
-                'expired=%s' % expired if expired else '',
+                'bootstrap ticket directory present',
+                bootstrap_abs,
                 '',
                 'state',
             )
     else:
         report.add(
-            'bootstrap_tickets', INFO,
-            'active unexpired bootstrap tickets: 0',
-            '',
+            'enrollment_retention', INFO,
+            'enrollment retention policy: %s days' % retention_days,
+            'active=0 terminal=0 eligible=0',
             '',
             'state',
         )
