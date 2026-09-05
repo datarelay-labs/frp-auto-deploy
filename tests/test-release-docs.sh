@@ -10,7 +10,7 @@ fail() { echo "FAIL $1" >&2; exit 1; }
 
 # shellcheck disable=SC1091
 . "$ROOT/VERSION"
-[[ "$PROJECT_VERSION" == "2.1.2" ]] || fail "VERSION project is $PROJECT_VERSION"
+[[ "$PROJECT_VERSION" == "2.1.3" ]] || fail "VERSION project is $PROJECT_VERSION"
 [[ "$FRP_VERSION" == "0.70.1" ]] || fail "VERSION FRP is $FRP_VERSION"
 pass "VERSION_FILE"
 
@@ -147,9 +147,9 @@ pass "REAL_ACCEPTANCE_RECORDED"
 
 chmod +x "$ROOT/scripts/validate-release-tag.sh"
 TMPERR="$(mktemp)"
-if "$ROOT/scripts/validate-release-tag.sh" v2.1.3 >/dev/null 2>"$TMPERR"; then
+if "$ROOT/scripts/validate-release-tag.sh" v2.1.4 >/dev/null 2>"$TMPERR"; then
   rm -f "$TMPERR"
-  fail "v2.1.3 must not validate against PROJECT_VERSION=${PROJECT_VERSION}"
+  fail "v2.1.4 must not validate against PROJECT_VERSION=${PROJECT_VERSION}"
 fi
 grep -q "PROJECT_VERSION=${PROJECT_VERSION}" "$TMPERR" || fail "tag mismatch diagnostic"
 rm -f "$TMPERR"

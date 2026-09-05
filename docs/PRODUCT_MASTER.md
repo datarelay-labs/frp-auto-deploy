@@ -4,9 +4,9 @@
 > **Repository:** `datarelay-labs/frp-auto-deploy`
 > **Document status:** Master / Living Document
 > **Last updated:** 2026-09-04
-> **Current stable baseline:** Project 2.1.1 (published tag `v2.1.1`)
-> **Next project line:** 2.1.2 (this tree; tag not created yet)
-> **Release HEAD (published stable):** `729fe31b69adae5e65bf9aaf45efe82d8deab867`
+> **Current stable baseline:** Project 2.1.2 (published tag `v2.1.2`)
+> **Next project line:** 2.1.3 (this tree; tag not created yet)
+> **Release HEAD (published stable):** `6f25e190ba48444d05bfe77fdd4f2c9105a235e2`
 > **Pinned upstream FRP:** 0.70.1
 > **Primary management interface:** `sudo frpctl`
 > **ZERO_TOUCH_SHORT_URL_TRUST_MODEL:** OPTION_B_EXTERNAL_REVERSE_PROXY (implemented on feature branch; not yet a tagged release)
@@ -1441,19 +1441,18 @@ Prometheus/Grafana/RMM 형태의 motion
 현재 repository 기준:
 
 ```text
-Published stable:     2.1.1 (tag v2.1.1)
-Next project line:    2.1.2 (candidate tree; tag not created)
+Published stable:     2.1.2 (tag v2.1.2)
+Next project line:    2.1.3 (candidate tree; tag not created)
 FRP:                  0.70.1
-Published Release HEAD: 729fe31b69adae5e65bf9aaf45efe82d8deab867
+Published Release HEAD: 6f25e190ba48444d05bfe77fdd4f2c9105a235e2
 ZERO_TOUCH_SHORT_URL_TRUST_MODEL: OPTION_B_EXTERNAL_REVERSE_PROXY
 ```
 
-v2.1.2 focus (this tree):
+v2.1.3 focus (this tree):
 
-- correctness hardening
-- upgrade safety
-- backup/audit hardening
-- transitional shorter Zero-Touch (`zt1.` package; no insecure TLS)
+- Ideal Zero-Touch `/i/<ticket>` short URL (Option B)
+- optional `bootstrap_hostname` + operator reverse proxy
+- transitional `zt1.` package remains the default fallback
 - FRP remains 0.70.1
 
 Ideal `/i/<ticket>` short URL is implemented as an additive Option B feature
@@ -1461,7 +1460,7 @@ Ideal `/i/<ticket>` short URL is implemented as an additive Option B feature
 `docs/ZERO_TOUCH_SHORT_URL.md`. Missing `bootstrap_hostname` keeps the `zt1`
 fallback.
 
-v2.1.1 release-validated platforms:
+v2.1.2 release-validated platforms:
 
 - baseline Linux
 - Amazon Linux 2023
@@ -2031,7 +2030,7 @@ Group 단위 destructive bulk operation은 Group MVP에 포함하지 않는다.
 현재 제품 관점에서 가장 높은 우선순위는 다음이다.
 
 ```text
-1. Close v2.1.2 candidate (hardening + upgrade E2E) then final release gate
+1. Close v2.1.3 candidate (Zero-Touch short URL) then final release gate
 2. Group Management MVP
 3. Dynamic Group / Filters
 4. Safe Group Operations
@@ -2047,7 +2046,7 @@ Zero-Touch short-command note:
   `bootstrap_hostname` is unset.
 - Legacy long `env FRP_*=...` Zero-Touch commands remain supported.
 
-즉 현 시점에서 Group MVP는 v2.1.2 candidate closure 이후에 착수한다.
+즉 현 시점에서 Group MVP는 v2.1.3 candidate closure 이후에 착수한다.
 
 ---
 

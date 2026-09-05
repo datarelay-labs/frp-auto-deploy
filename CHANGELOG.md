@@ -1,9 +1,29 @@
 # Changelog
 
+## 2.1.3 — 2026-09-04
+
+Feature release on top of published **v2.1.2**. FRP remains pinned at
+**0.70.1**. Published field installs stay on **v2.1.2** until `v2.1.3` is tagged.
+
+- Ideal Zero-Touch `/i/<ticket>` short URL via optional `bootstrap_hostname`
+  and an operator-owned reverse proxy (Option B; see
+  `docs/ZERO_TOUCH_SHORT_URL.md`)
+- Keeps the transitional `zt1.` package command when `bootstrap_hostname` is
+  unset; no insecure TLS (`curl -k`) on the Zero-Touch path
+- Allocator short-URL embedding reloads config so fresh installer URLs are
+  used without requiring a process restart
+- Server bootstrap embeds `frp_zero_touch.py` helper for package/short-URL
+  generation
+
+### Compatibility
+
+Already enrolled 2.1.2 clients remain compatible during a server-first upgrade
+window. Do not upgrade clients ahead of the server.
+
 ## 2.1.2 — 2026-09-04
 
-Maintenance release preparing the next immutable tag. FRP remains pinned at
-**0.70.1**. Published field installs stay on **v2.1.1** until `v2.1.2` is tagged.
+Maintenance release. FRP remains pinned at
+**0.70.1**.
 
 - Correctness hardening: last-service release keeps the Client record;
   CLIENT ID selector precedence; bootstrap completion fail-closed
@@ -17,9 +37,8 @@ Maintenance release preparing the next immutable tag. FRP remains pinned at
   (cross-version restore fail-closed before mutation)
 - Release metadata completeness for official install/uninstall artifacts
 - Transitional shorter Zero-Touch: publicly trusted installer plus opaque
-  `zt1.` package (no insecure TLS). Ideal `/i/<ticket>` short URL is additive
-  via optional `bootstrap_hostname` + operator reverse proxy
-  (`docs/ZERO_TOUCH_SHORT_URL.md`; not required for v2.1.2 installs).
+  `zt1.` package (no insecure TLS). Ideal `/i/<ticket>` short URL trust model
+  remains pending in this release line
 - Rocky Linux 8 container regression coverage in the distro matrix
 
 ### Compatibility

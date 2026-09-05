@@ -21,22 +21,22 @@ It solves the operational work around FRP:
 
 | Item | Current |
 | --- | --- |
-| Published stable release | **v2.1.1** |
-| Project version (this tree) | **2.1.2** |
+| Published stable release | **v2.1.2** |
+| Project version (this tree) | **2.1.3** |
 | Pinned / tested FRP | **v0.70.1** |
 | Default deployment mode | **Direct** |
 | Optional enterprise mode | **single-443** |
-| Published stable install source | immutable `v2.1.1` tag |
-| Next immutable tag (after final gate) | `v2.1.2` |
-| `main` branch | development channel; may contain post-v2.1.1 changes |
+| Published stable install source | immutable `v2.1.2` tag |
+| Next immutable tag (after final gate) | `v2.1.3` |
+| `main` branch | development channel; may contain post-v2.1.2 changes |
 
-Current project version: **2.1.2**
+Current project version: **2.1.3**
 Current pinned FRP version: **v0.70.1**
 
-**v2.1.1** is the **current stable release** (published tag). Stable field installs
-use the immutable `v2.1.1` tag until `v2.1.2` is tagged after the final release
-gate. This tree prepares **2.1.2** (correctness hardening, upgrade safety,
-backup/audit hardening, and transitional shorter Zero-Touch). Following
+**v2.1.2** is the **current stable release** (published tag). Stable field installs
+use the immutable `v2.1.2` tag until `v2.1.3` is tagged after the final release
+gate. This tree prepares **2.1.3** (Zero-Touch `/i/<ticket>` short URL via
+optional `bootstrap_hostname` + operator reverse proxy). Following
 mutable `main` is explicit opt-in only, for example `FRP_RELEASE_CHANNEL=dev`.
 
 On development builds, use release channel, source ref, and verified
@@ -208,19 +208,19 @@ More detail: [docs/DEPLOYMENT_MODES.md](docs/DEPLOYMENT_MODES.md)
 
 # 3. Install the server
 
-For a published stable installation, use the immutable v2.1.1 bundle:
-
-```bash
-curl -fsSL \
-  https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.1/dist/bootstrap-server.sh \
-  | sudo bash
-```
-
-After the `v2.1.2` tag exists, the project-line immutable install source is:
+For a published stable installation, use the immutable v2.1.2 bundle:
 
 ```bash
 curl -fsSL \
   https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.2/dist/bootstrap-server.sh \
+  | sudo bash
+```
+
+After the `v2.1.3` tag exists, the project-line immutable install source is:
+
+```bash
+curl -fsSL \
+  https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.3/dist/bootstrap-server.sh \
   | sudo bash
 ```
 

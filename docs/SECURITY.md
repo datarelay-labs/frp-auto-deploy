@@ -1,6 +1,6 @@
 # Security architecture
 
-This document describes the security model of `frp-auto-deploy` **2.1.2**.
+This document describes the security model of `frp-auto-deploy` **2.1.3**.
 It is not a certification, audit report, or guarantee against a compromised
 root account.
 
