@@ -211,7 +211,8 @@ pass "REAL_GENERATED_CLIENT_BUNDLE"
 . "$ROOT/lib/frp-client-common.sh"
 
 VALID_META="$(frp_validate_release_source_metadata "$ROOT")" || fail "valid source metadata"
-[[ "$VALID_META" == $'2.1.2\tstable\tv2.1.2' ]] || fail "valid metadata triple: $VALID_META"
+[[ "$VALID_META" == "${PROJECT_VERSION}"$'\tstable\tv'"${PROJECT_VERSION}" ]] ||
+  fail "valid metadata triple: $VALID_META"
 pass "CLIENT_CANDIDATE_METADATA_VALID"
 
 BADCH="$WORKDIR/bad-channel"
