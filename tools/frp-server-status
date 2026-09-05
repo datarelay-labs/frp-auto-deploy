@@ -168,6 +168,9 @@ if host:
 alias = cfg.get('public_hostname')
 if alias is not None and str(alias).strip():
     print('public_hostname=' + shlex.quote(str(alias).strip()))
+bootstrap = cfg.get('bootstrap_hostname')
+if bootstrap is not None and str(bootstrap).strip():
+    print('bootstrap_hostname=' + shlex.quote(str(bootstrap).strip().lower()))
 public_port = coerce_port(cfg.get('frp_control_public_port')) or coerce_port(cfg.get('control_port'))
 listen_port = coerce_port(cfg.get('frp_control_listen_port')) or coerce_port(cfg.get('control_port'))
 if public_port is not None:
@@ -224,6 +227,11 @@ if [[ -n "${public_hostname:-}" ]]; then
   public_hostname_display="$public_hostname"
 else
   public_hostname_display="not configured"
+fi
+if [[ -n "${bootstrap_hostname:-}" ]]; then
+  bootstrap_hostname_display="$bootstrap_hostname"
+else
+  bootstrap_hostname_display="not configured"
 fi
 allocator_url_state="missing"
 if [[ -n "${allocator_url:-}" ]]; then
@@ -300,6 +308,7 @@ Allocator URL   : ${allocator_url_state}
 Public host     : ${public_host_state}
 Public IP       : ${public_ip_display:-missing}
 Public hostname : ${public_hostname_display}
+Bootstrap host  : ${bootstrap_hostname_display}
 
 frps            : ${frps_state}
 allocator       : ${allocator_state}
@@ -330,6 +339,9 @@ if [[ -n "${control_port:-}" ]]; then
   echo "  Local listener  : ${control_bind:-0.0.0.0}:${control_listen_port:-$control_port}"
   if [[ -n "${public_hostname:-}" ]]; then
     echo "  Access hostname : ${public_hostname}"
+  fi
+  if [[ -n "${bootstrap_hostname:-}" ]]; then
+    echo "  Bootstrap host  : ${bootstrap_hostname}"
   fi
   echo "FRP public      : TCP/${control_port}"
   if [[ -n "${control_listen_port:-}" && "${control_listen_port}" != "${control_port}" ]]; then

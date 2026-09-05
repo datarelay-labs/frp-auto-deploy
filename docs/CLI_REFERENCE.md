@@ -87,11 +87,16 @@ set client <ID> note <value>
 set client <ID> tag <key> <value>
 set installer-url <url>
 set server hostname <fqdn>
+set server bootstrap-hostname <fqdn>
 ```
 
 `set server hostname` configures an optional DNS alias for published-service
 access. It does not change FRP control (`frp_server` / `serverAddr`), CLIENT ID,
 public ports, or the CA. DNS records are managed outside FRP Auto Deploy.
+
+`set server bootstrap-hostname` configures the optional publicly trusted
+Zero-Touch short URL hostname. FRP Auto Deploy does not create DNS records,
+issue certificates, or configure ACME. See `docs/ZERO_TOUCH_SHORT_URL.md`.
 
 The backend still accepts `--tag key=value`. The parser converts
 `tag <key> <value>` to that form. Quoted values work
@@ -118,11 +123,14 @@ unset client <ID> label
 unset client <ID> note
 unset client <ID> tag <key>
 unset server hostname
+unset server bootstrap-hostname
 ```
 
-Removes administrator metadata only (or the optional public hostname). Display
-label falls back to hostname. Does not change identity, machine-id, ports, or
-enrollment. Unsetting the public hostname falls back to Public IP access.
+Removes administrator metadata only (or the optional public / bootstrap
+hostname). Display label falls back to hostname. Does not change identity,
+machine-id, ports, or enrollment. Unsetting the public hostname falls back to
+Public IP access. Unsetting the bootstrap hostname falls back to `zt1` Zero-Touch
+commands.
 
 ## create / add
 

@@ -85,6 +85,48 @@ def _load_client_registry():
 CREG = _load_client_registry()
 
 
+def _load_zero_touch():
+    candidates = [
+        Path(__file__).resolve().parent.parent / 'lib' / 'frp_zero_touch.py',
+        Path('/usr/local/lib/frp-auto-deploy/frp_zero_touch.py'),
+    ]
+    root = os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
+    if root:
+        candidates.insert(0, Path(root) / 'usr/local/lib/frp-auto-deploy' / 'frp_zero_touch.py')
+        candidates.insert(0, Path(root) / 'lib' / 'frp_zero_touch.py')
+    for path in candidates:
+        if path.is_file():
+            spec = importlib.util.spec_from_file_location('frp_zero_touch', path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+    return None
+
+
+ZT = _load_zero_touch()
+
+
+def _load_pki():
+    candidates = [
+        Path(__file__).resolve().parent.parent / 'lib' / 'frp_pki.py',
+        Path('/usr/local/lib/frp-auto-deploy/frp_pki.py'),
+    ]
+    root = os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
+    if root:
+        candidates.insert(0, Path(root) / 'usr/local/lib/frp-auto-deploy' / 'frp_pki.py')
+        candidates.insert(0, Path(root) / 'lib' / 'frp_pki.py')
+    for path in candidates:
+        if path.is_file():
+            spec = importlib.util.spec_from_file_location('frp_pki', path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+    return None
+
+
+PKI = _load_pki()
+
+
 def unsupported_registry_message(state=None):
     version = None
     if isinstance(state, dict) and 'schema_version' in state:
@@ -429,6 +471,24 @@ def cfg_public_hostname(cfg):
     return text
 
 
+def cfg_bootstrap_hostname(cfg):
+    value = cfg.get('bootstrap_hostname')
+    if value is None:
+        return ''
+    return str(value).strip().lower()
+
+
+SHORT_URL_PATH_RE = re.compile(r'^/i/([^/]+)$')
+
+
+def redact_allocator_log_path(raw_path):
+    """Redact sensitive /i/<ticket> path segments for allocator access logs."""
+    text = str(raw_path or '/')
+    if ZT is not None:
+        return ZT.redact_text(text)
+    return re.sub(r'(/i/)[^/?\s#]+', r'\1<redacted>', text, flags=re.IGNORECASE)
+
+
 def cfg_frp_control_public_port(cfg):
     port = coerce_port(cfg.get('frp_control_public_port'))
     if port is not None:
@@ -695,18 +755,51 @@ def normalize_services(raw_services):
 class Allocator:
     def __init__(self, config_path):
         self.config_path = config_path
-        self.cfg = load_json(config_path)
-        self.registry_file = self.cfg['registry_file']
-        self.enrollments_dir = Path(self.cfg['enrollments_dir'])
+        self._cfg_mtime_ns = None
+        self.cfg = {}
+        self._apply_config(load_json(config_path), force_paths=True)
         self.enrollments_dir.mkdir(parents=True, exist_ok=True)
         try:
             os.chmod(str(self.enrollments_dir), 0o700)
         except OSError:
             pass
-        self.bootstrap_dir = bootstrap_dir_from_cfg(self.cfg)
         ensure_secret_dir(self.bootstrap_dir, 0o700)
-        self.token_file = self.cfg['token_file']
-        self.nonce_file = Path(self.registry_file).resolve().parent / 'mgmt-nonces.json'
+
+    def _config_mtime_ns(self):
+        try:
+            return Path(self.config_path).stat().st_mtime_ns
+        except OSError:
+            return None
+
+    def _apply_config(self, cfg, force_paths=False):
+        """Apply config dict. Path fields are sticky unless force_paths=True."""
+        if not isinstance(cfg, dict):
+            raise TypeError('config must be a JSON object')
+        if force_paths or not self.cfg:
+            self.registry_file = cfg['registry_file']
+            self.enrollments_dir = Path(cfg['enrollments_dir'])
+            self.bootstrap_dir = bootstrap_dir_from_cfg(cfg)
+            self.token_file = cfg['token_file']
+            self.nonce_file = Path(self.registry_file).resolve().parent / 'mgmt-nonces.json'
+        self.cfg = cfg
+        self._cfg_mtime_ns = self._config_mtime_ns()
+
+    def reload_cfg_if_changed(self):
+        """Refresh in-memory config when config.json changes on disk.
+
+        frpctl set / installer-url tools update disk without restarting the
+        allocator. Short-URL scripts and advertised endpoints must see the
+        latest bootstrap_hostname / client_installer_url without a restart.
+        """
+        mtime_ns = self._config_mtime_ns()
+        if mtime_ns is None or mtime_ns == self._cfg_mtime_ns:
+            return False
+        try:
+            cfg = load_json(self.config_path)
+        except (OSError, json.JSONDecodeError, TypeError):
+            return False
+        self._apply_config(cfg, force_paths=False)
+        return True
 
     def registry_lock(self):
         return FileLock(registry_lock_path(self.registry_file))
@@ -794,6 +887,65 @@ class Allocator:
 
     def _invalid_ticket_response(self):
         return 403, api_error('bootstrap ticket is invalid', 'BOOTSTRAP_TICKET_INVALID')
+
+    def short_url_bootstrap_available(self, raw_ticket):
+        """Return True when GET /i/<ticket> may emit a bootstrap script.
+
+        Read-only: never binds machine ID, never sets completed_at, never
+        mutates enrollment/bootstrap records.
+        """
+        parsed = parse_bootstrap_ticket(raw_ticket if isinstance(raw_ticket, str) else '')
+        if not parsed:
+            return False
+        ticket_id, ticket_secret = parsed
+        provided_hash = hash_bootstrap_secret(ticket_secret)
+        record, _path = self.load_bootstrap(ticket_id)
+        if not record or not isinstance(record, dict):
+            return False
+        stored_hash = str(record.get('secret_hash') or '')
+        if not (
+            HEX_RE.fullmatch(stored_hash)
+            and len(stored_hash) == 64
+            and hmac.compare_digest(provided_hash, stored_hash)
+        ):
+            return False
+        now = int(time.time())
+        try:
+            expires_at = int(record.get('expires_at', 0))
+        except (TypeError, ValueError):
+            expires_at = 0
+        if now > expires_at:
+            return False
+        if record.get('revoked_at') or record.get('completed_at'):
+            return False
+        return True
+
+    def build_short_url_script(self, raw_ticket):
+        """Build the generic short-URL bootstrap script, or None on failure."""
+        if ZT is None or PKI is None:
+            return None
+        self.reload_cfg_if_changed()
+        allocator = str(self.cfg.get('allocator_public_url') or '').strip()
+        installer = str(self.cfg.get('client_installer_url') or '').strip()
+        ca_path = str(self.cfg.get('tls_ca_cert') or '').strip()
+        if not allocator.lower().startswith('https://'):
+            return None
+        if not installer.lower().startswith('https://'):
+            return None
+        if not ca_path or not Path(ca_path).is_file():
+            return None
+        try:
+            ca_fp = PKI.fingerprint_from_cert_file(ca_path)
+        except Exception:
+            return None
+        if not ca_fp:
+            return None
+        try:
+            return ZT.render_short_url_bootstrap_script(
+                allocator, ca_fp, raw_ticket, installer
+            )
+        except ValueError:
+            return None
 
     def redeem_bootstrap(self, body):
         """Bind a bootstrap ticket to the first machine and return enrollment data."""
@@ -1517,7 +1669,12 @@ def make_handler(allocator):
                 pass
 
         def log_message(self, fmt, *args):
-            print('%s - %s' % (self.address_string(), fmt % args), flush=True)
+            try:
+                message = fmt % args
+            except Exception:
+                message = str(fmt)
+            message = redact_allocator_log_path(message)
+            print('%s - %s' % (self.address_string(), message), flush=True)
 
         def send_json(self, code, data):
             body = json.dumps(data).encode()
@@ -1527,9 +1684,45 @@ def make_handler(allocator):
             self.end_headers()
             self.wfile.write(body)
 
+        def _send_bootstrap_headers(self, code, content_type, body):
+            if isinstance(body, str):
+                body = body.encode('utf-8')
+            self.send_response(code)
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            self.send_header('Referrer-Policy', 'no-referrer')
+            self.end_headers()
+            self.wfile.write(body)
+
         def _request_path(self):
             parsed = urlparse(self.path)
             return parsed.path or '/'
+
+        def _handle_short_url_get(self, path):
+            match = SHORT_URL_PATH_RE.match(path)
+            if not match:
+                return False
+            raw_ticket = match.group(1)
+            # Safe uniform failure for invalid/expired/revoked/completed tickets.
+            unavailable = 'bootstrap unavailable\n'
+            if not allocator.short_url_bootstrap_available(raw_ticket):
+                self._send_bootstrap_headers(
+                    404, 'text/plain; charset=utf-8', unavailable
+                )
+                return True
+            script = allocator.build_short_url_script(raw_ticket)
+            if not script:
+                self._send_bootstrap_headers(
+                    503, 'text/plain; charset=utf-8', unavailable
+                )
+                return True
+            self._send_bootstrap_headers(
+                200, 'text/x-shellscript; charset=utf-8', script
+            )
+            return True
 
         def _with_slot(self, fn):
             acquired = _REQUEST_SLOTS.acquire(blocking=False)
@@ -1546,7 +1739,10 @@ def make_handler(allocator):
 
         def do_GET(self):
             def _handle():
+                allocator.reload_cfg_if_changed()
                 path = self._request_path()
+                if self._handle_short_url_get(path):
+                    return
                 if path == '/healthz':
                     payload = {'status': 'ok'}
                     project_version = read_project_version(
@@ -1579,6 +1775,7 @@ def make_handler(allocator):
 
         def do_POST(self):
             def _handle():
+                allocator.reload_cfg_if_changed()
                 path = self._request_path()
                 try:
                     length = int(self.headers.get('Content-Length', '0'))

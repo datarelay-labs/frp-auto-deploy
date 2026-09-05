@@ -693,6 +693,7 @@ mapping = {
     'public_host': 'EXISTING_PUBLIC_IP',
     'public_ip': 'EXISTING_PUBLIC_IP',
     'public_hostname': 'EXISTING_PUBLIC_HOSTNAME',
+    'bootstrap_hostname': 'EXISTING_BOOTSTRAP_HOSTNAME',
     'control_port': 'EXISTING_CONTROL_PORT',
     'frp_control_public_port': 'EXISTING_CONTROL_PUBLIC_PORT',
     'frp_control_listen_port': 'EXISTING_CONTROL_LISTEN_PORT',
@@ -707,7 +708,7 @@ mapping = {
 # public_ip is the control endpoint; public_host is a legacy synonym.
 # Prefer public_ip when both exist so a stale public_host cannot override IP.
 order = [
-    'public_host', 'public_ip', 'public_hostname',
+    'public_host', 'public_ip', 'public_hostname', 'bootstrap_hostname',
     'control_port', 'frp_control_public_port', 'frp_control_listen_port',
     'port_start', 'port_end',
     'listen_port', 'allocator_listen_port', 'allocator_public_port',
@@ -771,6 +772,7 @@ resolve_server_settings() {
   FRP_PUBLIC_IP="${FRP_PUBLIC_IP:-${EXISTING_PUBLIC_IP:-}}"
   FRP_PUBLIC_HOST="${FRP_PUBLIC_HOST:-$FRP_PUBLIC_IP}"
   FRP_PUBLIC_HOSTNAME="${FRP_PUBLIC_HOSTNAME:-${EXISTING_PUBLIC_HOSTNAME:-}}"
+  FRP_BOOTSTRAP_HOSTNAME="${FRP_BOOTSTRAP_HOSTNAME:-${EXISTING_BOOTSTRAP_HOSTNAME:-}}"
   FRP_INTERNAL_IP="${FRP_INTERNAL_IP:-}"
   FRP_PORT_START="${FRP_PORT_START:-${EXISTING_PORT_START:-}}"
   FRP_PORT_END="${FRP_PORT_END:-${EXISTING_PORT_END:-}}"
@@ -1075,13 +1077,15 @@ write_server_config() {
     "$FRP_ALLOCATOR_PUBLIC_URL" \
     "$CLIENT_INSTALLER_URL" \
     "$pki" \
-    "${FRP_PUBLIC_HOSTNAME:-}" <<'PY'
+    "${FRP_PUBLIC_HOSTNAME:-}" \
+    "${FRP_BOOTSTRAP_HOSTNAME:-}" <<'PY'
 import json, os, sys, tempfile
 from pathlib import Path
 path = Path(sys.argv[1])
 pki = sys.argv[11]
 host = sys.argv[2]
 hostname = (sys.argv[12] if len(sys.argv) > 12 else '').strip()
+bootstrap_hostname = (sys.argv[13] if len(sys.argv) > 13 else '').strip()
 cfg = {
     'public_host': host,
     'public_ip': host,
@@ -1109,6 +1113,8 @@ cfg = {
 }
 if hostname:
     cfg['public_hostname'] = hostname
+if bootstrap_hostname:
+    cfg['bootstrap_hostname'] = bootstrap_hostname.lower()
 payload = json.dumps(cfg, indent=2, sort_keys=True) + '\n'
 path.parent.mkdir(parents=True, exist_ok=True)
 fd, tmp = tempfile.mkstemp(prefix=path.name + '.', suffix='.tmp', dir=str(path.parent))
@@ -1974,6 +1980,7 @@ FRP version       : ${FRP_VERSION}
 Deployment mode   : ${FRP_DEPLOYMENT_MODE}
 Public IP         : ${FRP_PUBLIC_IP}
 Public hostname   : ${FRP_PUBLIC_HOSTNAME:-not configured}
+Bootstrap hostname: ${FRP_BOOTSTRAP_HOSTNAME:-not configured}
 FRP control public: TCP/${FRP_CONTROL_PUBLIC_PORT}
 FRP transport     : ${FRP_TRANSPORT}
 FRP control listen: TCP/${FRP_CONTROL_LISTEN_PORT} (${FRP_CONTROL_BIND_ADDR})

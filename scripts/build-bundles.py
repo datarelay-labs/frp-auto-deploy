@@ -34,6 +34,7 @@ files=[
  'lib/frp_project_files.py',
  'lib/frp_control_locks.py',
  'lib/frp_server_config.py',
+ 'lib/frp_zero_touch.py',
  'lib/server-project-files.manifest',
  'lib/frp-doctor-common.sh',
  'lib/frp_doctor.py',

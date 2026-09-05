@@ -3,6 +3,10 @@
 # Isolated test roots only. Does not touch live FRP systems.
 set -euo pipefail
 
+# Ignore leaked roots from prior debug sessions; they divert txn markers.
+unset FRP_UPDATE_ROOT FRP_DEPLOY_TEST_ROOT FRP_SERVER_TEST_ROOT \
+  FRP_CLIENT_TEST_ROOT FRP_UNINSTALL_TEST_ROOT FRP_ROLE_TEST_ROOT || true
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../lib/frp-common.sh
 . "$ROOT/lib/frp-common.sh"
@@ -330,7 +334,7 @@ assert cfg['allocator_listen_port']==6099
 assert cfg['allocator_public_url']=='https://203.0.113.10/enroll'
 PY
 grep -q 'Deployment mode   : single443' "$WORKDIR/s443.out" || fail "s443 summary mode"
-grep -q 'healthz|enroll|bootstrap/redeem' "$S443/etc/frp-auto-deploy/frontend.conf" \
+grep -q 'healthz|enroll|bootstrap/redeem|i/' "$S443/etc/frp-auto-deploy/frontend.conf" \
   || fail "s443 allocator path allowlist"
 grep -q 'return 404;' "$S443/etc/frp-auto-deploy/frontend.conf" || fail "s443 default 404"
 grep -q 'proxy_ssl_verify on' "$S443/etc/frp-auto-deploy/frontend.conf" || fail "s443 proxy_ssl_verify"

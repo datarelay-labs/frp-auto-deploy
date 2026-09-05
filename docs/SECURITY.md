@@ -1,6 +1,6 @@
 # Security architecture
 
-This document describes the security model of `frp-auto-deploy` **2.1.2**.
+This document describes the security model of `frp-auto-deploy` **2.1.3**.
 It is not a certification, audit report, or guarantee against a compromised
 root account.
 
@@ -92,19 +92,56 @@ re-establish trust after `frp-revoke-client`.
 Zero-touch (`--one-line`) issues a short-lived ticket that the client redeems
 over verified HTTPS **after** CA pinning.
 
+Shared ticket properties (both delivery modes):
+
 - High-entropy secret; hashed at rest on the server
 - First-machine bound; same-machine retry is safe until enrollment completes
 - After successful enrollment the ticket is marked completed; further redeem
   attempts fail with `BOOTSTRAP_TICKET_USED`
 - A different machine is rejected with `BOOTSTRAP_TICKET_BOUND`
-- TTL enforced
-- Not placed in the HTTP URL path/query
+- TTL enforced; revocable before use
 - Not persisted on the client as the raw ticket
 - Must not be logged
 - Has no management authority after enrollment completes
 - Not the FRP token
 
-Treat the generated one-line command as sensitive until used or expired.
+### Transitional zt1 mode (v2.1.2 and fallback)
+
+When `bootstrap_hostname` is unset, the ticket is carried **inside** the opaque
+`zt1.` package argument. It is **not** placed in the HTTP URL path or query of
+the installer fetch. The installer URL is a public immutable release asset; the
+sensitive ticket travels only as the `bash -s -- 'zt1.<opaque>'` argument.
+
+### Short URL mode (v2.1.3 Option B)
+
+When `bootstrap_hostname` is configured, the enrollment command is:
+
+```bash
+curl -fsSL https://<bootstrap_hostname>/i/<opaque-ticket> | sudo bash
+```
+
+In this mode the Bootstrap Ticket **is** present in the HTTP URL path
+(`/i/<opaque-ticket>`). That is intentional for the short-command UX and does
+**not** weaken the ticket controls above.
+
+Treat the complete `/i/<ticket>` URL as a **short-lived credential**:
+
+- Do not log it (allocator audit already redacts `/i/<ticket>` to `/i/<redacted>`;
+  operator reverse proxies must also avoid raw URI logging — see
+  `docs/ZERO_TOUCH_SHORT_URL.md`)
+- Do not paste it into public tickets or chat
+- Do not store it in analytics
+- Do not expose it through HTTP referrers
+
+Lifecycle (unchanged binding rules):
+
+- `GET /i/<ticket>` delivers the bootstrap script only — it does **not** consume
+  or bind the ticket
+- Binding occurs only at `POST /bootstrap/redeem`
+- Successful enrollment completes consumption (single-use)
+
+Treat the generated one-line command as sensitive until used, expired, or
+revoked.
 
 ## 7. ECDSA management identity
 

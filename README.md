@@ -21,22 +21,22 @@ It solves the operational work around FRP:
 
 | Item | Current |
 | --- | --- |
-| Published stable release | **v2.1.1** |
-| Project version (this tree) | **2.1.2** |
+| Published stable release | **v2.1.2** |
+| Project version (this tree) | **2.1.3** |
 | Pinned / tested FRP | **v0.70.1** |
 | Default deployment mode | **Direct** |
 | Optional enterprise mode | **single-443** |
-| Published stable install source | immutable `v2.1.1` tag |
-| Next immutable tag (after final gate) | `v2.1.2` |
-| `main` branch | development channel; may contain post-v2.1.1 changes |
+| Published stable install source | immutable `v2.1.2` tag |
+| Next immutable tag (after final gate) | `v2.1.3` |
+| `main` branch | development channel; may contain post-v2.1.2 changes |
 
-Current project version: **2.1.2**
+Current project version: **2.1.3**
 Current pinned FRP version: **v0.70.1**
 
-**v2.1.1** is the **current stable release** (published tag). Stable field installs
-use the immutable `v2.1.1` tag until `v2.1.2` is tagged after the final release
-gate. This tree prepares **2.1.2** (correctness hardening, upgrade safety,
-backup/audit hardening, and transitional shorter Zero-Touch). Following
+**v2.1.2** is the **current stable release** (published tag). Stable field installs
+use the immutable `v2.1.2` tag until `v2.1.3` is tagged after the final release
+gate. This tree prepares **2.1.3** (Zero-Touch `/i/<ticket>` short URL via
+optional `bootstrap_hostname` + operator reverse proxy). Following
 mutable `main` is explicit opt-in only, for example `FRP_RELEASE_CHANNEL=dev`.
 
 On development builds, use release channel, source ref, and verified
@@ -208,19 +208,19 @@ More detail: [docs/DEPLOYMENT_MODES.md](docs/DEPLOYMENT_MODES.md)
 
 # 3. Install the server
 
-For a published stable installation, use the immutable v2.1.1 bundle:
-
-```bash
-curl -fsSL \
-  https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.1/dist/bootstrap-server.sh \
-  | sudo bash
-```
-
-After the `v2.1.2` tag exists, the project-line immutable install source is:
+For a published stable installation, use the immutable v2.1.2 bundle:
 
 ```bash
 curl -fsSL \
   https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.2/dist/bootstrap-server.sh \
+  | sudo bash
+```
+
+After the `v2.1.3` tag exists, the project-line immutable install source is:
+
+```bash
+curl -fsSL \
+  https://raw.githubusercontent.com/datarelay-labs/frp-auto-deploy/v2.1.3/dist/bootstrap-server.sh \
   | sudo bash
 ```
 
@@ -345,6 +345,21 @@ Zero-touch does **not**:
 
 The server prints a one-time install command containing a short-lived bootstrap
 ticket. Send that command securely to the remote operator and run it once.
+
+When `bootstrap_hostname` is configured and an operator reverse proxy terminates
+publicly trusted HTTPS for that name, the preferred command is:
+
+```bash
+curl -fsSL https://bootstrap.example.com/i/<opaque-ticket> | sudo bash
+```
+
+Otherwise the v2.1.2 transitional form is printed:
+
+```bash
+curl -fsSL <immutable-installer> | sudo bash -s -- 'zt1.<opaque>'
+```
+
+See `docs/ZERO_TOUCH_SHORT_URL.md`.
 
 After enrollment:
 
@@ -701,14 +716,21 @@ Automated userspace/container portability is exercised on:
 | --- | --- |
 | Ubuntu 22.04 | PASS |
 | Ubuntu 24.04 | PASS |
+| Rocky Linux 8 | PASS |
 | Rocky Linux 9 | PASS |
 | AlmaLinux 9 | PASS |
 | Amazon Linux 2023 | PASS |
 | Amazon Linux 2 | PASS |
 
+Stable scope is **Linux/systemd**. macOS and Windows are **not** stable-supported
+in 2.1.3. Design target is a few to a few dozen systems (not 100+ fleet
+orchestration).
+
 Real-environment validation and container validation are **not the same claim**.
 For example, SELinux Enforcing, native ARM64 systemd, and some older OpenSSL
-environments have separate validation gates.
+environments have separate validation gates. Rocky Linux 8.10 is a
+release-validated Short URL Real E2E platform for 2.1.3 (see
+`docs/ZERO_TOUCH_SHORT_URL.md`); that is not a Rocky 9 SELinux claim.
 
 See [docs/RELEASE_VALIDATION.md](docs/RELEASE_VALIDATION.md) for the authoritative
 support/validation classification.
@@ -789,10 +811,11 @@ curl -fsSL \
 - No automatic cloud firewall, security group, UFW, firewalld, iptables, or
   external NAT configuration
 - No automatic SSH account, password, or SSH key management
-- Windows client automation is not included
+- Windows and macOS client automation are not stable-supported
 - Some real-VM / SELinux / ARM64 / older OpenSSL combinations remain separately
   classified in the validation matrix
 - Project bootstrap scripts are checksummed, not cryptographically signed
+- Designed for a few to a few dozen systems; not a 100+ fleet orchestration product
 
 ---
 

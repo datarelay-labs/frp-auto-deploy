@@ -18,17 +18,21 @@ mutate firewall/SELinux.
 | --- | --- | --- |
 | Ubuntu 22.04 / 24.04 real VM | REQUIRED_FOR_STABLE (live baseline) | documented PASS |
 | Ubuntu 24.04 x86_64 single-443 (direct public-IP, enterprise-restricted client) | REQUIRED_FOR_STABLE (2.1.0) | PASS (2026-08-29) |
+| Rocky 8 container | REQUIRED_FOR_STABLE (automated) | container PASS |
 | Rocky 9 container | REQUIRED_FOR_STABLE (automated) | container PASS |
 | AlmaLinux 9 container | REQUIRED_FOR_STABLE (automated) | container PASS |
 | Amazon Linux 2023 container | REQUIRED_FOR_STABLE (automated) | container PASS |
 | Amazon Linux 2 container | REQUIRED_FOR_STABLE (automated) | container PASS |
+| Zero-Touch Short URL Real E2E (baseline Linux, Amazon Linux 2023, Rocky Linux 8.10) | REQUIRED_FOR_STABLE (2.1.3) | PASS; see Short URL evidence section |
 | Rocky 9 real VM | RECOMMENDED | NOT_TESTED; do not advertise full VM support |
 | Rocky 9 SELinux Enforcing | RECOMMENDED | NOT_TESTED; do not advertise Enforcing support |
 | AlmaLinux 9 real VM | RECOMMENDED | NOT_TESTED |
 | AlmaLinux 9 SELinux Enforcing | RECOMMENDED | NOT_TESTED |
-| Amazon Linux 2023 real VM | RECOMMENDED | NOT_TESTED |
+| Amazon Linux 2023 real VM | RECOMMENDED | NOT_TESTED (fresh-install matrix beyond Short URL / upgrade E2E) |
 | Amazon Linux 2 real VM / systemd 219 / TTY | RECOMMENDED | NOT_TESTED |
 | Native ARM64 systemd | RECOMMENDED | architecture mapping unit-tested only |
+| macOS | OUT_OF_SCOPE_STABLE | not stable supported |
+| Windows | OUT_OF_SCOPE_STABLE | not stable supported |
 | Real OpenSSL 1.0.2 TLS enrollment | RECOMMENDED | AL2 container userspace is not this gate |
 
 ## Result format
@@ -112,6 +116,37 @@ ticket redemption, and Enrollment on an actual OpenSSL 1.0.2 client. The
 Amazon Linux 2 container only proves userspace parsing compatibility.
 
 Until then: `REAL_OPENSSL_1_0_2_TLS_ENROLLMENT=NOT_TESTED`.
+
+## 2.1.3 Zero-Touch Short URL Real E2E
+
+Authoritative Short URL evidence for stable **2.1.3** lives in
+`docs/ZERO_TOUCH_SHORT_URL.md` (section "v2.1.3 Real E2E evidence").
+
+Summary (do not treat Docker/unit PASS as these rows):
+
+```text
+RELEASE=2.1.3
+BASELINE_LINUX=PASS
+AMAZON_LINUX_2023=PASS
+ROCKY_LINUX_8_10=PASS
+PUBLIC_TLS_STOCK_OS_TRUST=PASS
+SHORT_URL_GENERATION=PASS
+ZERO_TOUCH_ENROLLMENT=PASS
+FIRST_MACHINE_BINDING=PASS (automated suite; not in Real E2E harness)
+TICKET_SINGLE_USE=PASS (automated suite; not in Real E2E harness)
+MULTI_SERVICE=PASS (automated suite; Real E2E used --ssh profile)
+MANAGEMENT_ONLY=PASS (automated suite; not in Real E2E harness)
+REBOOT_RECONNECT=PASS
+INVALID_TLS_FAIL_CLOSED=PASS
+ZT1_FALLBACK=PASS
+TESTED_PRODUCTION_HEAD=091f9a99b5e8d648099da97457781bcd24980142
+CANDIDATE_HEAD=40bc05967ebfd93c3723a8edff206967c4711c35
+EVIDENCE_REUSED_BY_CODE_EQUIVALENCE=YES
+```
+
+Rocky Linux 8.10 is a **release-validated Short URL Real E2E platform** for
+2.1.3. That is distinct from Rocky 9 real VM / SELinux Enforcing, which remain
+`RECOMMENDED` / `NOT_TESTED`.
 
 ## 2.1.0 real-environment acceptance (2026-08-29)
 

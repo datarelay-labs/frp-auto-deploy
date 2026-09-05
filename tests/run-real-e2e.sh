@@ -131,6 +131,10 @@ patterns = [
     (re.compile(r'(token(?:_ciphertext)?\s*[:=]\s*)\S+', re.I), r'\1[REDACTED]'),
     (re.compile(r'(mgmt_mac_key\s*[:=]\s*)\S+', re.I), r'\1[REDACTED]'),
     (re.compile(r'(FRP_ENROLLMENT_CODE=)\S+'), r'\1[REDACTED]'),
+    (re.compile(r'(FRP_BOOTSTRAP_TICKET=)\S+'), r'\1[REDACTED]'),
+    (re.compile(r'bt1\.[0-9a-f]{16}\.[0-9a-f]{32,}', re.I), 'bt1.<redacted>'),
+    (re.compile(r'zt1\.[A-Za-z0-9_-]{16,}', re.I), 'zt1.<redacted>'),
+    (re.compile(r'(/i/)[^/?\s#]+', re.I), r'\1<redacted>'),
     (re.compile(r'(curl -fsSL )(\S+)'), r'\1[REDACTED_URL]'),
 ]
 for rx, repl in patterns:

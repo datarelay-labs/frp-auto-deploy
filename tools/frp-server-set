@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Set or unset the optional public hostname access alias.
+"""Set or unset optional server hostname settings.
 
-This mutates advertised/access metadata only:
-  - does not restart frps / allocator / frontend
-  - does not rotate CA, tokens, or CLIENT IDs
-  - does not change remote_port reservations
-  - does not rewrite allocator_public_url or FRP control endpoints
+Supported keys:
+  hostname            — published-service access alias (public_hostname)
+  bootstrap-hostname  — Zero-Touch public TLS bootstrap hostname
+
+These mutate advertised/bootstrap metadata only:
+  - do not restart frps / allocator / frontend
+  - do not rotate CA, tokens, or CLIENT IDs
+  - do not change remote_port reservations
+  - do not rewrite allocator_public_url or FRP control endpoints
+  - do not create DNS records, issue certificates, or configure ACME
 """
 from __future__ import annotations
 
@@ -42,15 +47,21 @@ def usage():
     print(
         'Usage:\n'
         '  frp-server-set hostname <fqdn>\n'
-        '  frp-server-set hostname --unset\n',
+        '  frp-server-set hostname --unset\n'
+        '  frp-server-set bootstrap-hostname <fqdn>\n'
+        '  frp-server-set bootstrap-hostname --unset\n',
         file=sys.stderr,
     )
     raise SystemExit(2)
 
 
 def main(argv):
-    if len(argv) < 2 or argv[0] != 'hostname':
+    if len(argv) < 2:
         usage()
+    key = argv[0]
+    if key not in ('hostname', 'bootstrap-hostname', 'bootstrap_hostname'):
+        usage()
+    normalized = 'bootstrap-hostname' if key.startswith('bootstrap') else 'hostname'
     action = argv[1]
     unset = action in ('--unset', 'unset', '')
     hostname = ''
@@ -76,10 +87,13 @@ def main(argv):
         with LOCKS.ExclusiveFileLock(LOCKS.lifecycle_lock_path(root)):
             cfg = SCFG.load_config(cfg_path)
             control = SCFG.control_host(cfg)
-            previous = SCFG.set_public_hostname(cfg, '' if unset else hostname)
-            # Keep legacy public_host mirrored to control IP/host.
-            if 'public_ip' in cfg and cfg.get('public_ip'):
-                cfg['public_host'] = str(cfg['public_ip']).strip()
+            if normalized == 'hostname':
+                previous = SCFG.set_public_hostname(cfg, '' if unset else hostname)
+                # Keep legacy public_host mirrored to control IP/host.
+                if 'public_ip' in cfg and cfg.get('public_ip'):
+                    cfg['public_host'] = str(cfg['public_ip']).strip()
+            else:
+                previous = SCFG.set_bootstrap_hostname(cfg, '' if unset else hostname)
             SCFG.atomic_write_config(cfg_path, cfg)
     except LOCKS.LockTimeout:
         fail('timed out waiting for the server lifecycle lock')
@@ -90,30 +104,61 @@ def main(argv):
 
     try:
         AUDIT = _load('frp_audit', 'frp_audit.py')
+        if normalized == 'hostname':
+            event_set = 'server.hostname_set'
+            event_unset = 'server.hostname_unset'
+            details_host = SCFG.public_hostname(cfg)
+        else:
+            event_set = 'server.bootstrap_hostname_set'
+            event_unset = 'server.bootstrap_hostname_unset'
+            details_host = SCFG.bootstrap_hostname(cfg)
         if unset:
             AUDIT.try_emit(
-                'server.hostname_unset',
+                event_unset,
                 actor='frp-server-set',
                 details={'previous': previous or ''},
             )
         else:
             AUDIT.try_emit(
-                'server.hostname_set',
+                event_set,
                 actor='frp-server-set',
-                details={'hostname': SCFG.public_hostname(cfg), 'previous': previous or ''},
+                details={'hostname': details_host, 'previous': previous or ''},
             )
     except Exception:
         pass
 
-    if unset:
-        print('Public hostname unset.')
-        print('Published service access falls back to the Public IP (%s).' % control)
+    if normalized == 'hostname':
+        if unset:
+            print('Public hostname unset.')
+            print('Published service access falls back to the Public IP (%s).' % control)
+            return 0
+        alias = SCFG.public_hostname(cfg)
+        print(SCFG.dns_record_guidance(alias, control))
+        print()
+        print('FRP control endpoint is unchanged: %s' % control)
+        print('No services were restarted.')
         return 0
 
-    alias = SCFG.public_hostname(cfg)
-    print(SCFG.dns_record_guidance(alias, control))
+    if unset:
+        print('Bootstrap hostname unset.')
+        print('Zero-Touch short URL commands fall back to the zt1 opaque package form.')
+        print('No DNS, certificate, or reverse-proxy changes were made.')
+        return 0
+
+    alias = SCFG.bootstrap_hostname(cfg)
+    print('Bootstrap hostname set: %s' % alias)
     print()
-    print('FRP control endpoint is unchanged: %s' % control)
+    print('This name is used only for publicly trusted Zero-Touch short URL bootstrap.')
+    print('It is not the published-service access alias (public hostname).')
+    print('It is not the FRP control endpoint or Private CA identity.')
+    print()
+    print('Operator responsibilities (not performed by FRP Auto Deploy):')
+    print('  - create DNS for %s' % alias)
+    print('  - terminate publicly trusted HTTPS on an operator reverse proxy')
+    print('  - renew the public certificate')
+    print('  - proxy the required bootstrap paths to the allocator')
+    print()
+    print('See docs/ZERO_TOUCH_SHORT_URL.md')
     print('No services were restarted.')
     return 0
 
