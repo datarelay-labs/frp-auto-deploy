@@ -318,7 +318,7 @@ frpctl_grammar_payload() {
 import json, sys
 from pathlib import Path
 role, cfg_path, root, state_path = sys.argv[1:5]
-names, services, local_services, clients_meta = [], {}, [], []
+names, services, local_services, clients_meta, groups = [], {}, [], [], []
 inventory_warning = False
 server_role = role in ("server", "both", "dual")
 client_role = role in ("client", "both", "dual")
@@ -357,6 +357,13 @@ if cfg.is_file():
                 if isinstance(client, dict)
             ]
             mids = [mid for mid, _client in items]
+            raw_groups = (state or {}).get("groups") or {}
+            if isinstance(raw_groups, dict):
+                for gid, group in raw_groups.items():
+                    if isinstance(group, dict):
+                        groups.extend([str(gid), str(group.get("name") or "")])
+            else:
+                inventory_warning = True
             for mid, client in items:
                 cid = unique_short(mid, mids)
                 if not cid or "\n" in cid or "\r" in cid:
@@ -400,6 +407,7 @@ json.dump({
     "clients": clients_meta,
     "services": services,
     "local_services": local_services,
+    "groups": sorted(set(item for item in groups if item)),
     "inventory_warning": inventory_warning,
 }, sys.stdout)
 PY
@@ -1425,7 +1433,7 @@ frpctl_known_commands() {
   local client=0 server=0
   frpctl_is_client && client=1
   frpctl_is_server && server=1
-  printf '%s\n' help menu status doctor version update clear exit quit q history show
+    printf '%s\n' help menu status doctor version update clear exit quit q history show
   if [[ "$client" == "1" ]]; then
     printf '%s\n' services manage info client-status client-update \
       add enable disable apply discard set
@@ -1435,7 +1443,7 @@ frpctl_known_commands() {
       enroll-bulk enrollments enrollment-revoke enrollment-purge \
       revoke revoke-client release-service release-client \
       backup restore project-update frp-update upstream audit \
-      server-status server-update set unset create release purge
+      server-status server-update set unset create release purge add remove delete rename
   fi
 }
 
@@ -1799,6 +1807,11 @@ frpctl_dispatch_canonical() {
     show_status) frpctl_status $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
     show_version) echo; frpctl_print_version; echo ;;
     show_clients) frpctl_require_server || return 1; frpctl_invoke frp-clients $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
+    show_groups) frpctl_require_server || return 1; frpctl_invoke frp-groups ;;
+    show_group)
+      frpctl_require_server || return 1
+      frpctl_invoke frp-groups "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("group",""))' "$result")"
+      ;;
     show_client)
       frpctl_require_server || return 1
       frpctl_invoke frp-client-info \
@@ -1818,6 +1831,13 @@ frpctl_dispatch_canonical() {
     set_client)
       frpctl_require_server || return 1
       frpctl_set_client_from_canon "$result"
+      ;;
+    set_group)
+      frpctl_require_server || return 1
+      frpctl_invoke frp-group-set set \
+        "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("group",""))' "$result")" \
+        "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("property",""))' "$result")" \
+        "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("value",""))' "$result")"
       ;;
     unset_client)
       frpctl_require_server || return 1
@@ -1868,6 +1888,31 @@ frpctl_dispatch_canonical() {
     create_enrollment) frpctl_require_server || return 1; frpctl_invoke frp-create-client $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
     create_enrollments) frpctl_require_server || return 1; frpctl_invoke frp-enroll-bulk $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
     create_backup) frpctl_require_server || return 1; frpctl_run frp-backup $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
+    create_group)
+      frpctl_require_server || return 1
+      if [[ -n "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("description",""))' "$result")" ]]; then
+        frpctl_invoke frp-group-set create \
+          "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("name",""))' "$result")" \
+          --description \
+          "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("description",""))' "$result")"
+      else
+        frpctl_invoke frp-group-set create \
+          "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("name",""))' "$result")"
+      fi
+      ;;
+    delete_group) frpctl_require_server || return 1; frpctl_invoke frp-group-set delete "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("group",""))' "$result")" ;;
+    add_group_member)
+      frpctl_require_server || return 1
+      frpctl_invoke frp-group-set add-member \
+        "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("client",""))' "$result")" \
+        "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("group",""))' "$result")"
+      ;;
+    remove_group_member)
+      frpctl_require_server || return 1
+      frpctl_invoke frp-group-set remove-member \
+        "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("client",""))' "$result")" \
+        "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("group",""))' "$result")"
+      ;;
     revoke_client) frpctl_require_server || return 1; frpctl_invoke frp-revoke-client "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("client",""))' "$result")" $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
     revoke_enrollment) frpctl_require_server || return 1; frpctl_invoke frp-enrollment-revoke "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("id",""))' "$result")" ;;
     purge_enrollment) frpctl_require_server || return 1; frpctl_invoke frp-enrollment-purge enrollment "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("id",""))' "$result")" ;;

@@ -53,6 +53,8 @@ files=[
  'tools/frp-enroll-bulk',
  'tools/frp-clients',
  'tools/frp-client-info',
+ 'tools/frp-groups',
+ 'tools/frp-group-set',
  'tools/frp-release-client',
  'tools/frp-release-service',
  'tools/frp-revoke-client',

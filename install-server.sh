@@ -37,6 +37,8 @@ for f in \
   "$BASE_DIR/tools/frp-enroll-bulk" \
   "$BASE_DIR/tools/frp-clients" \
   "$BASE_DIR/tools/frp-client-info" \
+  "$BASE_DIR/tools/frp-groups" \
+  "$BASE_DIR/tools/frp-group-set" \
   "$BASE_DIR/tools/frp-release-client" \
   "$BASE_DIR/tools/frp-release-service" \
   "$BASE_DIR/tools/frp-revoke-client" \
