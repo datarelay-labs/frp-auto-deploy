@@ -380,11 +380,16 @@ def bootstrap_file_path(bootstrap_dir, ticket_id):
     return Path(bootstrap_dir) / (ticket_id.lower() + '.json')
 
 
-def cleanup_expired_bootstrap_tickets(bootstrap_dir, now=None, keep_id=None, cfg=None, force=False):
+def cleanup_expired_bootstrap_tickets(
+    bootstrap_dir, now=None, keep_id=None, cfg=None, force=False, already_locked=False
+):
     """Pair-aware retention cleanup for terminal enrollment metadata.
 
     Active / in-retention terminal records are preserved. keep_id is accepted
     for call-site compatibility and is unused (cleanup never targets active rows).
+
+    already_locked=True when the caller already holds registry.lock (e.g.
+    /bootstrap/redeem). Retention must not reacquire the flock in that case.
     """
     del keep_id
     if ELC is None or not cfg:
@@ -395,6 +400,7 @@ def cleanup_expired_bootstrap_tickets(bootstrap_dir, now=None, keep_id=None, cfg
             force=force,
             audit_emit=ELC.load_audit_emit(),
             now=now,
+            already_locked=already_locked,
         )
     except Exception:
         return
@@ -920,13 +926,16 @@ class Allocator:
     def save_bootstrap(self, path, record):
         atomic_write_json(path, record, mode=0o600)
 
-    def cleanup_expired_bootstrap_tickets(self, now=None, keep_id=None, force=False):
+    def cleanup_expired_bootstrap_tickets(
+        self, now=None, keep_id=None, force=False, already_locked=False
+    ):
         cleanup_expired_bootstrap_tickets(
             self.bootstrap_dir,
             now,
             keep_id=keep_id,
             cfg=self.cfg,
             force=force,
+            already_locked=already_locked,
         )
 
     def issue_bootstrap_ticket(self, services, ttl, note='', label=''):
@@ -1037,7 +1046,10 @@ class Allocator:
         try:
             with LOCK:
                 with self.registry_lock():
-                    self.cleanup_expired_bootstrap_tickets(keep_id=ticket_id)
+                    # Retention must not reacquire registry.lock (nested flock deadlock).
+                    self.cleanup_expired_bootstrap_tickets(
+                        keep_id=ticket_id, force=True, already_locked=True
+                    )
                     record = None
                     path = None
                     stored_hash = BOOTSTRAP_DUMMY_HASH
@@ -1367,7 +1379,69 @@ class Allocator:
         expected = hmac_hex(secret, timestamp + '\n' + body.decode())
         if not hmac.compare_digest(expected, signature or ''):
             return None, None, 'invalid signature'
+        # used_at is intentionally NOT rejected here: enroll() distinguishes
+        # exact lost-response idempotent retry from authority-changing reuse.
         return record, path, None
+
+    def _used_enrollment_idempotent_replay(self, client, payload, requested):
+        """Allow exact lost-response retry of an already-consumed Enrollment Code.
+
+        Requires same machine (caller), same management public key, and the same
+        enabled service set. Rejects any authority / identity change.
+        Returns (allocated_list, error_message).
+        """
+        if not isinstance(client, dict):
+            return None, 'enrollment code already used'
+        raw = payload.get('mgmt_pubkey')
+        stored_pem = client.get('mgmt_pubkey')
+        if raw not in (None, ''):
+            try:
+                presented = MGMT.canonicalize_pubkey_pem(raw)
+            except Exception:
+                return None, 'invalid management public key'
+            if not stored_pem:
+                return None, 'enrollment code already used'
+            try:
+                stored = MGMT.canonicalize_pubkey_pem(stored_pem)
+            except Exception:
+                return None, 'enrollment code already used'
+            if presented != stored:
+                return None, 'enrollment code already used'
+        elif stored_pem:
+            # Prior enrollment established an identity; retry must present it.
+            return None, 'enrollment code already used'
+
+        existing = client.get('services') or {}
+        if not isinstance(existing, dict):
+            return None, 'enrollment code already used'
+        enabled_ids = {
+            sid for sid, rec in existing.items()
+            if isinstance(rec, dict) and rec.get('enabled')
+        }
+        requested_ids = {spec['id'] for spec in requested}
+        if enabled_ids != requested_ids:
+            return None, 'enrollment code already used'
+        allocated = []
+        for spec in requested:
+            prev = existing.get(spec['id']) or {}
+            if not isinstance(prev, dict) or not prev.get('enabled'):
+                return None, 'enrollment code already used'
+            try:
+                prev_port = int(prev.get('local_port'))
+                want_port = int(spec['local_port'])
+            except (TypeError, ValueError):
+                return None, 'enrollment code already used'
+            if (
+                str(prev.get('local_ip') or '') != str(spec.get('local_ip') or '')
+                or prev_port != want_port
+                or str(prev.get('preset') or '') != str(spec.get('preset') or '')
+            ):
+                return None, 'enrollment code already used'
+            remote_port = coerce_port(prev.get('remote_port'))
+            if remote_port is None:
+                return None, 'enrollment code already used'
+            allocated.append({'id': spec['id'], 'remote_port': remote_port})
+        return allocated, None
 
     def reconcile_client_registry(self, machine_id, headers, body, peer_host=None):
         registry_service_ids = []
@@ -1500,19 +1574,23 @@ class Allocator:
                     state = self.load_registry()
                     clients = state.setdefault('clients', {})
                     client = clients.get(machine_id)
-                    previous_client = (
-                        json.loads(json.dumps(client))
-                        if isinstance(client, dict)
-                        else None
-                    )
-                    previous_enrollment = (
-                        json.loads(json.dumps(record))
-                        if isinstance(record, dict)
-                        else None
-                    )
-                    now_iso = utc_now_iso()
 
-                    if identity_auth:
+                    if not identity_auth and record is not None and record.get('used_at'):
+                        # Consumed Enrollment Codes are not fresh credentials.
+                        # Exact lost-response retry (same machine, same mgmt key,
+                        # same services) may recover the committed response.
+                        # Any authority change requires a new Enrollment Code.
+                        if not bound_machine_id:
+                            return 403, api_error(
+                                'enrollment code already used', 'AUTH_FAILED'
+                            )
+                        allocated, replay_error = self._used_enrollment_idempotent_replay(
+                            client, payload, requested
+                        )
+                        if replay_error:
+                            return 403, api_error(replay_error, 'AUTH_FAILED')
+                    elif identity_auth:
+                        now_iso = utc_now_iso()
                         error, _now, pending_nonce = self.verify_mgmt_against_client(
                             client, machine_id, headers, body
                         )
@@ -1531,128 +1609,197 @@ class Allocator:
                                     'management public key does not match this client',
                                     'AUTH_FAILED',
                                 )
-                    elif client is None:
-                        client = {
-                            'hostname': hostname,
-                            'created_at': now_iso,
-                            'last_enrolled_at': now_iso,
-                            'mgmt_status': 'legacy',
-                            'services': {},
-                        }
-                        CREG.seed_admin_metadata(
-                            client,
-                            label=(record or {}).get('label'),
-                            note=(record or {}).get('note'),
-                        )
-                        clients[machine_id] = client
-                    else:
+                        if client is None:
+                            return 403, api_error('unknown client identity', 'AUTH_FAILED')
                         client['hostname'] = hostname or client.get('hostname', '')
                         client['last_enrolled_at'] = now_iso
                         if not isinstance(client.get('services'), dict):
                             client['services'] = {}
+                        CREG.apply_observed_fields(
+                            client,
+                            hostname=hostname,
+                            source_ip=source_ip,
+                            seen_at=now_iso,
+                        )
+                        CREG.seed_admin_metadata(
+                            client,
+                            label=(record or {}).get('label'),
+                            note=(record or {}).get('note'),
+                        )
+                        existing_services = dict(client.get('services') or {})
+                        used = self.used_ports(state)
+                        updated = {}
+                        requested_ids = {svc['id'] for svc in requested}
+
+                        for sid, rec in existing_services.items():
+                            if sid in requested_ids:
+                                continue
+                            kept = dict(rec)
+                            kept['enabled'] = False
+                            updated[sid] = kept
+
+                        allocated = []
+                        for spec in requested:
+                            sid = spec['id']
+                            previous = existing_services.get(sid) or {}
+                            remote_port = coerce_port(previous.get('remote_port'))
+                            if remote_port is None:
+                                remote_port = self.allocate_port(used)
+                                used.add(remote_port)
+                            stored = {
+                                'name': spec['name'],
+                                'protocol': 'tcp',
+                                'local_ip': spec['local_ip'],
+                                'local_port': spec['local_port'],
+                                'remote_port': remote_port,
+                                'preset': spec['preset'],
+                                'enabled': True,
+                            }
+                            if spec['preset'] == 'ssh':
+                                stored['ssh_user'] = spec['ssh_user']
+                            updated[sid] = stored
+                            allocated.append({
+                                'id': sid,
+                                'remote_port': remote_port,
+                            })
+
+                        client['services'] = updated
+                        self.save_registry(state)
+
+                        if pending_nonce:
+                            nonce_error = self.commit_nonce(
+                                machine_id, pending_nonce, int(time.time())
+                            )
+                            if nonce_error:
+                                return 403, api_error(
+                                    nonce_error, classify_auth_error(nonce_error)
+                                )
+                        response_mac_key = client.get('mgmt_mac_key')
+                    else:
+                        previous_client = (
+                            json.loads(json.dumps(client))
+                            if isinstance(client, dict)
+                            else None
+                        )
+                        previous_enrollment = (
+                            json.loads(json.dumps(record))
+                            if isinstance(record, dict)
+                            else None
+                        )
+                        now_iso = utc_now_iso()
+
+                        if client is None:
+                            client = {
+                                'hostname': hostname,
+                                'created_at': now_iso,
+                                'last_enrolled_at': now_iso,
+                                'mgmt_status': 'legacy',
+                                'services': {},
+                            }
+                            CREG.seed_admin_metadata(
+                                client,
+                                label=(record or {}).get('label'),
+                                note=(record or {}).get('note'),
+                            )
+                            clients[machine_id] = client
+                        else:
+                            client['hostname'] = hostname or client.get('hostname', '')
+                            client['last_enrolled_at'] = now_iso
+                            if not isinstance(client.get('services'), dict):
+                                client['services'] = {}
+                            CREG.seed_admin_metadata(
+                                client,
+                                label=(record or {}).get('label'),
+                                note=(record or {}).get('note'),
+                            )
+
+                        if client is None:
+                            return 403, api_error('unknown client identity', 'AUTH_FAILED')
+                        client['hostname'] = hostname or client.get('hostname', '')
+                        client['last_enrolled_at'] = now_iso
+                        if not isinstance(client.get('services'), dict):
+                            client['services'] = {}
+                        CREG.apply_observed_fields(
+                            client,
+                            hostname=hostname,
+                            source_ip=source_ip,
+                            seen_at=now_iso,
+                        )
                         CREG.seed_admin_metadata(
                             client,
                             label=(record or {}).get('label'),
                             note=(record or {}).get('note'),
                         )
 
-                    if client is None:
-                        return 403, api_error('unknown client identity', 'AUTH_FAILED')
-                    client['hostname'] = hostname or client.get('hostname', '')
-                    client['last_enrolled_at'] = now_iso
-                    if not isinstance(client.get('services'), dict):
-                        client['services'] = {}
-                    CREG.apply_observed_fields(
-                        client,
-                        hostname=hostname,
-                        source_ip=source_ip,
-                        seen_at=now_iso,
-                    )
-                    CREG.seed_admin_metadata(
-                        client,
-                        label=(record or {}).get('label'),
-                        note=(record or {}).get('note'),
-                    )
-
-                    if not identity_auth:
                         issued_mac, ident_error = self.register_mgmt_identity(
                             client, payload, record['secret'], machine_id
                         )
                         if ident_error:
                             return 400, api_error(ident_error, 'AUTH_FAILED')
 
-                    existing_services = dict(client.get('services') or {})
-                    used = self.used_ports(state)
-                    updated = {}
-                    requested_ids = {svc['id'] for svc in requested}
+                        existing_services = dict(client.get('services') or {})
+                        used = self.used_ports(state)
+                        updated = {}
+                        requested_ids = {svc['id'] for svc in requested}
 
-                    for sid, rec in existing_services.items():
-                        if sid in requested_ids:
-                            continue
-                        kept = dict(rec)
-                        kept['enabled'] = False
-                        updated[sid] = kept
+                        for sid, rec in existing_services.items():
+                            if sid in requested_ids:
+                                continue
+                            kept = dict(rec)
+                            kept['enabled'] = False
+                            updated[sid] = kept
 
-                    allocated = []
-                    for spec in requested:
-                        sid = spec['id']
-                        previous = existing_services.get(sid) or {}
-                        remote_port = coerce_port(previous.get('remote_port'))
-                        if remote_port is None:
-                            remote_port = self.allocate_port(used)
-                            used.add(remote_port)
-                        stored = {
-                            'name': spec['name'],
-                            'protocol': 'tcp',
-                            'local_ip': spec['local_ip'],
-                            'local_port': spec['local_port'],
-                            'remote_port': remote_port,
-                            'preset': spec['preset'],
-                            'enabled': True,
-                        }
-                        if spec['preset'] == 'ssh':
-                            stored['ssh_user'] = spec['ssh_user']
-                        updated[sid] = stored
-                        allocated.append({
-                            'id': sid,
-                            'remote_port': remote_port,
-                        })
+                        allocated = []
+                        for spec in requested:
+                            sid = spec['id']
+                            previous = existing_services.get(sid) or {}
+                            remote_port = coerce_port(previous.get('remote_port'))
+                            if remote_port is None:
+                                remote_port = self.allocate_port(used)
+                                used.add(remote_port)
+                            stored = {
+                                'name': spec['name'],
+                                'protocol': 'tcp',
+                                'local_ip': spec['local_ip'],
+                                'local_port': spec['local_port'],
+                                'remote_port': remote_port,
+                                'preset': spec['preset'],
+                                'enabled': True,
+                            }
+                            if spec['preset'] == 'ssh':
+                                stored['ssh_user'] = spec['ssh_user']
+                            updated[sid] = stored
+                            allocated.append({
+                                'id': sid,
+                                'remote_port': remote_port,
+                            })
 
-                    client['services'] = updated
-                    self.save_registry(state)
+                        client['services'] = updated
+                        self.save_registry(state)
 
-                    if pending_nonce:
-                        nonce_error = self.commit_nonce(
-                            machine_id, pending_nonce, int(time.time())
-                        )
-                        if nonce_error:
-                            return 403, api_error(
-                                nonce_error, classify_auth_error(nonce_error)
+                        if record is not None and enroll_path is not None:
+                            record['bound_machine_id'] = machine_id
+                            record['used_at'] = record.get('used_at') or now_iso
+                            record['last_used_at'] = now_iso
+                            self.save_enrollment(enroll_path, record)
+                            completed = self.complete_bootstrap_for_enrollment(
+                                record.get('id') or enrollment_id, machine_id
                             )
-
-                    if record is not None and enroll_path is not None:
-                        record['bound_machine_id'] = machine_id
-                        record['used_at'] = record.get('used_at') or now_iso
-                        record['last_used_at'] = now_iso
-                        self.save_enrollment(enroll_path, record)
-                        completed = self.complete_bootstrap_for_enrollment(
-                            record.get('id') or enrollment_id, machine_id
-                        )
-                        if not completed:
-                            # Fail closed: never report enrollment success while the
-                            # bootstrap ticket remains reusable. Roll back registry
-                            # and enrollment mutations from this attempt.
-                            if previous_client is None:
-                                clients.pop(machine_id, None)
-                            else:
-                                clients[machine_id] = previous_client
-                            self.save_registry(state)
-                            if previous_enrollment is not None:
-                                self.save_enrollment(enroll_path, previous_enrollment)
-                            raise OSError(
-                                'failed to consume bootstrap ticket after enrollment'
-                            )
-                    response_mac_key = client.get('mgmt_mac_key') if identity_auth else None
+                            if not completed:
+                                # Fail closed: never report enrollment success while the
+                                # bootstrap ticket remains reusable. Roll back registry
+                                # and enrollment mutations from this attempt.
+                                if previous_client is None:
+                                    clients.pop(machine_id, None)
+                                else:
+                                    clients[machine_id] = previous_client
+                                self.save_registry(state)
+                                if previous_enrollment is not None:
+                                    self.save_enrollment(enroll_path, previous_enrollment)
+                                raise OSError(
+                                    'failed to consume bootstrap ticket after enrollment'
+                                )
+                        response_mac_key = None
         except RegistrySchemaError as exc:
             print('allocator registry error: %s' % exc, flush=True)
             return 500, api_error(

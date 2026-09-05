@@ -9,6 +9,16 @@ Lock order (mandatory whenever an operation takes both):
 Allocator HTTP writers take only registry.lock (plus an in-process thread
 lock). They must never acquire the lifecycle lock after registry.lock.
 
+Inside an allocator registry.lock transaction the order is:
+
+  1. threading LOCK
+  2. registry.lock (FileLock / flock)
+  3. retention cleanup via run_retention_cleanup_locked (no nested flock)
+  4. enrollment / bootstrap / nonce filesystem writes
+
+Never reacquire registry.lock through a second fd while it is already held —
+Linux flock is not recursive across independent descriptors.
+
 Backup and restore take lifecycle then registry, with a timeout, so they
 cannot block network operations indefinitely if a lifecycle holder is stuck.
 """

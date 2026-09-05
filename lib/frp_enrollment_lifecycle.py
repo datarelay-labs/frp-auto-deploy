@@ -314,6 +314,7 @@ def resolve_target(rows, target_id):
 
 
 def _stage_delete(path):
+    """Rename original → *.purging. Returns staged path or None if absent."""
     if path is None or not Path(path).is_file():
         return None
     path = Path(path)
@@ -323,6 +324,7 @@ def _stage_delete(path):
 
 
 def _commit_staged_deletes(staged_paths):
+    """Unlink tombstones (garbage collection only). Never rolls back originals."""
     errors = []
     for staged in staged_paths:
         if staged is None:
@@ -335,6 +337,7 @@ def _commit_staged_deletes(staged_paths):
 
 
 def _rollback_staged(staged_paths):
+    """Restore originals from *.purging. Only valid BEFORE the commit point."""
     for staged in staged_paths:
         if staged is None:
             continue
@@ -352,6 +355,14 @@ def _rollback_staged(staged_paths):
 
 
 def _delete_targets(row):
+    """Pair-aware filesystem delete with an explicit commit point.
+
+    Before commit (all renames to *.purging succeed):
+      any rename failure → restore every staged original.
+    After commit:
+      unlink is GC only; unlink failure leaves *.purging tombstones
+      and must NOT restore half the pair.
+    """
     staged = []
     targets = []
     if row.get('enroll_path'):
@@ -361,12 +372,29 @@ def _delete_targets(row):
     try:
         for path in targets:
             staged.append(_stage_delete(path))
-        errors = _commit_staged_deletes(staged)
-        if errors:
-            raise EnrollmentLifecycleError('ERROR: purge failed: %s' % '; '.join(errors))
     except Exception:
+        # Pre-commit: restore anything already staged.
         _rollback_staged(staged)
         raise
+    # Commit point: every original has been renamed to a tombstone.
+    # Logical deletion is complete even if unlinks fail.
+    _commit_staged_deletes(staged)
+
+
+def reconcile_stale_tombstones(enrollments_dir, bootstrap_dir):
+    """Unlink leftover *.json.purging tombstones from prior GC failures."""
+    removed = 0
+    for base in (enrollments_dir, bootstrap_dir):
+        base = Path(base) if base else None
+        if base is None or not base.is_dir():
+            continue
+        for path in base.glob('*.json.purging'):
+            try:
+                path.unlink(missing_ok=True)
+                removed += 1
+            except OSError:
+                pass
+    return removed
 
 
 def _registry_lock(registry_file):
@@ -505,7 +533,7 @@ def bulk_purge_enrollments(
     return purged, preview
 
 
-def run_retention_cleanup(
+def run_retention_cleanup_locked(
     enrollments_dir,
     bootstrap_dir,
     registry_file,
@@ -514,26 +542,32 @@ def run_retention_cleanup(
     audit_emit=None,
     now=None,
 ):
+    """Run retention cleanup assuming the caller already owns registry.lock.
+
+    Never reacquires registry.lock. Callers that hold the allocator FileLock
+    (or any other exclusive flock on registry.lock) MUST use this entry point
+    — Linux flock is not recursive across independent file descriptors.
+
+    Lock order (allocator HTTP writers):
+      1. in-process LOCK (threading)
+      2. registry.lock
+      3. retention cleanup (this function; no additional flock)
+      4. enrollment / bootstrap / nonce writes under the same registry.lock
+    """
+    del registry_file  # retained for call-site symmetry with the locking wrapper
     now = int(now if now is not None else time.time())
+    reconcile_stale_tombstones(enrollments_dir, bootstrap_dir)
     rows = collect_logical_enrollments(enrollments_dir, bootstrap_dir, now)
     eligible = [row for row in rows if is_retention_eligible(row, now, retention_days)]
-    if not eligible:
-        return {'purged': 0, 'skipped_pairs': 0}
-    lock_fd = _registry_lock(registry_file)
     purged = 0
-    try:
-        rows = collect_logical_enrollments(enrollments_dir, bootstrap_dir, now)
-        eligible = [row for row in rows if is_retention_eligible(row, now, retention_days)]
-        for row in eligible:
-            purge_enrollment_row(
-                row,
-                audit_emit=audit_emit,
-                reason='retention',
-                retention_days=retention_days,
-            )
-            purged += 1
-    finally:
-        _release_lock(lock_fd)
+    for row in eligible:
+        purge_enrollment_row(
+            row,
+            audit_emit=audit_emit,
+            reason='retention',
+            retention_days=retention_days,
+        )
+        purged += 1
     if audit_emit and purged:
         audit_emit(
             'enrollment.retention_cleanup',
@@ -546,13 +580,63 @@ def run_retention_cleanup(
     return {'purged': purged}
 
 
+def run_retention_cleanup(
+    enrollments_dir,
+    bootstrap_dir,
+    registry_file,
+    retention_days,
+    *,
+    audit_emit=None,
+    now=None,
+):
+    """Acquire registry.lock then run retention cleanup.
+
+    Prefer run_retention_cleanup_locked when the caller already holds the lock.
+    """
+    now = int(now if now is not None else time.time())
+    # Cheap pre-check without the lock; re-check under the lock.
+    rows = collect_logical_enrollments(enrollments_dir, bootstrap_dir, now)
+    eligible = [row for row in rows if is_retention_eligible(row, now, retention_days)]
+    # Always reconcile tombstones (may exist with zero eligible rows).
+    needs_lock = bool(eligible)
+    if not needs_lock:
+        # Still need the lock briefly if tombstones may exist; cheap path:
+        # attempt tombstone GC under the lock only when any .purging is present.
+        for base in (enrollments_dir, bootstrap_dir):
+            base = Path(base) if base else None
+            if base is not None and base.is_dir() and any(base.glob('*.json.purging')):
+                needs_lock = True
+                break
+    if not needs_lock:
+        return {'purged': 0, 'skipped_pairs': 0}
+    lock_fd = _registry_lock(registry_file)
+    try:
+        return run_retention_cleanup_locked(
+            enrollments_dir,
+            bootstrap_dir,
+            registry_file,
+            retention_days,
+            audit_emit=audit_emit,
+            now=now,
+        )
+    finally:
+        _release_lock(lock_fd)
+
+
 def maybe_run_retention_cleanup(
     cfg,
     *,
     force=False,
     audit_emit=None,
     now=None,
+    already_locked=False,
 ):
+    """Throttle wrapper around retention cleanup.
+
+    already_locked=True: caller owns registry.lock; never reacquire (use
+    run_retention_cleanup_locked). Required for allocator redeem / enroll
+    paths that already hold FileLock(registry.lock).
+    """
     global _last_retention_cleanup
     now_ts = time.time()
     if not force and now_ts - _last_retention_cleanup < RETENTION_CLEANUP_MIN_INTERVAL:
@@ -563,14 +647,24 @@ def maybe_run_retention_cleanup(
         return {'skipped': True, 'purged': 0}
     bootstrap_dir = cfg.get('bootstrap_dir') or str(Path(enrollments_dir).parent / 'bootstrap')
     registry_file = cfg.get('registry_file') or str(Path(enrollments_dir).parent / 'registry.json')
-    result = run_retention_cleanup(
-        enrollments_dir,
-        bootstrap_dir,
-        registry_file,
-        retention_days,
-        audit_emit=audit_emit,
-        now=now,
-    )
+    if already_locked:
+        result = run_retention_cleanup_locked(
+            enrollments_dir,
+            bootstrap_dir,
+            registry_file,
+            retention_days,
+            audit_emit=audit_emit,
+            now=now,
+        )
+    else:
+        result = run_retention_cleanup(
+            enrollments_dir,
+            bootstrap_dir,
+            registry_file,
+            retention_days,
+            audit_emit=audit_emit,
+            now=now,
+        )
     _last_retention_cleanup = now_ts
     result['skipped'] = False
     return result
