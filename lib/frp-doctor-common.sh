@@ -50,7 +50,8 @@ frp_doctor_root() {
 }
 
 frp_doctor_fs() {
-  local p="$1"
+  local p
+  p="$(frp_platform_map_path "$1")"
   local root
   root="$(frp_doctor_root)"
   if [[ -n "$root" ]]; then

@@ -13,11 +13,17 @@ if [[ -f "${_FRPCTL_DIR}/../lib/frp-doctor-common.sh" ]]; then
 elif [[ -f /usr/local/lib/frp-auto-deploy/frp-doctor-common.sh ]]; then
   # shellcheck disable=SC1091
   . /usr/local/lib/frp-auto-deploy/frp-doctor-common.sh
+elif [[ -f '/Library/Application Support/frp-auto-deploy/lib/frp-doctor-common.sh' ]]; then
+  # shellcheck disable=SC1091
+  . '/Library/Application Support/frp-auto-deploy/lib/frp-doctor-common.sh'
 fi
 
 frpctl_path() {
   local p="$1"
   local root="${FRP_CTL_TEST_ROOT:-${FRP_CLIENT_TEST_ROOT:-${FRP_DEPLOY_TEST_ROOT:-${FRP_UPDATE_ROOT:-}}}}"
+  if declare -F frp_platform_map_path >/dev/null 2>&1; then
+    p="$(frp_platform_map_path "$p")"
+  fi
   if [[ -n "$root" ]]; then
     printf '%s' "${root}${p}"
   else

@@ -14,6 +14,7 @@
       "status": "tested",
       "amd64_sha256": "333da23d1b9009d7c01638e9ba38cf4600f7d37d393f854e96ee1396adefa9a6",
       "arm64_sha256": "3990f396a9a490ee7f0e5f355287750ed41520064ed999eab443b5e9a78d773d",
+      "darwin_arm64_sha256": "cfa733b5a261c1647edee3c1fc4133d2542989b28f5602e81d47fc821d25c55f",
       "websocket_path": "/~!frp"
     }
   },
@@ -31,7 +32,7 @@
     "bootstrap-client.sh": {
       "path": "dist/bootstrap-client.sh",
       "url_path": "dist/bootstrap-client.sh",
-      "sha256": "b7dd9d75193f2b82343d96adb3e6453d09fdc0fa84006d22765fae5f5d06c3ec"
+      "sha256": "fa1c5524d130116ff57c1621ce5f3881caa3a6a4357b0687cb7e8af4284e2fd7"
     },
     "bootstrap-server.sh": {
       "path": "dist/bootstrap-server.sh",

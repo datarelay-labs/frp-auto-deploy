@@ -26,6 +26,9 @@ if [[ -z "${FRP_COMMON_LOADED:-}" ]]; then
   elif [[ -f /usr/local/lib/frp-auto-deploy/frp-common.sh ]]; then
     # shellcheck disable=SC1091
     . /usr/local/lib/frp-auto-deploy/frp-common.sh
+  elif [[ -f '/Library/Application Support/frp-auto-deploy/lib/frp-common.sh' ]]; then
+    # shellcheck disable=SC1091
+    . '/Library/Application Support/frp-auto-deploy/lib/frp-common.sh'
   fi
 fi
 if [[ -z "${FRP_CLIENT_UPDATE_URL:-}" ]]; then
@@ -36,7 +39,8 @@ if [[ -z "${FRP_CLIENT_UPDATE_METADATA_URL:-}" ]]; then
 fi
 
 frp_client_path() {
-  local p="$1"
+  local p
+  p="$(frp_platform_map_path "$1")"
   if [[ -n "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
     printf '%s' "${FRP_CLIENT_TEST_ROOT}${p}"
   else
@@ -1967,7 +1971,11 @@ wait_for_proxies() {
   local i
   for i in {1..20}; do
     sleep 1
-    logs="$(journalctl -u frpc -n 400 --no-pager 2>/dev/null || true)"
+    if frp_is_darwin; then
+      logs="$(frp_macos_recent_logs 400 2>/dev/null || true)"
+    else
+      logs="$(journalctl -u frpc -n 400 --no-pager 2>/dev/null || true)"
+    fi
     if ! grep -q 'login to server success' <<<"$logs"; then
       continue
     fi
@@ -3249,13 +3257,32 @@ frp_client_restart() {
   frp_client_hook_log restart
   if [[ "${FRP_CLIENT_HOOK_RESTART_FAIL:-}" == "1" ]]; then
     FRP_CLIENT_HOOK_RESTART_FAIL=0
-    echo "ERROR: simulated systemctl restart failure" >&2
+    echo "ERROR: simulated service restart failure" >&2
     return 1
   fi
   if [[ "${FRP_SKIP_SYSTEMD:-}" == "1" || -n "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
     return 0
   fi
-  systemctl enable frpc >/dev/null && systemctl restart frpc
+  if frp_is_darwin; then
+    frp_macos_launchd_set_enabled enable
+    if frp_macos_launchd_running; then
+      frp_macos_launchd_kickstart
+    else
+      frp_macos_launchd_bootstrap
+    fi
+  else
+    systemctl enable frpc >/dev/null && systemctl restart frpc
+  fi
+}
+
+frp_client_service_status() {
+  if [[ "${FRP_SKIP_SYSTEMD:-}" == "1" || -n "${FRP_CLIENT_TEST_ROOT:-}" ]]; then
+    printf 'test'
+  elif frp_is_darwin; then
+    frp_macos_launchd_running && printf 'active' || printf 'inactive'
+  else
+    systemctl is-active frpc 2>/dev/null || printf 'unknown'
+  fi
 }
 
 frp_client_wait_proxies() {
@@ -3352,6 +3379,10 @@ frp_client_install_management_files() {
     echo "ERROR: missing ${source}/lib/frp-common.sh" >&2
     return 1
   }
+  [[ -f "${source}/lib/frp-macos.sh" ]] || {
+    echo "ERROR: missing ${source}/lib/frp-macos.sh" >&2
+    return 1
+  }
   [[ -f "${source}/lib/frp_mgmt_auth.py" ]] || {
     echo "ERROR: missing ${source}/lib/frp_mgmt_auth.py" >&2
     return 1
@@ -3382,6 +3413,7 @@ frp_client_install_management_files() {
   }
   install -m 0644 "${source}/lib/frp-client-common.sh" "${libdir}/frp-client-common.sh"
   install -m 0644 "${source}/lib/frp-common.sh" "${libdir}/frp-common.sh"
+  install -m 0644 "${source}/lib/frp-macos.sh" "${libdir}/frp-macos.sh"
   install -m 0644 "${source}/lib/frp_mgmt_auth.py" "${libdir}/frp_mgmt_auth.py"
   install -m 0644 "${source}/lib/frp-doctor-common.sh" "${libdir}/frp-doctor-common.sh"
   install -m 0644 "${source}/lib/frp_doctor.py" "${libdir}/frp_doctor.py"
@@ -3389,6 +3421,10 @@ frp_client_install_management_files() {
   install -m 0644 "${source}/lib/frp_ctl_repl.py" "${libdir}/frp_ctl_repl.py"
   install -m 0755 "${source}/tools/frp-client" "${bindir}/frp-client"
   install -m 0755 "${source}/tools/frpctl" "${bindir}/frpctl"
+  if [[ -f "${source}/client/${FRP_MACOS_LAUNCHD_LABEL}.plist" ]]; then
+    install -m 0644 "${source}/client/${FRP_MACOS_LAUNCHD_LABEL}.plist" \
+      "${libdir}/${FRP_MACOS_LAUNCHD_LABEL}.plist"
+  fi
   frp_client_upgrade_source_version "$source"
   frp_client_write_version_file
 }
@@ -3398,6 +3434,8 @@ frp_client_upgrade_destinations() {
   printf '%s\n' \
     "usr/local/lib/frp-auto-deploy/frp-client-common.sh:0644:lib/frp-client-common.sh" \
     "usr/local/lib/frp-auto-deploy/frp-common.sh:0644:lib/frp-common.sh" \
+    "usr/local/lib/frp-auto-deploy/frp-macos.sh:0644:lib/frp-macos.sh" \
+    "usr/local/lib/frp-auto-deploy/com.datarelay.frp-auto-deploy.frpc.plist:0644:client/com.datarelay.frp-auto-deploy.frpc.plist" \
     "usr/local/lib/frp-auto-deploy/frp_mgmt_auth.py:0644:lib/frp_mgmt_auth.py" \
     "usr/local/lib/frp-auto-deploy/frp-doctor-common.sh:0644:lib/frp-doctor-common.sh" \
     "usr/local/lib/frp-auto-deploy/frp_doctor.py:0644:lib/frp_doctor.py" \

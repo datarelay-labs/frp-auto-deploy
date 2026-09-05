@@ -30,6 +30,9 @@ python3 tests/test-mgmt-identity.py
 ./tests/test-client-config.sh
 ./tests/test-client-allocator-url.sh
 ./tests/test-client-platform.sh
+for macos_test in ./tests/test-macos-*.sh; do
+  "$macos_test"
+done
 ./tests/test-portability.sh
 ./tests/test-server-install-config.sh
 ./tests/test-public-hostname.sh

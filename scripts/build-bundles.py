@@ -87,7 +87,9 @@ client_files=[
  'VERSION',
  'release-manifest.json',
  'install-client.sh',
+ 'uninstall-client.sh',
  'lib/frp-common.sh',
+ 'lib/frp-macos.sh',
  'lib/frp-client-common.sh',
  'lib/frp_mgmt_auth.py',
  'lib/frp-doctor-common.sh',
@@ -96,13 +98,20 @@ client_files=[
  'lib/frp_ctl_repl.py',
  'tools/frp-client',
  'tools/frpctl',
+ 'client/com.datarelay.frp-auto-deploy.frpc.plist',
 ]
-client_lines=['#!/usr/bin/env bash','set -euo pipefail','TMP="$(mktemp -d)"','trap \'rm -rf "$TMP"\' EXIT']
+client_lines=[
+ '#!/usr/bin/env bash',
+ 'set -euo pipefail',
+ '_frp_b64d() { base64 --decode 2>/dev/null || base64 -D; }',
+ 'TMP="$(mktemp -d)"',
+ 'trap \'rm -rf "$TMP"\' EXIT',
+]
 for rel in client_files:
     data=base64.b64encode(bundle_payload(rel)).decode()
     parent=str(Path(rel).parent)
     if parent!='.': client_lines.append(f'mkdir -p "$TMP/{parent}"')
-    client_lines.append(f"base64 -d >\"$TMP/{rel}\" <<'B64'")
+    client_lines.append(f"_frp_b64d >\"$TMP/{rel}\" <<'B64'")
     for i in range(0,len(data),76): client_lines.append(data[i:i+76])
     client_lines.append('B64')
 for rel in client_files:
