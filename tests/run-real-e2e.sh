@@ -369,7 +369,9 @@ create_zero_touch() {
     python3 - "$out" "$cmd_out" <<'PY'
 import re, sys
 text = open(sys.argv[1], encoding="utf-8").read()
-cmd = re.search(r"^curl -fsSL .* bash$", text, re.M)
+# Short URL: curl ... | sudo bash
+# zt1 fallback: curl ... | sudo bash -s -- 'zt1....'
+cmd = re.search(r"^curl -fsSL .*\| sudo bash(?: -s -- 'zt1\.[^']+')?$", text, re.M)
 if not cmd:
     raise SystemExit("missing one-line command")
 open(sys.argv[2], "w", encoding="utf-8").write(cmd.group(0) + "\n")
