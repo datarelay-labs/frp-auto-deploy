@@ -85,6 +85,28 @@ def _load_client_registry():
 CREG = _load_client_registry()
 
 
+def _load_enrollment_lifecycle():
+    candidates = [
+        Path(__file__).resolve().parent / 'frp_enrollment_lifecycle.py',
+        Path(__file__).resolve().parent.parent / 'lib' / 'frp_enrollment_lifecycle.py',
+        Path('/usr/local/lib/frp-auto-deploy/frp_enrollment_lifecycle.py'),
+    ]
+    root = os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
+    if root:
+        candidates.insert(0, Path(root) / 'usr/local/lib/frp-auto-deploy' / 'frp_enrollment_lifecycle.py')
+        candidates.insert(0, Path(root) / 'lib' / 'frp_enrollment_lifecycle.py')
+    for path in candidates:
+        if path.is_file():
+            spec = importlib.util.spec_from_file_location('frp_enrollment_lifecycle', path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+    return None
+
+
+ELC = _load_enrollment_lifecycle()
+
+
 def _load_zero_touch():
     candidates = [
         Path(__file__).resolve().parent.parent / 'lib' / 'frp_zero_touch.py',
@@ -358,12 +380,27 @@ def bootstrap_file_path(bootstrap_dir, ticket_id):
     return Path(bootstrap_dir) / (ticket_id.lower() + '.json')
 
 
-def cleanup_expired_bootstrap_tickets(bootstrap_dir, now=None, keep_id=None):
-    """Retain ticket metadata so administrators can audit expired enrollments."""
-    return
+def cleanup_expired_bootstrap_tickets(bootstrap_dir, now=None, keep_id=None, cfg=None, force=False):
+    """Pair-aware retention cleanup for terminal enrollment metadata.
+
+    Active / in-retention terminal records are preserved. keep_id is accepted
+    for call-site compatibility and is unused (cleanup never targets active rows).
+    """
+    del keep_id
+    if ELC is None or not cfg:
+        return
+    try:
+        ELC.maybe_run_retention_cleanup(
+            cfg,
+            force=force,
+            audit_emit=ELC.load_audit_emit(),
+            now=now,
+        )
+    except Exception:
+        return
 
 
-def issue_bootstrap_ticket(enrollments_dir, bootstrap_dir, services, ttl, note='', label=''):
+def issue_bootstrap_ticket(enrollments_dir, bootstrap_dir, services, ttl, note='', label='', cfg=None):
     """Create a hashed bootstrap ticket plus a normal enrollment record.
 
     Does not allocate a public port. Caller must have already validated
@@ -414,7 +451,14 @@ def issue_bootstrap_ticket(enrollments_dir, bootstrap_dir, services, ttl, note='
             os.chmod(str(enrollments_dir), 0o700)
         except OSError:
             pass
-    cleanup_expired_bootstrap_tickets(bootstrap_dir, now)
+    cleanup_cfg = cfg
+    if cleanup_cfg is None:
+        cleanup_cfg = {
+            'enrollments_dir': str(enrollments_dir),
+            'bootstrap_dir': str(bootstrap_dir),
+            'registry_file': str(Path(enrollments_dir).parent / 'registry.json'),
+        }
+    cleanup_expired_bootstrap_tickets(bootstrap_dir, now, cfg=cleanup_cfg, force=True)
     enroll_path = enrollment_file_path(enrollments_dir, enrollment_id)
     ticket_path = bootstrap_file_path(bootstrap_dir, ticket_id)
     if enroll_path is None or ticket_path is None:
@@ -876,13 +920,25 @@ class Allocator:
     def save_bootstrap(self, path, record):
         atomic_write_json(path, record, mode=0o600)
 
-    def cleanup_expired_bootstrap_tickets(self, now=None, keep_id=None):
-        cleanup_expired_bootstrap_tickets(self.bootstrap_dir, now, keep_id=keep_id)
+    def cleanup_expired_bootstrap_tickets(self, now=None, keep_id=None, force=False):
+        cleanup_expired_bootstrap_tickets(
+            self.bootstrap_dir,
+            now,
+            keep_id=keep_id,
+            cfg=self.cfg,
+            force=force,
+        )
 
     def issue_bootstrap_ticket(self, services, ttl, note='', label=''):
         ensure_secret_dir(self.bootstrap_dir, 0o700)
         return issue_bootstrap_ticket(
-            self.enrollments_dir, self.bootstrap_dir, services, ttl, note, label=label
+            self.enrollments_dir,
+            self.bootstrap_dir,
+            services,
+            ttl,
+            note,
+            label=label,
+            cfg=self.cfg,
         )
 
     def _invalid_ticket_response(self):
@@ -1115,15 +1171,10 @@ class Allocator:
 
     def cleanup_expired_enrollments(self):
         now = int(time.time())
-        for path in self.enrollments_dir.glob('*.json'):
-            try:
-                record = load_json(path)
-                if int(record.get('expires_at', 0)) < now - 86400:
-                    path.unlink(missing_ok=True)
-            except Exception:
-                continue
+        # Enrollment/bootstrap metadata uses pair-aware retention (default 30d).
+        # Do not independently delete enrollment files; that left orphan tickets.
         self.expire_nonces(now)
-        self.cleanup_expired_bootstrap_tickets(now)
+        self.cleanup_expired_bootstrap_tickets(now, force=True)
 
     def load_nonces(self):
         path = self.nonce_file

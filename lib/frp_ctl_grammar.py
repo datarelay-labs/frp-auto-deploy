@@ -153,7 +153,7 @@ def canonical_verbs(role):
         "update",
     ]
     if server:
-        verbs.extend(["set", "unset", "create", "revoke", "release", "restore"])
+        verbs.extend(["set", "unset", "create", "revoke", "purge", "release", "restore"])
     if client:
         verbs.extend(["add", "enable", "disable", "apply", "discard", "set"])
     return sorted(set(verbs))
@@ -350,6 +350,8 @@ def _root_help(role):
                 "  create enrollments --count N",
                 "  create backup",
                 "  revoke enrollment <id>",
+                "  purge enrollment <id>",
+                "  purge enrollments --older-than <days>",
                 "  revoke client <ID>",
                 "  release service <ID> <service-id>",
                 "  release client <ID>",
@@ -498,6 +500,15 @@ def _verb_help(verb, role):
             "  revoke client <ID>\n"
             "  revoke enrollment <id>\n\n"
             "revoke client removes management identity and keeps port reservations.\n"
+            "revoke enrollment prevents a pending or bound enrollment credential from being used.\n"
+        ),
+        "purge": (
+            "Purge\n=====\n\nUsage:\n"
+            "  purge enrollment <id>\n"
+            "  purge enrollments --older-than <days>\n\n"
+            "purge permanently removes terminal enrollment metadata "
+            "(expired, completed, or revoked).\n"
+            "Active pending or bound enrollments must be revoked first.\n"
         ),
         "release": (
             "Release\n=======\n\nUsage:\n"
@@ -744,6 +755,13 @@ def context_help(tokens, role, names=None, clients=None):
                 ("enrollment", "Revoke a pending enrollment"),
             ]
         )
+    if verb == "purge":
+        return _fmt_available(
+            [
+                ("enrollment", "Permanently remove one terminal enrollment"),
+                ("enrollments", "Bulk purge terminal enrollments by age"),
+            ]
+        )
     if verb == "restore":
         return _fmt_available([("backup", "Restore from a backup archive")])
     return help_text(tokens, role)
@@ -778,6 +796,7 @@ def _concise_root(role):
         ("unset", "Remove configuration values"),
         ("create", "Create enrollment or backup"),
         ("revoke", "Revoke management access"),
+        ("purge", "Remove terminal enrollment metadata"),
         ("release", "Return reserved public ports"),
         ("update", "Update project or FRP"),
         ("restore", "Restore backup"),
@@ -788,12 +807,12 @@ def _concise_root(role):
         ("exit", "Leave frpctl"),
     ]
     if not server:
-        hide = {"create", "revoke", "release", "restore"}
+        hide = {"create", "revoke", "purge", "release", "restore"}
         if not client:
             hide.update({"set", "unset"})
         rows = [(n, d) for n, d in rows if n not in hide]
         if client:
-            rows = [(n, d) for n, d in rows if n not in {"revoke", "release", "restore", "create"}]
+            rows = [(n, d) for n, d in rows if n not in {"revoke", "purge", "release", "restore", "create"}]
             extra = [
                 ("add", "Add a local service"),
                 ("enable", "Enable a local service"),
@@ -833,6 +852,7 @@ def match(tokens, role, names=None, clients=None):
         "unset": _match_unset,
         "create": _match_create,
         "revoke": _match_revoke,
+        "purge": _match_purge,
         "release": _match_release,
         "update": _match_update,
         "restore": _match_restore,
@@ -856,7 +876,7 @@ def match(tokens, role, names=None, clients=None):
     fn = handlers.get(verb)
     if fn is None:
         return {"status": "unknown", "command": verb}
-    if verb in ("set", "unset", "create", "revoke", "release", "restore") and not server and verb != "set":
+    if verb in ("set", "unset", "create", "revoke", "purge", "release", "restore") and not server and verb != "set":
         if verb == "set" and client:
             return fn(tokens, role, names)
         return {"status": "role", "need": "server", "command": verb}
@@ -1212,6 +1232,39 @@ def _match_revoke(tokens, role, names=None):
     }
 
 
+def _match_purge(tokens, role, names=None):
+    if len(tokens) == 1:
+        return incomplete(
+            "Missing resource.",
+            ["purge enrollment <ID>", "purge enrollments --older-than <days>"],
+            ["enrollment", "enrollments"],
+        )
+    if tokens[1] == "enrollment":
+        if len(tokens) < 3:
+            return incomplete("Missing enrollment id.", ["purge enrollment <ID>"])
+        return {"status": "ok", "action": "purge_enrollment", "id": tokens[2]}
+    if tokens[1] == "enrollments":
+        older_than = None
+        idx = 2
+        while idx < len(tokens):
+            if tokens[idx] == "--older-than" and idx + 1 < len(tokens):
+                try:
+                    older_than = int(tokens[idx + 1])
+                except ValueError:
+                    return incomplete("Invalid --older-than value.", ["purge enrollments --older-than <days>"])
+                idx += 2
+                continue
+            return incomplete("Unexpected arguments.", ["purge enrollments --older-than <days>"])
+        if older_than is None:
+            return incomplete("Missing --older-than.", ["purge enrollments --older-than <days>"])
+        return {"status": "ok", "action": "purge_enrollments", "older_than": older_than}
+    return incomplete(
+        "Unknown purge resource.",
+        ["purge enrollment <ID>", "purge enrollments --older-than <days>"],
+        ["enrollment", "enrollments"],
+    )
+
+
 def _match_release(tokens, role, names=None):
     if len(tokens) == 1:
         return incomplete(
@@ -1324,6 +1377,7 @@ def _tab_desc_map(line, role, names=None, clients=None):
         "unset": "Remove configuration values",
         "create": "Create zero-touch enrollment or backup",
         "revoke": "Revoke management access",
+        "purge": "Remove terminal enrollment metadata",
         "release": "Return reserved public ports",
         "update": "Update project or FRP",
         "restore": "Restore backup",
@@ -1415,6 +1469,11 @@ def _tab_desc_map(line, role, names=None, clients=None):
             "client": "Revoke management identity",
             "enrollment": "Revoke a pending enrollment",
         }, "named"
+    if verb == "purge" and len(filled) == 1:
+        return {
+            "enrollment": "Permanently remove one terminal enrollment",
+            "enrollments": "Bulk purge terminal enrollments by age",
+        }, "named"
     if verb == "release" and len(filled) == 1:
         return {
             "client": "Release all reserved ports for a client",
@@ -1495,7 +1554,7 @@ def _canonical_completion(tokens, trailing, role, names, services, local_service
         return _filter(canonical_verbs(role), prefix)
     verb = filled[0]
     if verb == "help":
-        topics = ["show", "set", "unset", "create", "update", "revoke", "release", "legacy"]
+        topics = ["show", "set", "unset", "create", "update", "revoke", "purge", "release", "legacy"]
         if len(filled) == 1:
             return _filter(topics, prefix)
         if filled[1] == "show" and len(filled) == 2:
@@ -1557,6 +1616,12 @@ def _canonical_completion(tokens, trailing, role, names, services, local_service
             return _filter(["client", "enrollment"], prefix)
         if filled[1] == "client" and len(filled) == 2:
             return _filter(names, prefix)
+        return []
+    if verb == "purge":
+        if len(filled) == 1:
+            return _filter(["enrollment", "enrollments"], prefix)
+        if filled[1] == "enrollments" and len(filled) == 2:
+            return _filter(["--older-than"], prefix)
         return []
     if verb == "release":
         if len(filled) == 1:

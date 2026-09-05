@@ -1105,6 +1105,7 @@ cfg = {
     'registry_file': '/var/lib/frp-auto-deploy/registry.json',
     'enrollments_dir': '/var/lib/frp-auto-deploy/enrollments',
     'bootstrap_dir': '/var/lib/frp-auto-deploy/bootstrap',
+    'enrollment_retention_days': 30,
     'token_file': '/etc/frp/server_token',
     'client_installer_url': sys.argv[10],
     'tls_ca_cert': pki.rstrip('/') + '/ca.crt',

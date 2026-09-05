@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Enrollment retention hardening: terminal records (`expired`, `completed`,
+  `revoked`) retained for `enrollment_retention_days` (default 30), then
+  pair-aware automatic cleanup; `purge enrollment` / `purge enrollments
+  --older-than` for manual housekeeping; audit log retention unchanged
+
 ## 2.1.3 — 2026-09-04
 
 Feature release on top of published **v2.1.2**. FRP remains pinned at

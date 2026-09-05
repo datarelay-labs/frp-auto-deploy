@@ -143,6 +143,28 @@ Lifecycle (unchanged binding rules):
 Treat the generated one-line command as sensitive until used, expired, or
 revoked.
 
+## 6a. Enrollment retention and purge
+
+Terminal enrollment metadata (`expired`, `completed`, `revoked`) is retained on
+disk for `enrollment_retention_days` (default **30**) so operators can review
+recent history with `show enrollments`. After that period, records become
+eligible for automatic cleanup during enrollment issuance or allocator startup.
+
+- `revoke enrollment` — security lifecycle; blocks pending/bound credentials
+- `purge enrollment` — housekeeping lifecycle; permanently removes terminal metadata
+- Automatic cleanup is pair-aware for zero-touch (bootstrap ticket + paired enrollment)
+- Malformed or inconsistent pairs are never silently deleted (fail closed; see `doctor`)
+- Audit log retention is independent; purging enrollment JSON does not delete audit events
+- Non-interactive purge requires `FRP_ENROLLMENT_PURGE_YES=yes`
+
+Terminal timestamp policy:
+
+| State | Retention age calculated from |
+|-------|------------------------------|
+| expired | `expires_at` |
+| completed | `completed_at` or `used_at` |
+| revoked | `revoked_at` |
+
 ## 7. ECDSA management identity
 
 After enrollment, the client keeps a local ECDSA P-256 key:

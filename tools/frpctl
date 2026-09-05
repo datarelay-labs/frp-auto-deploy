@@ -1353,10 +1353,10 @@ frpctl_known_commands() {
   fi
   if [[ "$server" == "1" ]]; then
     printf '%s\n' clients client client-info client-set edit-client enroll create-client \
-      enroll-bulk enrollments enrollment-revoke \
+      enroll-bulk enrollments enrollment-revoke enrollment-purge \
       revoke revoke-client release-service release-client \
       backup restore project-update frp-update upstream audit \
-      server-status server-update set unset create release
+      server-status server-update set unset create release purge
   fi
 }
 
@@ -1791,6 +1791,8 @@ frpctl_dispatch_canonical() {
     create_backup) frpctl_require_server || return 1; frpctl_run frp-backup $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
     revoke_client) frpctl_require_server || return 1; frpctl_invoke frp-revoke-client "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("client",""))' "$result")" $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
     revoke_enrollment) frpctl_require_server || return 1; frpctl_invoke frp-enrollment-revoke "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("id",""))' "$result")" ;;
+    purge_enrollment) frpctl_require_server || return 1; frpctl_invoke frp-enrollment-purge enrollment "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("id",""))' "$result")" ;;
+    purge_enrollments) frpctl_require_server || return 1; frpctl_invoke frp-enrollment-purge enrollments --older-than "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("older_than",""))' "$result")" ;;
     release_client) frpctl_require_server || return 1; frpctl_invoke frp-release-client "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("client",""))' "$result")" $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
     release_service) frpctl_require_server || return 1; frpctl_invoke frp-release-service "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("client",""))' "$result")" "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("service",""))' "$result")" $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
     update_default) frpctl_update $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("passthrough") or []))' "$result") ;;
