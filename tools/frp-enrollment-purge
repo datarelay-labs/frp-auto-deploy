@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""Permanently remove terminal enrollment metadata (manual or zero-touch)."""
+import argparse
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+ROOT = os.environ.get('FRP_DEPLOY_TEST_ROOT', '')
+CONFIG = Path(ROOT + '/etc/frp-auto-deploy/config.json')
+PURGE_ENV = 'FRP_ENROLLMENT_PURGE_YES'
+
+
+def remap(path):
+    path = Path(path)
+    if ROOT and not str(path).startswith(ROOT):
+        return Path(ROOT + str(path))
+    return path
+
+
+def load_lifecycle():
+    import importlib.util
+    here = Path(__file__).resolve()
+    for path in (
+        here.parent.parent / 'lib' / 'frp_enrollment_lifecycle.py',
+        Path('/usr/local/lib/frp-auto-deploy/frp_enrollment_lifecycle.py'),
+    ):
+        if path.is_file():
+            spec = importlib.util.spec_from_file_location('frp_enrollment_lifecycle', str(path))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+    raise SystemExit('ERROR: enrollment lifecycle module is unavailable')
+
+
+def purge_env_confirmed():
+    return os.environ.get(PURGE_ENV, '').strip().lower() == 'yes'
+
+
+def confirm_yes(prompt):
+    if purge_env_confirmed():
+        return True
+    if not sys.stdin.isatty():
+        raise SystemExit(
+            'ERROR: confirmation required; use an interactive terminal or set %s=yes'
+            % PURGE_ENV
+        )
+    answer = input(prompt).strip().lower()
+    return answer in ('y', 'yes')
+
+
+def audit_emit(event, **kwargs):
+    lifecycle = load_lifecycle()
+    emit = lifecycle.load_audit_emit()
+    if emit:
+        emit(event, **kwargs)
+
+
+def cmd_purge_one(target_id, force, lifecycle, cfg):
+    target_id = target_id.strip().lower()
+    if len(target_id) != 16 or any(c not in '0123456789abcdef' for c in target_id):
+        raise SystemExit('ERROR: enrollment ID must be 16 hexadecimal characters')
+
+    enrollments = remap(cfg['enrollments_dir'])
+    bootstrap = remap(cfg.get('bootstrap_dir') or str(Path(cfg['enrollments_dir']).parent / 'bootstrap'))
+    registry = remap(cfg.get('registry_file') or str(bootstrap.parent / 'registry.json'))
+    now = int(time.time())
+    rows = lifecycle.collect_logical_enrollments(enrollments, bootstrap, now)
+    row = lifecycle.resolve_target(rows, target_id)
+    if row is None:
+        raise SystemExit('ERROR: enrollment not found')
+
+    state = row.get('state')
+    if state in lifecycle.ACTIVE_STATES:
+        raise SystemExit(
+            'ERROR: active enrollment cannot be purged.\n'
+            'Revoke it first:\n'
+            '  revoke enrollment %s' % row.get('id')
+        )
+    if state not in lifecycle.TERMINAL_STATES:
+        raise SystemExit('ERROR: enrollment is not in a terminal state')
+    if row.get('pair_error'):
+        raise SystemExit('ERROR: %s' % row['pair_error'])
+
+    print('Enrollment')
+    print('==========')
+    print('ID    : %s' % row.get('id'))
+    print('Type  : %s' % row.get('type'))
+    print('State : %s' % state)
+    print()
+    print('This permanently removes retained enrollment metadata.')
+    if not force or not sys.stdin.isatty():
+        if not confirm_yes('Proceed? [y/N]: '):
+            raise SystemExit('Cancelled')
+    elif force and not purge_env_confirmed() and not sys.stdin.isatty():
+        raise SystemExit(
+            'ERROR: confirmation required; use an interactive terminal or set %s=yes'
+            % PURGE_ENV
+        )
+
+    lifecycle.purge_enrollment_by_id(
+        target_id,
+        enrollments,
+        bootstrap,
+        registry,
+        audit_emit=audit_emit,
+        now=now,
+    )
+    print('Purged enrollment %s' % row.get('id'))
+    return 0
+
+
+def cmd_purge_bulk(older_than, force, lifecycle, cfg):
+    enrollments = remap(cfg['enrollments_dir'])
+    bootstrap = remap(cfg.get('bootstrap_dir') or str(Path(cfg['enrollments_dir']).parent / 'bootstrap'))
+    registry = remap(cfg.get('registry_file') or str(bootstrap.parent / 'registry.json'))
+    preview = lifecycle.preview_bulk_purge(enrollments, bootstrap, older_than)
+    counts = preview['counts']
+    print('Enrollment purge preview')
+    print('========================')
+    print()
+    print('Retention threshold : %s days' % preview['older_than_days'])
+    print('Matched records     : %s' % preview['total'])
+    print()
+    print('expired             : %s' % counts.get('expired', 0))
+    print('completed           : %s' % counts.get('completed', 0))
+    print('revoked             : %s' % counts.get('revoked', 0))
+    print()
+    if preview['total'] == 0:
+        print('No matching terminal records.')
+        return 0
+    if not force or not sys.stdin.isatty():
+        if not confirm_yes('Proceed? [y/N]: '):
+            raise SystemExit('Cancelled')
+    purged, _preview = lifecycle.bulk_purge_enrollments(
+        enrollments,
+        bootstrap,
+        registry,
+        older_than,
+        audit_emit=audit_emit,
+    )
+    print('Purged %s enrollment record(s).' % purged)
+    return 0
+
+
+def main(argv=None):
+    lifecycle = load_lifecycle()
+    parser = argparse.ArgumentParser(
+        description='Permanently remove terminal enrollment metadata'
+    )
+    parser.add_argument(
+        '--force',
+        action='store_true',
+        help='skip interactive confirmation on a TTY (non-TTY still requires %s=yes)' % PURGE_ENV,
+    )
+    ns, tokens = parser.parse_known_args(argv)
+    cfg = json.loads(CONFIG.read_text(encoding='utf-8'))
+    tokens = list(tokens or [])
+
+    if not tokens:
+        parser.print_help()
+        return 2
+
+    if tokens[0] == 'enrollment':
+        if len(tokens) < 2:
+            raise SystemExit('ERROR: missing enrollment id')
+        return cmd_purge_one(tokens[1], ns.force, lifecycle, cfg)
+
+    if tokens[0] == 'enrollments':
+        older_than = None
+        idx = 1
+        while idx < len(tokens):
+            if tokens[idx] == '--older-than' and idx + 1 < len(tokens):
+                try:
+                    older_than = int(tokens[idx + 1])
+                except ValueError:
+                    raise SystemExit('ERROR: --older-than requires an integer number of days')
+                idx += 2
+                continue
+            raise SystemExit('ERROR: usage: enrollments --older-than DAYS')
+        if older_than is None:
+            raise SystemExit('ERROR: --older-than is required')
+        return cmd_purge_bulk(older_than, ns.force, lifecycle, cfg)
+
+    if len(tokens) == 1:
+        return cmd_purge_one(tokens[0], ns.force, lifecycle, cfg)
+
+    parser.print_help()
+    return 2
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
