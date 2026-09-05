@@ -257,11 +257,11 @@ pass "MANUAL_ENROLLMENT_COMPAT"
 # --- Legacy one-line compatibility ---
 "$CTL" create enrollment --one-line --ssh --ssh-user aella --client-name legacy01 \
   >"$WORKDIR/legacy-oneline.out"
-grep -qx 'DISPATCH frp-create-client --one-line --ssh --ssh-user aella --client-name legacy01' \
+grep -Eqx 'DISPATCH frp-create-client( --platform linux)? --one-line --ssh --ssh-user aella --client-name legacy01' \
   "$WORKDIR/legacy-oneline.out" || fail "legacy create enrollment --one-line"
 run_repl "$SERVER" "$WORKDIR/legacy-enroll.out" "enroll --one-line --ssh --ssh-user aella" exit \
   || fail "legacy enroll --one-line"
-grep -q 'DISPATCH frp-create-client --one-line --ssh --ssh-user aella' \
+grep -Eq 'DISPATCH frp-create-client( --platform linux)? --one-line --ssh --ssh-user aella' \
   "$WORKDIR/legacy-enroll.out" || fail "legacy enroll dispatch"
 pass "LEGACY_ONE_LINE_COMPAT"
 

@@ -169,7 +169,7 @@ grep -qx 'DISPATCH frp-create-client' "$WORKDIR/server-create.out" || fail "crea
 "$CTL" enroll >"$WORKDIR/server-enroll.out"
 grep -qx 'DISPATCH frp-create-client' "$WORKDIR/server-enroll.out" || fail "enroll dispatch"
 "$CTL" enroll --one-line --ssh >"$WORKDIR/server-enroll-ssh.out"
-grep -qx 'DISPATCH frp-create-client --one-line --ssh' "$WORKDIR/server-enroll-ssh.out" \
+grep -Eqx 'DISPATCH frp-create-client( --platform linux)? --one-line --ssh' "$WORKDIR/server-enroll-ssh.out" \
   || fail "enroll --one-line --ssh dispatch"
 pass "FRPCTL_ENROLL_ONE_LINE_DISPATCH"
 "$CTL" client-info customer-dp >"$WORKDIR/server-info.out"
@@ -332,7 +332,7 @@ run_repl "$SERVER" "$WORKDIR/guided-enroll.out" menu 3 1 zt-ssh-client "" aella 
 grep -q 'Create enrollment' "$WORKDIR/guided-enroll.out" || fail "guided enroll heading"
 grep -q 'Zero-touch SSH' "$WORKDIR/guided-enroll.out" || fail "guided enroll zero-touch option"
 grep -q 'Manual Enrollment Code' "$WORKDIR/guided-enroll.out" || fail "guided enroll manual option"
-grep -q 'DISPATCH frp-create-client --one-line --ssh --ssh-user aella --ssh-port 22 --client-name zt-ssh-client' \
+grep -Eq 'DISPATCH frp-create-client( --platform linux)? --one-line --ssh --ssh-user aella --ssh-port 22 --client-name zt-ssh-client' \
   "$WORKDIR/guided-enroll.out" \
   || fail "guided enroll did not dispatch zero-touch"
 pass "FRPCTL_GUIDED_ENROLL_ZERO_TOUCH"
@@ -348,7 +348,7 @@ pass "FRPCTL_GUIDED_ENROLL_MANUAL"
 export FRP_CTL_DRY_RUN=1
 run_repl "$SERVER" "$WORKDIR/enroll-oneline.out" "enroll --one-line --ssh" exit \
   || fail "repl enroll --one-line --ssh"
-grep -q 'DISPATCH frp-create-client --one-line --ssh' "$WORKDIR/enroll-oneline.out" \
+grep -Eq 'DISPATCH frp-create-client( --platform linux)? --one-line --ssh' "$WORKDIR/enroll-oneline.out" \
   || fail "enroll --one-line --ssh dispatch"
 pass "FRPCTL_ENROLL_ONE_LINE_SSH"
 pass "FRPCTL_REPL_SERVER_REVOKE_DISPATCH"
